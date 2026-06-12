@@ -62,6 +62,7 @@ async def test_audit_parses_bedrock_response() -> None:
                                         "is_answered": True,
                                         "first_client_message_id": "m1",
                                         "first_internal_reply_message_id": None,
+                                        "last_internal_message_id": None,
                                         "confidence": 0.94,
                                         "manual_review_required": False,
                                         "issues": [],
@@ -87,3 +88,47 @@ async def test_audit_parses_bedrock_response() -> None:
     assert result.input_tokens == 123
     assert result.output_tokens == 45
 
+
+@pytest.mark.asyncio
+async def test_audit_parses_fenced_json_response() -> None:
+    decision = {
+        "classification": "valid_client_request",
+        "is_valid_client_request": True,
+        "is_answered": False,
+        "first_client_message_id": "m1",
+        "first_internal_reply_message_id": None,
+        "last_internal_message_id": None,
+        "confidence": 0.92,
+        "manual_review_required": True,
+        "issues": ["No internal reply found."],
+    }
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "output": {
+                    "message": {
+                        "content": [
+                            {
+                                "text": f"```json\n{json.dumps(decision)}\n```",
+                            }
+                        ]
+                    }
+                },
+                "usage": {"inputTokens": 100, "outputTokens": 20},
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        result = await audit_with_bedrock(
+            payload(),
+            Settings(AWS_BEARER_TOKEN_BEDROCK="token"),
+            client,
+        )
+
+    assert result.confidence == 0.92
+    assert result.manual_review_required is True
+    assert result.input_tokens == 100
+    assert result.output_tokens == 20

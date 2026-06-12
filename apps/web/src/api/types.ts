@@ -19,6 +19,8 @@ export interface Metrics {
   avg_first_response_minutes: number | null;
   median_first_response_minutes: number | null;
   p90_first_response_minutes: number | null;
+  avg_resolution_minutes: number | null;
+  median_resolution_minutes: number | null;
   report_confidence: number;
   ai_input_tokens: number;
   ai_output_tokens: number;
@@ -30,6 +32,9 @@ export interface AnalysisRun {
   config: {
     date_from: string;
     date_to: string;
+    time_from: string;
+    time_to: string;
+    timezone: string;
     internal_domains: string[];
     ignored_senders: string[];
     ignored_domains: string[];
@@ -57,7 +62,12 @@ export interface EmailThread {
   is_answered: boolean;
   first_client_message_id: string | null;
   first_internal_reply_message_id: string | null;
+  last_internal_message_id: string | null;
+  first_client_message_at: string | null;
+  first_internal_reply_at: string | null;
+  last_internal_message_at: string | null;
   response_time_minutes: number | null;
+  resolution_time_minutes: number | null;
   manual_review_required: boolean;
   manual_override_applied: boolean;
   reasons: string[];
@@ -82,4 +92,3 @@ export interface ThreadDetail {
   thread: EmailThread;
   messages: EmailMessage[];
 }
-

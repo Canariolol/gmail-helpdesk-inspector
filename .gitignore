@@ -1,4 +1,6 @@
 .env
+secrets/*
+!secrets/.gitkeep
 
 # Rust
 target/
@@ -19,4 +21,3 @@ apps/ai-worker/src/*.egg-info/
 
 # OS/editor
 .DS_Store
-

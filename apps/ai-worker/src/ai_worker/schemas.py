@@ -30,6 +30,7 @@ class EmailThread(BaseModel):
     is_answered: bool
     first_client_message_id: str | None = None
     first_internal_reply_message_id: str | None = None
+    last_internal_message_id: str | None = None
     manual_review_required: bool
     reasons: list[str] = Field(default_factory=list)
 
@@ -62,6 +63,7 @@ class AuditThreadResponse(BaseModel):
     is_answered: bool
     first_client_message_id: str | None = None
     first_internal_reply_message_id: str | None = None
+    last_internal_message_id: str | None = None
     confidence: float = Field(ge=0, le=1)
     manual_review_required: bool
     issues: list[str] = Field(default_factory=list)
@@ -75,7 +77,7 @@ class ClaudeDecision(BaseModel):
     is_answered: bool
     first_client_message_id: str | None = None
     first_internal_reply_message_id: str | None = None
+    last_internal_message_id: str | None = None
     confidence: float = Field(ge=0, le=1)
     manual_review_required: bool
     issues: list[str] = Field(default_factory=list)
-

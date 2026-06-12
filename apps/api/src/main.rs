@@ -9,12 +9,18 @@ mod storage;
 use std::sync::Arc;
 
 use anyhow::Context;
-use axum::Router;
+use axum::{
+    Router,
+    http::{HeaderName, HeaderValue, Method, header},
+};
 use config::AppConfig;
 use firestore::FirestoreStorage;
 use http::AppState;
 use storage::{MemoryStorage, StorageRepository};
-use tower_http::{cors::CorsLayer, trace::TraceLayer};
+use tower_http::{
+    cors::{AllowOrigin, CorsLayer},
+    trace::TraceLayer,
+};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
@@ -43,10 +49,21 @@ async fn main() -> anyhow::Result<()> {
 }
 
 pub fn build_app(config: AppConfig, storage: Arc<dyn StorageRepository>) -> Router {
+    let cors = CorsLayer::new()
+        .allow_origin(AllowOrigin::exact(
+            HeaderValue::from_str(&config.web_base_url).expect("valid WEB_BASE_URL"),
+        ))
+        .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::OPTIONS])
+        .allow_headers([
+            header::ACCEPT,
+            header::AUTHORIZATION,
+            header::CONTENT_TYPE,
+            HeaderName::from_static("x-requested-with"),
+        ])
+        .allow_credentials(true);
     let state = AppState::new(config, storage);
 
     http::router(state)
-        .layer(CorsLayer::permissive())
+        .layer(cors)
         .layer(TraceLayer::new_for_http())
 }
-

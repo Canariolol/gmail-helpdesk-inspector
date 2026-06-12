@@ -1,4 +1,7 @@
-use std::{fs, time::{Duration, SystemTime, UNIX_EPOCH}};
+use std::{
+    fs,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use anyhow::{Context, anyhow};
 use async_trait::async_trait;
@@ -91,8 +94,10 @@ impl FirestoreStorage {
     }
 
     async fn service_account_token(&self, path: &str) -> anyhow::Result<CachedToken> {
-        let raw = fs::read_to_string(path).with_context(|| format!("failed to read service account at {path}"))?;
-        let key: ServiceAccountKey = serde_json::from_str(&raw).context("invalid service account json")?;
+        let raw = fs::read_to_string(path)
+            .with_context(|| format!("failed to read service account at {path}"))?;
+        let key: ServiceAccountKey =
+            serde_json::from_str(&raw).context("invalid service account json")?;
         let now = epoch();
         let exp = now + 3600;
         let claims = json!({
@@ -105,9 +110,10 @@ impl FirestoreStorage {
         let jwt = jsonwebtoken::encode(
             &Header::new(Algorithm::RS256),
             &claims,
-            &EncodingKey::from_rsa_pem(key.private_key.as_bytes()).context("invalid service account private key")?,
+            &EncodingKey::from_rsa_pem(key.private_key.as_bytes())
+                .context("invalid service account private key")?,
         )?;
-        let response: TokenResponse = self
+        let response = self
             .client
             .post("https://oauth2.googleapis.com/token")
             .form(&[
@@ -115,10 +121,9 @@ impl FirestoreStorage {
                 ("assertion", jwt.as_str()),
             ])
             .send()
-            .await?
-            .error_for_status()?
-            .json()
             .await?;
+        let response: TokenResponse =
+            json_or_google_error(response, "Firestore service-account token exchange").await?;
         Ok(CachedToken {
             token: response.access_token,
             expires_at_epoch: now + response.expires_in,
@@ -127,7 +132,7 @@ impl FirestoreStorage {
 
     async fn metadata_server_token(&self) -> anyhow::Result<CachedToken> {
         let now = epoch();
-        let response: TokenResponse = self
+        let response = self
             .client
             .get("http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token")
             .header("Metadata-Flavor", "Google")
@@ -135,10 +140,9 @@ impl FirestoreStorage {
             .send()
             .await
             .context("failed to fetch Cloud Run metadata token")?
-            .error_for_status()
-            .context("metadata server token request failed")?
-            .json()
-            .await?;
+            ;
+        let response: TokenResponse =
+            json_or_google_error(response, "Cloud Run metadata token request").await?;
         Ok(CachedToken {
             token: response.access_token,
             expires_at_epoch: now + response.expires_in,
@@ -162,7 +166,12 @@ impl FirestoreStorage {
 
     async fn get<T: DeserializeOwned>(&self, path: &str) -> anyhow::Result<Option<T>> {
         let token = self.token().await?;
-        let response = self.client.get(format!("{}/{}", self.root(), path)).bearer_auth(token).send().await?;
+        let response = self
+            .client
+            .get(format!("{}/{}", self.root(), path))
+            .bearer_auth(token)
+            .send()
+            .await?;
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
         }
@@ -171,7 +180,11 @@ impl FirestoreStorage {
         Ok(Some(serde_json::from_value(value)?))
     }
 
-    async fn list<T: DeserializeOwned>(&self, parent: &str, collection: &str) -> anyhow::Result<Vec<T>> {
+    async fn list<T: DeserializeOwned>(
+        &self,
+        parent: &str,
+        collection: &str,
+    ) -> anyhow::Result<Vec<T>> {
         let token = self.token().await?;
         let url = if parent.is_empty() {
             format!("{}/{}", self.root(), collection)
@@ -230,8 +243,15 @@ impl StorageRepository for FirestoreStorage {
         Ok(runs)
     }
 
-    async fn upsert_thread(&self, thread: &EmailThread, messages: &[EmailMessage]) -> anyhow::Result<()> {
-        let thread_path = format!("analysisRuns/{}/threads/{}", thread.analysis_run_id, thread.id);
+    async fn upsert_thread(
+        &self,
+        thread: &EmailThread,
+        messages: &[EmailMessage],
+    ) -> anyhow::Result<()> {
+        let thread_path = format!(
+            "analysisRuns/{}/threads/{}",
+            thread.analysis_run_id, thread.id
+        );
         self.put(&thread_path, thread).await?;
         for message in messages {
             let sanitized = EmailMessage {
@@ -248,7 +268,11 @@ impl StorageRepository for FirestoreStorage {
     }
 
     async fn list_threads(&self, run_id: &str) -> anyhow::Result<Vec<EmailThread>> {
-        self.list(&format!("analysisRuns/{run_id}"), "threads").await
+        let mut threads: Vec<EmailThread> = self
+            .list(&format!("analysisRuns/{run_id}"), "threads")
+            .await?;
+        threads.sort_by_key(|thread| thread.first_client_message_at.unwrap_or(thread.created_at));
+        Ok(threads)
     }
 
     async fn get_thread(&self, thread_id: &str) -> anyhow::Result<Option<EmailThread>> {
@@ -264,13 +288,29 @@ impl StorageRepository for FirestoreStorage {
         Ok(None)
     }
 
-    async fn list_messages(&self, run_id: &str, thread_id: &str) -> anyhow::Result<Vec<EmailMessage>> {
-        self.list(&format!("analysisRuns/{run_id}/threads/{thread_id}"), "messages").await
+    async fn list_messages(
+        &self,
+        run_id: &str,
+        thread_id: &str,
+    ) -> anyhow::Result<Vec<EmailMessage>> {
+        self.list(
+            &format!("analysisRuns/{run_id}/threads/{thread_id}"),
+            "messages",
+        )
+        .await
     }
 
-    async fn add_ai_audit(&self, run_id: &str, thread_id: &str, audit: &AiAuditResult) -> anyhow::Result<()> {
+    async fn add_ai_audit(
+        &self,
+        run_id: &str,
+        thread_id: &str,
+        audit: &AiAuditResult,
+    ) -> anyhow::Result<()> {
         self.put(
-            &format!("analysisRuns/{run_id}/threads/{thread_id}/aiAudits/{}", Uuid::new_v4()),
+            &format!(
+                "analysisRuns/{run_id}/threads/{thread_id}/aiAudits/{}",
+                Uuid::new_v4()
+            ),
             audit,
         )
         .await
@@ -290,6 +330,12 @@ impl StorageRepository for FirestoreStorage {
             thread.is_answered = review.is_answered;
             thread.first_client_message_id = review.first_client_message_id.clone();
             thread.first_internal_reply_message_id = review.first_internal_reply_message_id.clone();
+            thread.last_internal_message_id = review.last_internal_message_id.clone();
+            thread.first_client_message_at = review.first_client_message_at;
+            thread.first_internal_reply_at = review.first_internal_reply_at;
+            thread.last_internal_message_at = review.last_internal_message_at;
+            thread.response_time_minutes = review.response_time_minutes;
+            thread.resolution_time_minutes = review.resolution_time_minutes;
             thread.manual_review_required = false;
             thread.manual_override_applied = true;
             thread.updated_at = Utc::now();
@@ -344,7 +390,9 @@ fn firestore_fields_to_json(fields: Map<String, Value>) -> anyhow::Result<Value>
 }
 
 fn firestore_value_to_json(value: Value) -> anyhow::Result<Value> {
-    let object = value.as_object().ok_or_else(|| anyhow!("invalid Firestore value"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| anyhow!("invalid Firestore value"))?;
     if let Some(v) = object.get("nullValue") {
         let _ = v;
         return Ok(Value::Null);
@@ -391,4 +439,17 @@ fn epoch() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+async fn json_or_google_error<T: DeserializeOwned>(
+    response: reqwest::Response,
+    label: &str,
+) -> anyhow::Result<T> {
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(anyhow!("{label} failed with {status}: {text}"));
+    }
+    serde_json::from_str(&text)
+        .map_err(|error| anyhow!("{label} returned invalid JSON: {error}; body: {text}"))
 }

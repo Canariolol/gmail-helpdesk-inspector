@@ -44,8 +44,13 @@ impl AppConfig {
         let google = GoogleConfig {
             client_id: env_or("GOOGLE_CLIENT_ID", ""),
             client_secret: env_or("GOOGLE_CLIENT_SECRET", ""),
-            redirect_url: env_or("GOOGLE_REDIRECT_URL", "http://localhost:8080/auth/google/callback"),
-            gmail_max_threads: env_or("GMAIL_MAX_THREADS", "50").parse().context("invalid GMAIL_MAX_THREADS")?,
+            redirect_url: env_or(
+                "GOOGLE_REDIRECT_URL",
+                "http://localhost:8080/auth/google/callback",
+            ),
+            gmail_max_threads: env_or("GMAIL_MAX_THREADS", "50")
+                .parse()
+                .context("invalid GMAIL_MAX_THREADS")?,
         };
 
         if app_storage != "memory" {
@@ -53,7 +58,9 @@ impl AppConfig {
         }
 
         Ok(Self {
-            api_port: env_or("API_PORT", "8080").parse().context("invalid API_PORT")?,
+            api_port: env_or("API_PORT", "8080")
+                .parse()
+                .context("invalid API_PORT")?,
             web_base_url: env_or("WEB_BASE_URL", "http://localhost:5173"),
             api_base_url: env_or("API_BASE_URL", "http://localhost:8080"),
             app_storage,
@@ -66,7 +73,9 @@ impl AppConfig {
                 project_id: env_or("GCP_PROJECT_ID", ""),
                 database_id: env_or("FIRESTORE_DATABASE_ID", "(default)"),
                 bearer_token: empty_to_none(env::var("FIRESTORE_BEARER_TOKEN").ok()),
-                service_account_path: empty_to_none(env::var("GOOGLE_APPLICATION_CREDENTIALS").ok()),
+                service_account_path: empty_to_none(
+                    env::var("GOOGLE_APPLICATION_CREDENTIALS").ok(),
+                ),
             },
             ai: AiConfig {
                 worker_url: env_or("AI_WORKER_URL", "http://localhost:8090"),

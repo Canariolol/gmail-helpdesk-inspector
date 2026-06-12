@@ -26,11 +26,6 @@ pub struct GoogleTokenResponse {
     pub refresh_token: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct GoogleUserInfo {
-    pub email: String,
-}
-
 pub fn encrypt_token(plaintext: &str, key_material: &str) -> anyhow::Result<String> {
     let key = Sha256::digest(key_material.as_bytes());
     let cipher = Aes256Gcm::new_from_slice(&key).context("invalid encryption key")?;
@@ -52,7 +47,9 @@ pub fn decrypt_token(encrypted: &str, key_material: &str) -> anyhow::Result<Stri
         .split_once('.')
         .ok_or_else(|| anyhow!("invalid encrypted token format"))?;
     let nonce = URL_SAFE_NO_PAD.decode(nonce).context("invalid nonce")?;
-    let ciphertext = URL_SAFE_NO_PAD.decode(ciphertext).context("invalid ciphertext")?;
+    let ciphertext = URL_SAFE_NO_PAD
+        .decode(ciphertext)
+        .context("invalid ciphertext")?;
     let key = Sha256::digest(key_material.as_bytes());
     let cipher = Aes256Gcm::new_from_slice(&key).context("invalid encryption key")?;
     let plaintext = cipher
@@ -62,7 +59,8 @@ pub fn decrypt_token(encrypted: &str, key_material: &str) -> anyhow::Result<Stri
 }
 
 pub fn sign_session_id(session_id: &str, secret: &str) -> anyhow::Result<String> {
-    let mut mac = <HmacSha256 as Mac>::new_from_slice(secret.as_bytes()).context("invalid session secret")?;
+    let mut mac =
+        <HmacSha256 as Mac>::new_from_slice(secret.as_bytes()).context("invalid session secret")?;
     mac.update(session_id.as_bytes());
     let sig = mac.finalize().into_bytes();
     Ok(format!("{}.{}", session_id, URL_SAFE_NO_PAD.encode(sig)))
@@ -80,11 +78,17 @@ pub fn verify_session_cookie(cookie_value: &str, secret: &str) -> Option<String>
 }
 
 pub fn session_cookie(value: &str) -> String {
-    format!(
-        "ghmi_session={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000"
-    )
+    format!("ghmi_session={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000")
+}
+
+pub fn oauth_cookie(value: &str) -> String {
+    format!("ghmi_oauth={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=600")
 }
 
 pub fn clear_session_cookie() -> String {
     "ghmi_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0".to_string()
+}
+
+pub fn clear_oauth_cookie() -> String {
+    "ghmi_oauth=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0".to_string()
 }

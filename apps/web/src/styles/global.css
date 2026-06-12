@@ -143,7 +143,7 @@ button {
 
 .setup-panel {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(120px, 1fr));
   gap: 12px;
   align-items: end;
 }
@@ -198,7 +198,7 @@ textarea {
 
 .metric-grid {
   display: grid;
-  grid-template-columns: repeat(6, 1fr);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
 }
 
@@ -243,7 +243,7 @@ textarea {
 
 .thread-row {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) 150px 120px 110px;
+  grid-template-columns: minmax(220px, 1fr) 135px 135px 135px 145px 90px;
   gap: 10px;
   align-items: center;
   border: 1px solid #dde3ea;
@@ -251,6 +251,14 @@ textarea {
   border-radius: 6px;
   padding: 10px;
   text-align: left;
+}
+
+.thread-row.header {
+  cursor: default;
+  background: #f8fafc;
+  color: #5a6575;
+  font-size: 0.82rem;
+  font-weight: 700;
 }
 
 .subject {
@@ -321,6 +329,21 @@ textarea {
   background: #f8fafc;
   border-radius: 6px;
   padding: 10px;
+  color: #455264;
+}
+
+.trace-summary {
+  display: grid;
+  gap: 8px;
+  border: 1px solid #dde3ea;
+  background: #f8fafc;
+  border-radius: 6px;
+  padding: 10px;
+}
+
+.trace-summary span {
+  display: grid;
+  gap: 2px;
   color: #455264;
 }
 
@@ -413,4 +436,3 @@ textarea {
     grid-template-columns: 1fr;
   }
 }
-

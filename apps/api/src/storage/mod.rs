@@ -18,11 +18,24 @@ pub trait StorageRepository: Send + Sync {
     async fn update_analysis_run(&self, run: &AnalysisRun) -> anyhow::Result<()>;
     async fn get_analysis_run(&self, id: &str) -> anyhow::Result<Option<AnalysisRun>>;
     async fn list_analysis_runs(&self, user_email: &str) -> anyhow::Result<Vec<AnalysisRun>>;
-    async fn upsert_thread(&self, thread: &EmailThread, messages: &[EmailMessage]) -> anyhow::Result<()>;
+    async fn upsert_thread(
+        &self,
+        thread: &EmailThread,
+        messages: &[EmailMessage],
+    ) -> anyhow::Result<()>;
     async fn list_threads(&self, run_id: &str) -> anyhow::Result<Vec<EmailThread>>;
     async fn get_thread(&self, thread_id: &str) -> anyhow::Result<Option<EmailThread>>;
-    async fn list_messages(&self, run_id: &str, thread_id: &str) -> anyhow::Result<Vec<EmailMessage>>;
-    async fn add_ai_audit(&self, run_id: &str, thread_id: &str, audit: &AiAuditResult) -> anyhow::Result<()>;
+    async fn list_messages(
+        &self,
+        run_id: &str,
+        thread_id: &str,
+    ) -> anyhow::Result<Vec<EmailMessage>>;
+    async fn add_ai_audit(
+        &self,
+        run_id: &str,
+        thread_id: &str,
+        audit: &AiAuditResult,
+    ) -> anyhow::Result<()>;
     async fn add_manual_review(&self, run_id: &str, review: &ManualReview) -> anyhow::Result<()>;
 }
 
@@ -44,7 +57,11 @@ struct MemoryInner {
 #[async_trait]
 impl StorageRepository for MemoryStorage {
     async fn upsert_user_session(&self, session: &UserSession) -> anyhow::Result<()> {
-        self.inner.write().await.sessions.insert(session.id.clone(), session.clone());
+        self.inner
+            .write()
+            .await
+            .sessions
+            .insert(session.id.clone(), session.clone());
         Ok(())
     }
 
@@ -53,12 +70,20 @@ impl StorageRepository for MemoryStorage {
     }
 
     async fn create_analysis_run(&self, run: &AnalysisRun) -> anyhow::Result<()> {
-        self.inner.write().await.runs.insert(run.id.clone(), run.clone());
+        self.inner
+            .write()
+            .await
+            .runs
+            .insert(run.id.clone(), run.clone());
         Ok(())
     }
 
     async fn update_analysis_run(&self, run: &AnalysisRun) -> anyhow::Result<()> {
-        self.inner.write().await.runs.insert(run.id.clone(), run.clone());
+        self.inner
+            .write()
+            .await
+            .runs
+            .insert(run.id.clone(), run.clone());
         Ok(())
     }
 
@@ -81,12 +106,17 @@ impl StorageRepository for MemoryStorage {
         Ok(runs)
     }
 
-    async fn upsert_thread(&self, thread: &EmailThread, messages: &[EmailMessage]) -> anyhow::Result<()> {
+    async fn upsert_thread(
+        &self,
+        thread: &EmailThread,
+        messages: &[EmailMessage],
+    ) -> anyhow::Result<()> {
         let mut inner = self.inner.write().await;
         inner.threads.insert(thread.id.clone(), thread.clone());
-        inner
-            .messages
-            .insert(format!("{}:{}", thread.analysis_run_id, thread.id), messages.to_vec());
+        inner.messages.insert(
+            format!("{}:{}", thread.analysis_run_id, thread.id),
+            messages.to_vec(),
+        );
         Ok(())
     }
 
@@ -108,7 +138,11 @@ impl StorageRepository for MemoryStorage {
         Ok(self.inner.read().await.threads.get(thread_id).cloned())
     }
 
-    async fn list_messages(&self, run_id: &str, thread_id: &str) -> anyhow::Result<Vec<EmailMessage>> {
+    async fn list_messages(
+        &self,
+        run_id: &str,
+        thread_id: &str,
+    ) -> anyhow::Result<Vec<EmailMessage>> {
         Ok(self
             .inner
             .read()
@@ -119,7 +153,12 @@ impl StorageRepository for MemoryStorage {
             .unwrap_or_default())
     }
 
-    async fn add_ai_audit(&self, _run_id: &str, thread_id: &str, audit: &AiAuditResult) -> anyhow::Result<()> {
+    async fn add_ai_audit(
+        &self,
+        _run_id: &str,
+        thread_id: &str,
+        audit: &AiAuditResult,
+    ) -> anyhow::Result<()> {
         self.inner
             .write()
             .await
@@ -142,6 +181,12 @@ impl StorageRepository for MemoryStorage {
         thread.is_answered = review.is_answered;
         thread.first_client_message_id = review.first_client_message_id.clone();
         thread.first_internal_reply_message_id = review.first_internal_reply_message_id.clone();
+        thread.last_internal_message_id = review.last_internal_message_id.clone();
+        thread.first_client_message_at = review.first_client_message_at;
+        thread.first_internal_reply_at = review.first_internal_reply_at;
+        thread.last_internal_message_at = review.last_internal_message_at;
+        thread.response_time_minutes = review.response_time_minutes;
+        thread.resolution_time_minutes = review.resolution_time_minutes;
         thread.manual_review_required = false;
         thread.manual_override_applied = true;
         thread.updated_at = Utc::now();
@@ -154,6 +199,12 @@ impl StorageRepository for MemoryStorage {
             is_answered: review.is_answered,
             first_client_message_id: review.first_client_message_id.clone(),
             first_internal_reply_message_id: review.first_internal_reply_message_id.clone(),
+            last_internal_message_id: review.last_internal_message_id.clone(),
+            first_client_message_at: review.first_client_message_at,
+            first_internal_reply_at: review.first_internal_reply_at,
+            last_internal_message_at: review.last_internal_message_at,
+            response_time_minutes: review.response_time_minutes,
+            resolution_time_minutes: review.resolution_time_minutes,
             notes: review.notes.clone(),
             created_at: review.created_at,
         });
@@ -163,4 +214,3 @@ impl StorageRepository for MemoryStorage {
         Ok(())
     }
 }
-

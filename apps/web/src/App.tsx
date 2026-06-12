@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { BarChart3, Bot, CheckCircle2, Clock, Filter, LogIn, Mail, RefreshCw, ShieldCheck } from "lucide-react";
+import { BarChart3, Bot, CheckCircle2, Clock, Filter, LogIn, Mail, RefreshCw, Send, ShieldCheck, Timer } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { API_BASE_URL, api } from "./api/client";
@@ -123,7 +123,7 @@ export function App() {
               className={run.id === selectedRunId ? "run-item active" : "run-item"}
               onClick={() => setSelectedRunId(run.id)}
             >
-              <span>{run.config.date_from} a {run.config.date_to}</span>
+              <span>{run.config.date_from} {run.config.time_from ?? "00:00"} a {run.config.date_to} {run.config.time_to ?? "23:59"}</span>
               <small>{run.status}</small>
             </button>
           ))}
@@ -173,11 +173,11 @@ function LoginView() {
   return (
     <main className="login-screen">
       <img src="/logo.png" alt="" />
-      <h1>Gmail Helpdesk Metrics Inspector</h1>
+      <h1>Gmail Helpdesk Inspector</h1>
       <p>Audita una casilla Gmail de soporte con métricas trazables y verificación IA.</p>
       <a className="primary-action" href={`${API_BASE_URL}/auth/google/login`}>
         <LogIn size={18} />
-        Login with Google
+        Conectate, preciosura =*
       </a>
     </main>
   );
@@ -186,6 +186,8 @@ function LoginView() {
 function SetupPanel({ loading, onSubmit }: { loading: boolean; onSubmit: (payload: unknown) => void }) {
   const [dateFrom, setDateFrom] = useState("2026-06-01");
   const [dateTo, setDateTo] = useState("2026-06-12");
+  const [timeFrom, setTimeFrom] = useState("00:00");
+  const [timeTo, setTimeTo] = useState("23:59");
   const [domains, setDomains] = useState("empresa.cl");
   const [ignoredDomains, setIgnoredDomains] = useState("google.com,calendar.google.com");
   const [ignoredKeywords, setIgnoredKeywords] = useState("newsletter,boletín,promoción");
@@ -198,6 +200,9 @@ function SetupPanel({ loading, onSubmit }: { loading: boolean; onSubmit: (payloa
         onSubmit({
           date_from: dateFrom,
           date_to: dateTo,
+          time_from: timeFrom,
+          time_to: timeTo,
+          timezone: "America/Santiago",
           internal_domains: split(domains),
           ignored_senders: [],
           ignored_domains: split(ignoredDomains),
@@ -212,6 +217,14 @@ function SetupPanel({ loading, onSubmit }: { loading: boolean; onSubmit: (payloa
       <label>
         Hasta
         <input type="date" value={dateTo} onChange={(event) => setDateTo(event.target.value)} />
+      </label>
+      <label>
+        Hora desde
+        <input type="time" value={timeFrom} onChange={(event) => setTimeFrom(event.target.value)} />
+      </label>
+      <label>
+        Hora hasta
+        <input type="time" value={timeTo} onChange={(event) => setTimeTo(event.target.value)} />
       </label>
       <label>
         Dominios internos
@@ -258,6 +271,9 @@ function Dashboard({ run, onFilter }: { run: AnalysisRun; onFilter: (filter: str
     ["Respondidas", metrics.answered, "answered", ShieldCheck],
     ["Sin respuesta", metrics.unanswered, "unanswered", Clock],
     ["Ambiguas", metrics.ambiguous, "review", Filter],
+    ["T. medio respuesta", formatDuration(metrics.avg_first_response_minutes), "answered", Timer],
+    ["P90 respuesta", formatDuration(metrics.p90_first_response_minutes), "answered", Clock],
+    ["Cierre medio", formatDuration(metrics.avg_resolution_minutes), "answered", Send],
   ] as const;
   const chartData = [
     { name: "Válidas", value: metrics.valid_requests },
@@ -318,6 +334,14 @@ function ThreadTable(props: {
         </select>
       </div>
       <div className="thread-table">
+        <div className="thread-row header">
+          <span>Asunto</span>
+          <span>Recepción</span>
+          <span>1a respuesta</span>
+          <span>Último envío</span>
+          <span>Estado</span>
+          <span>Revisión</span>
+        </div>
         {props.threads.map((thread) => (
           <button
             key={thread.id}
@@ -325,8 +349,12 @@ function ThreadTable(props: {
             onClick={() => props.onSelect(thread.id)}
           >
             <span className="subject">{thread.subject}</span>
-            <span className={`badge ${thread.classification}`}>{classificationLabels[thread.classification]}</span>
-            <span>{thread.is_answered ? "Respondido" : "Sin respuesta"}</span>
+            <span>{formatDateTime(thread.first_client_message_at)}</span>
+            <span>{formatDateTime(thread.first_internal_reply_at)}</span>
+            <span>{formatDateTime(thread.last_internal_message_at)}</span>
+            <span>
+              <span className={`badge ${thread.classification}`}>{classificationLabels[thread.classification]}</span>
+            </span>
             <span>{thread.manual_review_required ? "Revisar" : thread.classification_source}</span>
           </button>
         ))}
@@ -341,6 +369,7 @@ function ThreadDetailPanel({ detail, onReview, saving }: { detail: ThreadDetail;
   const [valid, setValid] = useState(detail.thread.is_valid_client_request);
   const [firstClient, setFirstClient] = useState(detail.thread.first_client_message_id ?? "");
   const [firstReply, setFirstReply] = useState(detail.thread.first_internal_reply_message_id ?? "");
+  const [lastInternal, setLastInternal] = useState(detail.thread.last_internal_message_id ?? "");
   const [notes, setNotes] = useState("");
 
   useEffect(() => {
@@ -349,11 +378,17 @@ function ThreadDetailPanel({ detail, onReview, saving }: { detail: ThreadDetail;
     setValid(detail.thread.is_valid_client_request);
     setFirstClient(detail.thread.first_client_message_id ?? "");
     setFirstReply(detail.thread.first_internal_reply_message_id ?? "");
+    setLastInternal(detail.thread.last_internal_message_id ?? "");
   }, [detail.thread.id]);
 
   return (
     <div className="thread-detail">
       <h2>{detail.thread.subject}</h2>
+      <div className="trace-summary">
+        <span><strong>Recepción</strong>{formatDateTime(detail.thread.first_client_message_at)}</span>
+        <span><strong>1a respuesta</strong>{formatDateTime(detail.thread.first_internal_reply_at)} · {formatDuration(detail.thread.response_time_minutes)}</span>
+        <span><strong>Último envío</strong>{formatDateTime(detail.thread.last_internal_message_at)} · {formatDuration(detail.thread.resolution_time_minutes)}</span>
+      </div>
       <div className="reason-box">
         {detail.thread.reasons.map((reason) => <span key={reason}>{reason}</span>)}
       </div>
@@ -379,6 +414,7 @@ function ThreadDetailPanel({ detail, onReview, saving }: { detail: ThreadDetail;
             is_answered: answered,
             first_client_message_id: firstClient || null,
             first_internal_reply_message_id: firstReply || null,
+            last_internal_message_id: lastInternal || null,
             notes: notes || null,
           });
         }}
@@ -401,14 +437,27 @@ function ThreadDetailPanel({ detail, onReview, saving }: { detail: ThreadDetail;
           Primer mensaje cliente
           <select value={firstClient} onChange={(event) => setFirstClient(event.target.value)}>
             <option value="">Sin seleccionar</option>
-            {detail.messages.map((message) => <option key={message.id} value={message.id}>{message.from_email} · {message.id}</option>)}
+            {detail.messages
+              .filter((message) => message.is_external && !message.is_automated)
+              .map((message) => <option key={message.id} value={message.id}>{message.from_email} · {formatDateTime(message.date)}</option>)}
           </select>
         </label>
         <label>
           Primera respuesta interna
           <select value={firstReply} onChange={(event) => setFirstReply(event.target.value)}>
             <option value="">Sin seleccionar</option>
-            {detail.messages.map((message) => <option key={message.id} value={message.id}>{message.from_email} · {message.id}</option>)}
+            {detail.messages
+              .filter((message) => message.is_internal && !message.is_automated)
+              .map((message) => <option key={message.id} value={message.id}>{message.from_email} · {formatDateTime(message.date)}</option>)}
+          </select>
+        </label>
+        <label>
+          Último envío interno
+          <select value={lastInternal} onChange={(event) => setLastInternal(event.target.value)}>
+            <option value="">Sin seleccionar</option>
+            {detail.messages
+              .filter((message) => message.is_internal && !message.is_automated)
+              .map((message) => <option key={message.id} value={message.id}>{message.from_email} · {formatDateTime(message.date)}</option>)}
           </select>
         </label>
         <label>
@@ -425,3 +474,26 @@ function split(value: string) {
   return value.split(",").map((item) => item.trim()).filter(Boolean);
 }
 
+function formatDateTime(value: string | null | undefined) {
+  if (!value) return "Sin dato";
+  return new Intl.DateTimeFormat("es-CL", {
+    timeZone: "America/Santiago",
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(value));
+}
+
+function formatDuration(value: number | null | undefined) {
+  if (value === null || value === undefined) return "Sin dato";
+  const minutes = Math.max(0, Math.round(value));
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  if (hours < 24) return rest ? `${hours} h ${rest} min` : `${hours} h`;
+  const days = Math.floor(hours / 24);
+  const dayHours = hours % 24;
+  return dayHours ? `${days} d ${dayHours} h` : `${days} d`;
+}

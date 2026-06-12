@@ -10,26 +10,36 @@ use axum::{
     },
     routing::{get, patch, post},
 };
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
 use futures_util::stream;
+use rand::RngCore;
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
     analysis::{
-        AiAuditResult, AnalysisConfig, AnalysisMetrics, AnalysisRun, AnalysisStatus, ClassificationSource,
-        EmailMessage, EmailThread, ManualReview, calculate_metrics, classify_thread, should_auto_apply_ai,
+        AiAuditResult, AnalysisConfig, AnalysisMetrics, AnalysisRun, AnalysisStatus,
+        ClassificationSource, EmailMessage, EmailThread, ManualReview, calculate_metrics,
+        classify_thread, message_is_inside_analysis_window, should_auto_apply_ai,
     },
     auth::{
-        GoogleTokenResponse, GoogleUserInfo, UserSession, clear_session_cookie, decrypt_token, encrypt_token,
-        session_cookie, sign_session_id, verify_session_cookie,
+        GoogleTokenResponse, UserSession, clear_oauth_cookie, clear_session_cookie, decrypt_token,
+        encrypt_token, oauth_cookie, session_cookie, sign_session_id, verify_session_cookie,
     },
     config::AppConfig,
     gmail::GmailClient,
     storage::StorageRepository,
 };
+
+#[derive(Debug, Deserialize)]
+struct GmailProfileResponse {
+    #[serde(rename = "emailAddress")]
+    email_address: String,
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -57,7 +67,10 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/google/callback", get(auth_google_callback))
         .route("/auth/logout", post(auth_logout))
         .route("/auth/me", get(auth_me))
-        .route("/analysis-runs", post(create_analysis_run).get(list_analysis_runs))
+        .route(
+            "/analysis-runs",
+            post(create_analysis_run).get(list_analysis_runs),
+        )
         .route("/analysis-runs/{id}", get(get_analysis_run))
         .route("/analysis-runs/{id}/start", post(start_analysis_run))
         .route("/analysis-runs/{id}/status", get(get_analysis_run))
@@ -73,8 +86,15 @@ async fn health() -> Json<serde_json::Value> {
     Json(json!({ "ok": true }))
 }
 
-async fn auth_google_login(State(state): State<AppState>) -> impl IntoResponse {
+async fn auth_google_login(State(state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
     let scope = "https://www.googleapis.com/auth/gmail.readonly";
+    let oauth_state = random_urlsafe(24);
+    let code_verifier = random_urlsafe(48);
+    let code_challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(code_verifier.as_bytes()));
+    let signed_oauth = sign_session_id(
+        &format!("{oauth_state}:{code_verifier}"),
+        &state.config.session_secret,
+    )?;
     let url = url::Url::parse_with_params(
         "https://accounts.google.com/o/oauth2/v2/auth",
         &[
@@ -84,21 +104,44 @@ async fn auth_google_login(State(state): State<AppState>) -> impl IntoResponse {
             ("scope", scope),
             ("access_type", "offline"),
             ("prompt", "consent"),
+            ("state", oauth_state.as_str()),
+            ("code_challenge", code_challenge.as_str()),
+            ("code_challenge_method", "S256"),
         ],
     )
     .expect("valid oauth url");
-    Redirect::temporary(url.as_str())
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&oauth_cookie(&signed_oauth)).unwrap(),
+    );
+    Ok((headers, Redirect::temporary(url.as_str())))
 }
 
 #[derive(Debug, Deserialize)]
 struct OAuthCallback {
     code: String,
+    state: Option<String>,
 }
 
 async fn auth_google_callback(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(query): Query<OAuthCallback>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let verifier_payload = headers
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|cookies| extract_named_cookie(cookies, "ghmi_oauth"))
+        .and_then(|cookie| verify_session_cookie(&cookie, &state.config.session_secret))
+        .ok_or_else(|| ApiError::bad_request("missing or invalid OAuth PKCE cookie"))?;
+    let (expected_state, code_verifier) = verifier_payload
+        .split_once(':')
+        .ok_or_else(|| ApiError::bad_request("invalid OAuth PKCE cookie payload"))?;
+    if query.state.as_deref() != Some(expected_state) {
+        return Err(ApiError::bad_request("OAuth state mismatch"));
+    }
+
     let token: GoogleTokenResponse = state
         .http
         .post("https://oauth2.googleapis.com/token")
@@ -108,27 +151,26 @@ async fn auth_google_callback(
             ("client_secret", state.config.google.client_secret.as_str()),
             ("redirect_uri", state.config.google.redirect_url.as_str()),
             ("grant_type", "authorization_code"),
+            ("code_verifier", code_verifier),
         ])
         .send()
         .await?
-        .error_for_status()?
-        .json()
+        .json_or_google_error("Google OAuth code exchange")
         .await?;
 
-    let user: GoogleUserInfo = state
+    let profile: GmailProfileResponse = state
         .http
-        .get("https://openidconnect.googleapis.com/v1/userinfo")
+        .get("https://gmail.googleapis.com/gmail/v1/users/me/profile")
         .bearer_auth(&token.access_token)
         .send()
         .await?
-        .error_for_status()?
-        .json()
+        .json_or_google_error("Gmail profile fetch")
         .await?;
 
     let now = Utc::now();
     let session = UserSession {
         id: Uuid::new_v4().to_string(),
-        google_account_email: user.email,
+        google_account_email: profile.email_address,
         access_token_encrypted: encrypt_token(&token.access_token, &state.config.encryption_key)?,
         refresh_token_encrypted: token
             .refresh_token
@@ -142,18 +184,34 @@ async fn auth_google_callback(
 
     let signed = sign_session_id(&session.id, &state.config.session_secret)?;
     let mut headers = HeaderMap::new();
-    headers.insert(header::SET_COOKIE, HeaderValue::from_str(&session_cookie(&signed)).unwrap());
-    headers.insert(header::LOCATION, HeaderValue::from_str(&state.config.web_base_url).unwrap());
+    headers.append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&session_cookie(&signed)).unwrap(),
+    );
+    headers.append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&clear_oauth_cookie()).unwrap(),
+    );
+    headers.insert(
+        header::LOCATION,
+        HeaderValue::from_str(&state.config.web_base_url).unwrap(),
+    );
     Ok((StatusCode::FOUND, headers))
 }
 
 async fn auth_logout() -> impl IntoResponse {
     let mut headers = HeaderMap::new();
-    headers.insert(header::SET_COOKIE, HeaderValue::from_str(&clear_session_cookie()).unwrap());
+    headers.insert(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&clear_session_cookie()).unwrap(),
+    );
     (StatusCode::NO_CONTENT, headers)
 }
 
-async fn auth_me(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<serde_json::Value>, ApiError> {
+async fn auth_me(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
     let session = require_session(&state, &headers).await?;
     Ok(Json(json!({
         "email": session.google_account_email,
@@ -164,6 +222,9 @@ async fn auth_me(State(state): State<AppState>, headers: HeaderMap) -> Result<Js
 struct CreateAnalysisRunRequest {
     date_from: String,
     date_to: String,
+    time_from: Option<String>,
+    time_to: Option<String>,
+    timezone: Option<String>,
     internal_domains: Vec<String>,
     ignored_senders: Vec<String>,
     ignored_domains: Vec<String>,
@@ -182,6 +243,11 @@ async fn create_analysis_run(
         config: AnalysisConfig {
             date_from: request.date_from,
             date_to: request.date_to,
+            time_from: request.time_from.unwrap_or_else(|| "00:00".to_string()),
+            time_to: request.time_to.unwrap_or_else(|| "23:59".to_string()),
+            timezone: request
+                .timezone
+                .unwrap_or_else(|| "America/Santiago".to_string()),
             internal_domains: request.internal_domains,
             ignored_senders: request.ignored_senders,
             ignored_domains: request.ignored_domains,
@@ -205,10 +271,18 @@ async fn list_analysis_runs(
     headers: HeaderMap,
 ) -> Result<Json<Vec<AnalysisRun>>, ApiError> {
     let session = require_session(&state, &headers).await?;
-    Ok(Json(state.storage.list_analysis_runs(&session.google_account_email).await?))
+    Ok(Json(
+        state
+            .storage
+            .list_analysis_runs(&session.google_account_email)
+            .await?,
+    ))
 }
 
-async fn get_analysis_run(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<AnalysisRun>, ApiError> {
+async fn get_analysis_run(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<AnalysisRun>, ApiError> {
     Ok(Json(
         state
             .storage
@@ -236,11 +310,16 @@ async fn start_analysis_run(
     run.progress_message = "Iniciando lectura de Gmail".to_string();
     state.storage.update_analysis_run(&run).await?;
 
-    let access_token = decrypt_token(&session.access_token_encrypted, &state.config.encryption_key)?;
+    let access_token = decrypt_token(
+        &session.access_token_encrypted,
+        &state.config.encryption_key,
+    )?;
     let worker_state = state.clone();
     let run_id = run.id.clone();
     tokio::spawn(async move {
-        if let Err(error) = execute_analysis(worker_state.clone(), run_id.clone(), access_token).await {
+        if let Err(error) =
+            execute_analysis(worker_state.clone(), run_id.clone(), access_token).await
+        {
             tracing::error!(?error, "analysis failed");
             if let Ok(Some(mut failed)) = worker_state.storage.get_analysis_run(&run_id).await {
                 failed.status = AnalysisStatus::Failed;
@@ -274,7 +353,10 @@ async fn analysis_events(
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
-async fn get_metrics(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<AnalysisMetrics>, ApiError> {
+async fn get_metrics(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<AnalysisMetrics>, ApiError> {
     let run = state
         .storage
         .get_analysis_run(&id)
@@ -290,7 +372,9 @@ async fn list_threads(
 ) -> Result<Json<Vec<EmailThread>>, ApiError> {
     let mut threads = state.storage.list_threads(&id).await?;
     if let Some(classification) = query.classification {
-        threads.retain(|thread| serde_json::to_value(&thread.classification).ok() == Some(json!(classification)));
+        threads.retain(|thread| {
+            serde_json::to_value(&thread.classification).ok() == Some(json!(classification))
+        });
     }
     if let Some(answered) = query.answered {
         threads.retain(|thread| thread.is_answered == answered);
@@ -317,7 +401,10 @@ async fn get_thread(
         .get_thread(&thread_id)
         .await?
         .ok_or(ApiError::not_found("thread not found"))?;
-    let messages = state.storage.list_messages(&thread.analysis_run_id, &thread.id).await?;
+    let messages = state
+        .storage
+        .list_messages(&thread.analysis_run_id, &thread.id)
+        .await?;
     Ok(Json(ThreadDetailResponse { thread, messages }))
 }
 
@@ -335,6 +422,7 @@ struct ManualReviewRequest {
     is_answered: bool,
     first_client_message_id: Option<String>,
     first_internal_reply_message_id: Option<String>,
+    last_internal_message_id: Option<String>,
     notes: Option<String>,
 }
 
@@ -348,6 +436,31 @@ async fn manual_review(
         .get_thread(&thread_id)
         .await?
         .ok_or(ApiError::not_found("thread not found"))?;
+    let messages = state
+        .storage
+        .list_messages(&thread.analysis_run_id, &thread.id)
+        .await?;
+    let first_client_message_at = request
+        .first_client_message_id
+        .as_ref()
+        .and_then(|id| messages.iter().find(|message| &message.id == id))
+        .map(|message| message.date);
+    let first_internal_reply_at = request
+        .first_internal_reply_message_id
+        .as_ref()
+        .and_then(|id| messages.iter().find(|message| &message.id == id))
+        .map(|message| message.date);
+    let last_internal_message_at = request
+        .last_internal_message_id
+        .as_ref()
+        .and_then(|id| messages.iter().find(|message| &message.id == id))
+        .map(|message| message.date);
+    let response_time_minutes = first_client_message_at
+        .zip(first_internal_reply_at)
+        .map(|(client, reply)| (reply - client).num_minutes());
+    let resolution_time_minutes = first_client_message_at
+        .zip(last_internal_message_at)
+        .map(|(client, last)| (last - client).num_minutes());
     let review = ManualReview {
         id: Uuid::new_v4().to_string(),
         email_thread_id: thread.id.clone(),
@@ -357,10 +470,19 @@ async fn manual_review(
         is_answered: request.is_answered,
         first_client_message_id: request.first_client_message_id,
         first_internal_reply_message_id: request.first_internal_reply_message_id,
+        last_internal_message_id: request.last_internal_message_id,
+        first_client_message_at,
+        first_internal_reply_at,
+        last_internal_message_at,
+        response_time_minutes,
+        resolution_time_minutes,
         notes: request.notes,
         created_at: Utc::now(),
     };
-    state.storage.add_manual_review(&thread.analysis_run_id, &review).await?;
+    state
+        .storage
+        .add_manual_review(&thread.analysis_run_id, &review)
+        .await?;
     recalculate_run_metrics(&state, &thread.analysis_run_id).await?;
     let run = state
         .storage
@@ -370,7 +492,11 @@ async fn manual_review(
     Ok(Json(run))
 }
 
-async fn execute_analysis(state: AppState, run_id: String, access_token: String) -> anyhow::Result<()> {
+async fn execute_analysis(
+    state: AppState,
+    run_id: String,
+    access_token: String,
+) -> anyhow::Result<()> {
     let mut run = state
         .storage
         .get_analysis_run(&run_id)
@@ -378,7 +504,11 @@ async fn execute_analysis(state: AppState, run_id: String, access_token: String)
         .ok_or_else(|| anyhow::anyhow!("analysis run not found"))?;
     let thread_ids = state
         .gmail
-        .list_thread_ids(&access_token, &run.config, state.config.google.gmail_max_threads)
+        .list_thread_ids(
+            &access_token,
+            &run.config,
+            state.config.google.gmail_max_threads,
+        )
         .await?;
     run.total_candidate_threads = thread_ids.len() as u64;
     run.progress_message = format!("{} hilos encontrados en Gmail", thread_ids.len());
@@ -389,19 +519,46 @@ async fn execute_analysis(state: AppState, run_id: String, access_token: String)
     let excluded_sample = excluded_sample_ids(&thread_ids);
 
     for thread_id in thread_ids {
-        let data = state.gmail.fetch_thread(&access_token, &thread_id, &run.config).await?;
+        let data = state
+            .gmail
+            .fetch_thread(&access_token, &thread_id, &run.config)
+            .await?;
+        if let Some(first_message) = data.messages.iter().min_by_key(|message| message.date) {
+            if !message_is_inside_analysis_window(first_message, &run.config) {
+                run.processed_threads += 1;
+                run.progress_message = format!(
+                    "Procesados {}/{} hilos · IA entrada {} · salida {} tokens",
+                    run.processed_threads,
+                    run.total_candidate_threads,
+                    ai_input_tokens,
+                    ai_output_tokens
+                );
+                state.storage.update_analysis_run(&run).await?;
+                continue;
+            }
+        }
         let mut thread = classify_thread(&run.id, &data.id, &data.messages, &run.config);
-        let should_audit = thread.is_valid_client_request
-            || thread.manual_review_required
-            || excluded_sample.contains(&thread.gmail_thread_id);
+        let received_human_thread = thread.first_client_message_id.is_some();
+        let should_audit = received_human_thread
+            && (thread.is_valid_client_request
+                || thread.manual_review_required
+                || excluded_sample.contains(&thread.gmail_thread_id));
 
         if should_audit {
-            match audit_thread(&state, &thread, &data.messages).await {
+            let audit_messages = audit_messages_for_thread(&thread, &data.messages);
+            match audit_thread(&state, &thread, &audit_messages).await {
                 Ok(audit) => {
                     ai_input_tokens += audit.input_tokens;
                     ai_output_tokens += audit.output_tokens;
-                    state.storage.add_ai_audit(&run.id, &thread.id, &audit).await?;
-                    let known_ids = data.messages.iter().map(|m| m.id.clone()).collect::<Vec<_>>();
+                    state
+                        .storage
+                        .add_ai_audit(&run.id, &thread.id, &audit)
+                        .await?;
+                    let known_ids = data
+                        .messages
+                        .iter()
+                        .map(|m| m.id.clone())
+                        .collect::<Vec<_>>();
                     if should_auto_apply_ai(&audit, &known_ids)
                         && audit.confidence >= state.config.ai.apply_confidence_threshold
                     {
@@ -411,12 +568,19 @@ async fn execute_analysis(state: AppState, run_id: String, access_token: String)
                         thread.is_valid_client_request = audit.is_valid_client_request;
                         thread.is_answered = audit.is_answered;
                         thread.first_client_message_id = audit.first_client_message_id.clone();
-                        thread.first_internal_reply_message_id = audit.first_internal_reply_message_id.clone();
+                        thread.first_internal_reply_message_id =
+                            audit.first_internal_reply_message_id.clone();
+                        thread.last_internal_message_id = audit.last_internal_message_id.clone();
+                        apply_trace_dates(&mut thread, &data.messages);
                         thread.manual_review_required = false;
-                        thread.reasons.push("AI audit auto-applied above strict threshold".to_string());
+                        thread
+                            .reasons
+                            .push("AI audit auto-applied above strict threshold".to_string());
                     } else {
                         thread.manual_review_required = true;
-                        thread.reasons.push("AI audit requires manual confirmation".to_string());
+                        thread
+                            .reasons
+                            .push("AI audit requires manual confirmation".to_string());
                     }
                 }
                 Err(error) => {
@@ -456,7 +620,80 @@ async fn execute_analysis(state: AppState, run_id: String, access_token: String)
     Ok(())
 }
 
-async fn audit_thread(state: &AppState, thread: &EmailThread, messages: &[EmailMessage]) -> anyhow::Result<AiAuditResult> {
+fn audit_messages_for_thread(thread: &EmailThread, messages: &[EmailMessage]) -> Vec<EmailMessage> {
+    const MAX_AUDIT_TEXT_CHARS: usize = 1600;
+
+    let mut ids = Vec::new();
+    if let Some(id) = &thread.first_client_message_id {
+        ids.push(id.clone());
+    }
+    if let Some(id) = &thread.first_internal_reply_message_id {
+        ids.push(id.clone());
+    }
+    if let Some(id) = &thread.last_internal_message_id {
+        ids.push(id.clone());
+    }
+
+    if ids.is_empty() {
+        ids.extend(messages.iter().take(3).map(|message| message.id.clone()));
+    }
+
+    let mut selected = messages
+        .iter()
+        .filter(|message| ids.contains(&message.id))
+        .cloned()
+        .map(|mut message| {
+            if let Some(text) = &message.body_text {
+                message.body_text = Some(truncate_chars(text, MAX_AUDIT_TEXT_CHARS));
+            }
+            message
+        })
+        .collect::<Vec<_>>();
+    selected.sort_by_key(|message| message.date);
+    selected.dedup_by(|left, right| left.id == right.id);
+    selected
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    let mut truncated = value.chars().take(max_chars).collect::<String>();
+    truncated.push_str("\n[truncated]");
+    truncated
+}
+
+fn apply_trace_dates(thread: &mut EmailThread, messages: &[EmailMessage]) {
+    thread.first_client_message_at = thread
+        .first_client_message_id
+        .as_ref()
+        .and_then(|id| messages.iter().find(|message| &message.id == id))
+        .map(|message| message.date);
+    thread.first_internal_reply_at = thread
+        .first_internal_reply_message_id
+        .as_ref()
+        .and_then(|id| messages.iter().find(|message| &message.id == id))
+        .map(|message| message.date);
+    thread.last_internal_message_at = thread
+        .last_internal_message_id
+        .as_ref()
+        .and_then(|id| messages.iter().find(|message| &message.id == id))
+        .map(|message| message.date);
+    thread.response_time_minutes = thread
+        .first_client_message_at
+        .zip(thread.first_internal_reply_at)
+        .map(|(client, reply)| (reply - client).num_minutes());
+    thread.resolution_time_minutes = thread
+        .first_client_message_at
+        .zip(thread.last_internal_message_at)
+        .map(|(client, last)| (last - client).num_minutes());
+}
+
+async fn audit_thread(
+    state: &AppState,
+    thread: &EmailThread,
+    messages: &[EmailMessage],
+) -> anyhow::Result<AiAuditResult> {
     #[derive(Serialize)]
     struct AuditRequest<'a> {
         thread: &'a EmailThread,
@@ -482,7 +719,11 @@ async fn recalculate_run_metrics(state: &AppState, run_id: &str) -> anyhow::Resu
         .await?
         .ok_or_else(|| anyhow::anyhow!("analysis run not found"))?;
     let threads = state.storage.list_threads(run_id).await?;
-    run.metrics = calculate_metrics(&threads, run.metrics.ai_input_tokens, run.metrics.ai_output_tokens);
+    run.metrics = calculate_metrics(
+        &threads,
+        run.metrics.ai_input_tokens,
+        run.metrics.ai_output_tokens,
+    );
     state.storage.update_analysis_run(&run).await
 }
 
@@ -498,9 +739,10 @@ async fn require_session(state: &AppState, headers: &HeaderMap) -> Result<UserSe
     let cookie = headers
         .get(header::COOKIE)
         .and_then(|v| v.to_str().ok())
-        .and_then(extract_session_cookie)
+        .and_then(|cookies| extract_named_cookie(cookies, "ghmi_session"))
         .ok_or(ApiError::unauthorized())?;
-    let session_id = verify_session_cookie(&cookie, &state.config.session_secret).ok_or(ApiError::unauthorized())?;
+    let session_id = verify_session_cookie(&cookie, &state.config.session_secret)
+        .ok_or(ApiError::unauthorized())?;
     state
         .storage
         .get_user_session(&session_id)
@@ -508,11 +750,17 @@ async fn require_session(state: &AppState, headers: &HeaderMap) -> Result<UserSe
         .ok_or(ApiError::unauthorized())
 }
 
-fn extract_session_cookie(cookies: &str) -> Option<String> {
+fn extract_named_cookie(cookies: &str, expected_name: &str) -> Option<String> {
     cookies.split(';').find_map(|part| {
         let (name, value) = part.trim().split_once('=')?;
-        (name == "ghmi_session").then(|| value.to_string())
+        (name == expected_name).then(|| value.to_string())
     })
+}
+
+fn random_urlsafe(bytes: usize) -> String {
+    let mut raw = vec![0u8; bytes];
+    rand::rng().fill_bytes(&mut raw);
+    URL_SAFE_NO_PAD.encode(raw)
 }
 
 #[derive(Debug)]
@@ -542,6 +790,13 @@ impl ApiError {
             message: "forbidden".to_string(),
         }
     }
+
+    fn bad_request(message: &str) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            message: message.to_string(),
+        }
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -565,5 +820,22 @@ impl From<reqwest::Error> for ApiError {
             status: StatusCode::BAD_GATEWAY,
             message: error.to_string(),
         }
+    }
+}
+
+trait GoogleResponseExt {
+    async fn json_or_google_error<T: DeserializeOwned>(self, label: &str) -> anyhow::Result<T>;
+}
+
+impl GoogleResponseExt for reqwest::Response {
+    async fn json_or_google_error<T: DeserializeOwned>(self, label: &str) -> anyhow::Result<T> {
+        let status = self.status();
+        let text = self.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(anyhow::anyhow!("{label} failed with {status}: {text}"));
+        }
+        serde_json::from_str(&text).map_err(|error| {
+            anyhow::anyhow!("{label} returned invalid JSON: {error}; body: {text}")
+        })
     }
 }

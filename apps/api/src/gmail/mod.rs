@@ -1,6 +1,9 @@
 use anyhow::{Context, anyhow};
-use base64::{Engine, engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD}};
-use chrono::{DateTime, Utc};
+use base64::{
+    Engine,
+    engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD},
+};
+use chrono::{DateTime, Days, NaiveDate, Utc};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::Client;
 use serde::Deserialize;
@@ -87,7 +90,7 @@ impl GmailClient {
         let query = format!(
             "after:{} before:{}",
             config.date_from.replace('-', "/"),
-            config.date_to.replace('-', "/")
+            gmail_end_exclusive(&config.date_to)
         );
         let url = format!(
             "https://gmail.googleapis.com/gmail/v1/users/me/threads?q={}&maxResults={}",
@@ -104,7 +107,11 @@ impl GmailClient {
             .context("failed to list Gmail threads")?
             .json()
             .await?;
-        Ok(response.threads.into_iter().map(|thread| thread.id).collect())
+        Ok(response
+            .threads
+            .into_iter()
+            .map(|thread| thread.id)
+            .collect())
     }
 
     pub async fn fetch_thread(
@@ -139,7 +146,18 @@ impl GmailClient {
     }
 }
 
-fn normalize_message(message: GmailMessageResponse, config: &AnalysisConfig) -> anyhow::Result<EmailMessage> {
+fn gmail_end_exclusive(date_to: &str) -> String {
+    NaiveDate::parse_from_str(date_to, "%Y-%m-%d")
+        .ok()
+        .and_then(|date| date.checked_add_days(Days::new(1)))
+        .map(|date| date.format("%Y/%m/%d").to_string())
+        .unwrap_or_else(|| date_to.replace('-', "/"))
+}
+
+fn normalize_message(
+    message: GmailMessageResponse,
+    config: &AnalysisConfig,
+) -> anyhow::Result<EmailMessage> {
     let headers = header_map(&message.payload.headers);
     let subject = header(&headers, "subject").unwrap_or_else(|| "(sin asunto)".to_string());
     let from = header(&headers, "from").unwrap_or_default();
@@ -176,17 +194,24 @@ fn header_map(headers: &[GmailHeader]) -> Map<String, Value> {
 }
 
 fn header(headers: &Map<String, Value>, name: &str) -> Option<String> {
-    headers.get(&name.to_lowercase()).and_then(|v| v.as_str()).map(ToOwned::to_owned)
+    headers
+        .get(&name.to_lowercase())
+        .and_then(|v| v.as_str())
+        .map(ToOwned::to_owned)
 }
 
-fn parse_date(headers: &Map<String, Value>, internal_date: Option<&str>) -> anyhow::Result<DateTime<Utc>> {
+fn parse_date(
+    headers: &Map<String, Value>,
+    internal_date: Option<&str>,
+) -> anyhow::Result<DateTime<Utc>> {
     if let Some(date) = header(headers, "date") {
         if let Ok(parsed) = DateTime::parse_from_rfc2822(&date) {
             return Ok(parsed.with_timezone(&Utc));
         }
     }
     if let Some(ms) = internal_date.and_then(|v| v.parse::<i64>().ok()) {
-        return DateTime::from_timestamp_millis(ms).ok_or_else(|| anyhow!("invalid Gmail internalDate"));
+        return DateTime::from_timestamp_millis(ms)
+            .ok_or_else(|| anyhow!("invalid Gmail internalDate"));
     }
     Ok(Utc::now())
 }
@@ -217,8 +242,16 @@ fn extract_text(payload: &GmailPayload) -> String {
 fn collect_text(payload: &GmailPayload, chunks: &mut Vec<String>) {
     if let Some(body) = &payload.body {
         if let Some(data) = &body.data {
-            if payload.mime_type.as_deref().unwrap_or("").starts_with("text/") {
-                if let Ok(bytes) = URL_SAFE_NO_PAD.decode(data.as_bytes()).or_else(|_| URL_SAFE.decode(data.as_bytes())) {
+            if payload
+                .mime_type
+                .as_deref()
+                .unwrap_or("")
+                .starts_with("text/")
+            {
+                if let Ok(bytes) = URL_SAFE_NO_PAD
+                    .decode(data.as_bytes())
+                    .or_else(|_| URL_SAFE.decode(data.as_bytes()))
+                {
                     if let Ok(text) = String::from_utf8(bytes) {
                         if payload.mime_type.as_deref() == Some("text/html") {
                             chunks.push(html_to_text(&text));

@@ -1,4 +1,5 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveTime, Utc};
+use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 
 pub const AI_AUTO_APPLY_THRESHOLD: f64 = 0.92;
@@ -37,10 +38,28 @@ pub enum ClassificationSource {
 pub struct AnalysisConfig {
     pub date_from: String,
     pub date_to: String,
+    #[serde(default = "default_time_from")]
+    pub time_from: String,
+    #[serde(default = "default_time_to")]
+    pub time_to: String,
+    #[serde(default = "default_timezone")]
+    pub timezone: String,
     pub internal_domains: Vec<String>,
     pub ignored_senders: Vec<String>,
     pub ignored_domains: Vec<String>,
     pub ignored_keywords: Vec<String>,
+}
+
+fn default_time_from() -> String {
+    "00:00".to_string()
+}
+
+fn default_time_to() -> String {
+    "23:59".to_string()
+}
+
+fn default_timezone() -> String {
+    "America/Santiago".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,6 +74,10 @@ pub struct AnalysisMetrics {
     pub avg_first_response_minutes: Option<f64>,
     pub median_first_response_minutes: Option<f64>,
     pub p90_first_response_minutes: Option<f64>,
+    #[serde(default)]
+    pub avg_resolution_minutes: Option<f64>,
+    #[serde(default)]
+    pub median_resolution_minutes: Option<f64>,
     pub report_confidence: f64,
     pub ai_input_tokens: u64,
     pub ai_output_tokens: u64,
@@ -73,6 +96,8 @@ impl Default for AnalysisMetrics {
             avg_first_response_minutes: None,
             median_first_response_minutes: None,
             p90_first_response_minutes: None,
+            avg_resolution_minutes: None,
+            median_resolution_minutes: None,
             report_confidence: 1.0,
             ai_input_tokens: 0,
             ai_output_tokens: 0,
@@ -128,9 +153,15 @@ pub struct EmailThread {
     pub is_answered: bool,
     pub first_client_message_id: Option<String>,
     pub first_internal_reply_message_id: Option<String>,
+    #[serde(default)]
+    pub last_internal_message_id: Option<String>,
     pub first_client_message_at: Option<DateTime<Utc>>,
     pub first_internal_reply_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub last_internal_message_at: Option<DateTime<Utc>>,
     pub response_time_minutes: Option<i64>,
+    #[serde(default)]
+    pub resolution_time_minutes: Option<i64>,
     pub manual_review_required: bool,
     pub manual_override_applied: bool,
     pub reasons: Vec<String>,
@@ -145,6 +176,8 @@ pub struct AiAuditResult {
     pub is_answered: bool,
     pub first_client_message_id: Option<String>,
     pub first_internal_reply_message_id: Option<String>,
+    #[serde(default)]
+    pub last_internal_message_id: Option<String>,
     pub confidence: f64,
     pub manual_review_required: bool,
     pub issues: Vec<String>,
@@ -162,6 +195,12 @@ pub struct ManualReview {
     pub is_answered: bool,
     pub first_client_message_id: Option<String>,
     pub first_internal_reply_message_id: Option<String>,
+    pub last_internal_message_id: Option<String>,
+    pub first_client_message_at: Option<DateTime<Utc>>,
+    pub first_internal_reply_at: Option<DateTime<Utc>>,
+    pub last_internal_message_at: Option<DateTime<Utc>>,
+    pub response_time_minutes: Option<i64>,
+    pub resolution_time_minutes: Option<i64>,
     pub notes: Option<String>,
     pub created_at: DateTime<Utc>,
 }
@@ -211,7 +250,58 @@ pub fn classify_thread(
             false,
             None,
             None,
+            None,
             true,
+            reasons,
+            now,
+        );
+    }
+
+    let first_message = messages
+        .iter()
+        .min_by_key(|message| message.date)
+        .expect("messages.is_empty was checked above");
+
+    if first_message.is_internal {
+        reasons.push(
+            "thread starts with an internal sender; outbound-origin threads are excluded"
+                .to_string(),
+        );
+        return build_thread(
+            analysis_run_id,
+            gmail_thread_id,
+            subject,
+            normalized_subject,
+            Classification::Misc,
+            ClassificationSource::Rules,
+            0.96,
+            false,
+            false,
+            None,
+            None,
+            None,
+            false,
+            reasons,
+            now,
+        );
+    }
+
+    if first_message.is_automated {
+        reasons.push("thread starts with an automated external sender".to_string());
+        return build_thread(
+            analysis_run_id,
+            gmail_thread_id,
+            subject,
+            normalized_subject,
+            Classification::Automated,
+            ClassificationSource::Rules,
+            0.95,
+            false,
+            false,
+            None,
+            None,
+            None,
+            false,
             reasons,
             now,
         );
@@ -223,7 +313,14 @@ pub fn classify_thread(
         .any(|kw| lower_subject.contains(&kw.to_lowercase()))
     {
         reasons.push("subject matches ignored keyword".to_string());
-        return ignored_thread(analysis_run_id, gmail_thread_id, subject, normalized_subject, reasons, now);
+        return ignored_thread(
+            analysis_run_id,
+            gmail_thread_id,
+            subject,
+            normalized_subject,
+            reasons,
+            now,
+        );
     }
 
     if messages.iter().all(|m| m.is_internal) {
@@ -240,13 +337,16 @@ pub fn classify_thread(
             false,
             None,
             None,
+            None,
             false,
             reasons,
             now,
         );
     }
 
-    if messages.iter().any(|m| m.is_automated) && messages.iter().all(|m| !m.is_external || m.is_automated) {
+    if messages.iter().any(|m| m.is_automated)
+        && messages.iter().all(|m| !m.is_external || m.is_automated)
+    {
         reasons.push("external messages look automated".to_string());
         return build_thread(
             analysis_run_id,
@@ -260,13 +360,17 @@ pub fn classify_thread(
             false,
             None,
             None,
+            None,
             false,
             reasons,
             now,
         );
     }
 
-    if lower_subject.contains("newsletter") || lower_subject.contains("boletin") || lower_subject.contains("boletín") {
+    if lower_subject.contains("newsletter")
+        || lower_subject.contains("boletin")
+        || lower_subject.contains("boletín")
+    {
         reasons.push("subject looks like newsletter".to_string());
         return build_thread(
             analysis_run_id,
@@ -280,18 +384,29 @@ pub fn classify_thread(
             false,
             None,
             None,
+            None,
             false,
             reasons,
             now,
         );
     }
 
-    if messages
-        .iter()
-        .any(|m| sender_is_ignored(&m.from_email, &config.ignored_senders, &config.ignored_domains))
-    {
+    if messages.iter().any(|m| {
+        sender_is_ignored(
+            &m.from_email,
+            &config.ignored_senders,
+            &config.ignored_domains,
+        )
+    }) {
         reasons.push("sender/domain is ignored by configuration".to_string());
-        return ignored_thread(analysis_run_id, gmail_thread_id, subject, normalized_subject, reasons, now);
+        return ignored_thread(
+            analysis_run_id,
+            gmail_thread_id,
+            subject,
+            normalized_subject,
+            reasons,
+            now,
+        );
     }
 
     let first_client = messages
@@ -313,6 +428,7 @@ pub fn classify_thread(
             false,
             None,
             None,
+            None,
             true,
             reasons,
             now,
@@ -323,7 +439,13 @@ pub fn classify_thread(
         .iter()
         .filter(|m| m.is_internal && !m.is_automated && m.date > first_client.date)
         .min_by_key(|m| m.date);
+    let last_internal = messages
+        .iter()
+        .filter(|m| m.is_internal && !m.is_automated && m.date > first_client.date)
+        .max_by_key(|m| m.date);
     let response_minutes = first_reply.map(|reply| (reply.date - first_client.date).num_minutes());
+    let resolution_minutes =
+        last_internal.map(|message| (message.date - first_client.date).num_minutes());
     let suspicious = messages.len() >= 8 || messages.iter().filter(|m| m.is_external).count() >= 4;
 
     reasons.push("first relevant message comes from an external human sender".to_string());
@@ -348,6 +470,7 @@ pub fn classify_thread(
         first_reply.is_some(),
         Some(first_client.id.clone()),
         first_reply.map(|m| m.id.clone()),
+        last_internal.map(|m| m.id.clone()),
         suspicious,
         reasons,
         now,
@@ -355,7 +478,9 @@ pub fn classify_thread(
     .with_dates(
         Some(first_client.date),
         first_reply.map(|m| m.date),
+        last_internal.map(|m| m.date),
         response_minutes,
+        resolution_minutes,
     )
 }
 
@@ -379,6 +504,7 @@ fn ignored_thread(
         false,
         None,
         None,
+        None,
         false,
         reasons,
         now,
@@ -398,6 +524,7 @@ fn build_thread(
     is_answered: bool,
     first_client_message_id: Option<String>,
     first_internal_reply_message_id: Option<String>,
+    last_internal_message_id: Option<String>,
     manual_review_required: bool,
     reasons: Vec<String>,
     now: DateTime<Utc>,
@@ -415,9 +542,12 @@ fn build_thread(
         is_answered,
         first_client_message_id,
         first_internal_reply_message_id,
+        last_internal_message_id,
         first_client_message_at: None,
         first_internal_reply_at: None,
+        last_internal_message_at: None,
         response_time_minutes: None,
+        resolution_time_minutes: None,
         manual_review_required,
         manual_override_applied: false,
         reasons,
@@ -431,7 +561,9 @@ trait WithDates {
         self,
         first_client_message_at: Option<DateTime<Utc>>,
         first_internal_reply_at: Option<DateTime<Utc>>,
+        last_internal_message_at: Option<DateTime<Utc>>,
         response_time_minutes: Option<i64>,
+        resolution_time_minutes: Option<i64>,
     ) -> Self;
 }
 
@@ -440,16 +572,24 @@ impl WithDates for EmailThread {
         mut self,
         first_client_message_at: Option<DateTime<Utc>>,
         first_internal_reply_at: Option<DateTime<Utc>>,
+        last_internal_message_at: Option<DateTime<Utc>>,
         response_time_minutes: Option<i64>,
+        resolution_time_minutes: Option<i64>,
     ) -> Self {
         self.first_client_message_at = first_client_message_at;
         self.first_internal_reply_at = first_internal_reply_at;
+        self.last_internal_message_at = last_internal_message_at;
         self.response_time_minutes = response_time_minutes;
+        self.resolution_time_minutes = resolution_time_minutes;
         self
     }
 }
 
-pub fn sender_is_ignored(email: &str, ignored_senders: &[String], ignored_domains: &[String]) -> bool {
+pub fn sender_is_ignored(
+    email: &str,
+    ignored_senders: &[String],
+    ignored_domains: &[String],
+) -> bool {
     let lower = email.to_lowercase();
     ignored_senders.iter().any(|s| s.to_lowercase() == lower)
         || ignored_domains
@@ -478,9 +618,38 @@ pub fn is_internal_email(email: &str, domains: &[String]) -> bool {
         .any(|domain| lower.ends_with(&format!("@{}", domain.trim().to_lowercase())))
 }
 
-pub fn calculate_metrics(threads: &[EmailThread], ai_input_tokens: u64, ai_output_tokens: u64) -> AnalysisMetrics {
+pub fn message_is_inside_analysis_window(message: &EmailMessage, config: &AnalysisConfig) -> bool {
+    let timezone = config
+        .timezone
+        .parse::<Tz>()
+        .unwrap_or(chrono_tz::America::Santiago);
+    let local = message.date.with_timezone(&timezone);
+    let Ok(date_from) = chrono::NaiveDate::parse_from_str(&config.date_from, "%Y-%m-%d") else {
+        return true;
+    };
+    let Ok(date_to) = chrono::NaiveDate::parse_from_str(&config.date_to, "%Y-%m-%d") else {
+        return true;
+    };
+    let time_from = NaiveTime::parse_from_str(&config.time_from, "%H:%M").unwrap_or(NaiveTime::MIN);
+    let time_to = NaiveTime::parse_from_str(&config.time_to, "%H:%M")
+        .unwrap_or(NaiveTime::from_hms_opt(23, 59, 59).expect("valid default time"));
+
+    local.date_naive() >= date_from
+        && local.date_naive() <= date_to
+        && local.time() >= time_from
+        && local.time() <= time_to
+}
+
+pub fn calculate_metrics(
+    threads: &[EmailThread],
+    ai_input_tokens: u64,
+    ai_output_tokens: u64,
+) -> AnalysisMetrics {
     let total_threads = threads.len() as u64;
-    let valid: Vec<_> = threads.iter().filter(|t| t.is_valid_client_request).collect();
+    let valid: Vec<_> = threads
+        .iter()
+        .filter(|t| t.is_valid_client_request)
+        .collect();
     let valid_requests = valid.len() as u64;
     let answered = valid.iter().filter(|t| t.is_answered).count() as u64;
     let ambiguous = threads
@@ -497,12 +666,11 @@ pub fn calculate_metrics(threads: &[EmailThread], ai_input_tokens: u64, ai_outpu
         .filter_map(|t| t.response_time_minutes.map(|v| v as f64))
         .collect();
     response_times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-    let avg = if response_times.is_empty() {
-        None
-    } else {
-        Some(response_times.iter().sum::<f64>() / response_times.len() as f64)
-    };
+    let mut resolution_times: Vec<f64> = valid
+        .iter()
+        .filter_map(|t| t.resolution_time_minutes.map(|v| v as f64))
+        .collect();
+    resolution_times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
     let confidence = if total_threads == 0 {
         1.0
@@ -518,12 +686,22 @@ pub fn calculate_metrics(threads: &[EmailThread], ai_input_tokens: u64, ai_outpu
         ignored,
         ambiguous,
         manual_overrides,
-        avg_first_response_minutes: avg,
+        avg_first_response_minutes: average(&response_times),
         median_first_response_minutes: percentile(&response_times, 0.5),
         p90_first_response_minutes: percentile(&response_times, 0.9),
+        avg_resolution_minutes: average(&resolution_times),
+        median_resolution_minutes: percentile(&resolution_times, 0.5),
         report_confidence: confidence,
         ai_input_tokens,
         ai_output_tokens,
+    }
+}
+
+fn average(values: &[f64]) -> Option<f64> {
+    if values.is_empty() {
+        None
+    } else {
+        Some(values.iter().sum::<f64>() / values.len() as f64)
     }
 }
 
@@ -549,7 +727,12 @@ pub fn should_auto_apply_ai(result: &AiAuditResult, known_message_ids: &[String]
         .as_ref()
         .map(|id| known_message_ids.contains(id))
         .unwrap_or(true);
-    first_client_ok && first_reply_ok
+    let last_internal_ok = result
+        .last_internal_message_id
+        .as_ref()
+        .map(|id| known_message_ids.contains(id))
+        .unwrap_or(true);
+    first_client_ok && first_reply_ok && last_internal_ok
 }
 
 #[cfg(test)]
@@ -580,6 +763,9 @@ mod tests {
         let config = AnalysisConfig {
             date_from: "2026-06-01".to_string(),
             date_to: "2026-06-12".to_string(),
+            time_from: "00:00".to_string(),
+            time_to: "23:59".to_string(),
+            timezone: "America/Santiago".to_string(),
             internal_domains: vec!["company.test".to_string()],
             ignored_senders: vec![],
             ignored_domains: vec![],
@@ -588,12 +774,16 @@ mod tests {
         let thread = classify_thread(
             "run",
             "thread",
-            &[msg("m1", "client@example.com", false, 0), msg("m2", "agent@company.test", true, 25)],
+            &[
+                msg("m1", "client@example.com", false, 0),
+                msg("m2", "agent@company.test", true, 25),
+            ],
             &config,
         );
         assert_eq!(thread.classification, Classification::ValidClientRequest);
         assert!(thread.is_answered);
         assert_eq!(thread.response_time_minutes, Some(25));
+        assert_eq!(thread.resolution_time_minutes, Some(25));
     }
 
     #[test]
@@ -601,10 +791,16 @@ mod tests {
         let mut answered = classify_thread(
             "run",
             "a",
-            &[msg("m1", "client@example.com", false, 0), msg("m2", "agent@company.test", true, 20)],
+            &[
+                msg("m1", "client@example.com", false, 0),
+                msg("m2", "agent@company.test", true, 20),
+            ],
             &AnalysisConfig {
                 date_from: "2026-06-01".to_string(),
                 date_to: "2026-06-12".to_string(),
+                time_from: "00:00".to_string(),
+                time_to: "23:59".to_string(),
+                timezone: "America/Santiago".to_string(),
                 internal_domains: vec![],
                 ignored_senders: vec![],
                 ignored_domains: vec![],
@@ -632,14 +828,17 @@ mod tests {
             is_answered: true,
             first_client_message_id: Some("m1".to_string()),
             first_internal_reply_message_id: Some("m2".to_string()),
+            last_internal_message_id: Some("m2".to_string()),
             confidence: 0.93,
             manual_review_required: false,
             issues: vec![],
             input_tokens: 10,
             output_tokens: 5,
         };
-        assert!(should_auto_apply_ai(&result, &["m1".to_string(), "m2".to_string()]));
+        assert!(should_auto_apply_ai(
+            &result,
+            &["m1".to_string(), "m2".to_string()]
+        ));
         assert!(!should_auto_apply_ai(&result, &["m1".to_string()]));
     }
 }
-
