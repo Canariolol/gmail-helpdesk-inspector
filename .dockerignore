@@ -1,0 +1,15 @@
+.env
+.git
+
+apps/api/target
+apps/web/node_modules
+apps/web/dist
+apps/web/tsconfig.tsbuildinfo
+apps/ai-worker/src/*.egg-info
+
+node_modules
+target
+__pycache__
+.pytest_cache
+*.pyc
+

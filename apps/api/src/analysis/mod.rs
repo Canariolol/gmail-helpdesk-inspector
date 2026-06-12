@@ -1,0 +1,645 @@
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+
+pub const AI_AUTO_APPLY_THRESHOLD: f64 = 0.92;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AnalysisStatus {
+    Pending,
+    Running,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Classification {
+    ValidClientRequest,
+    Internal,
+    Automated,
+    Newsletter,
+    Spam,
+    Misc,
+    Ambiguous,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ClassificationSource {
+    Rules,
+    Heuristics,
+    Ai,
+    Manual,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnalysisConfig {
+    pub date_from: String,
+    pub date_to: String,
+    pub internal_domains: Vec<String>,
+    pub ignored_senders: Vec<String>,
+    pub ignored_domains: Vec<String>,
+    pub ignored_keywords: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnalysisMetrics {
+    pub total_threads: u64,
+    pub valid_requests: u64,
+    pub answered: u64,
+    pub unanswered: u64,
+    pub ignored: u64,
+    pub ambiguous: u64,
+    pub manual_overrides: u64,
+    pub avg_first_response_minutes: Option<f64>,
+    pub median_first_response_minutes: Option<f64>,
+    pub p90_first_response_minutes: Option<f64>,
+    pub report_confidence: f64,
+    pub ai_input_tokens: u64,
+    pub ai_output_tokens: u64,
+}
+
+impl Default for AnalysisMetrics {
+    fn default() -> Self {
+        Self {
+            total_threads: 0,
+            valid_requests: 0,
+            answered: 0,
+            unanswered: 0,
+            ignored: 0,
+            ambiguous: 0,
+            manual_overrides: 0,
+            avg_first_response_minutes: None,
+            median_first_response_minutes: None,
+            p90_first_response_minutes: None,
+            report_confidence: 1.0,
+            ai_input_tokens: 0,
+            ai_output_tokens: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnalysisRun {
+    pub id: String,
+    pub user_email: String,
+    pub config: AnalysisConfig,
+    pub status: AnalysisStatus,
+    pub progress_message: String,
+    pub processed_threads: u64,
+    pub total_candidate_threads: u64,
+    pub metrics: AnalysisMetrics,
+    pub created_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmailMessage {
+    pub id: String,
+    pub gmail_message_id: String,
+    pub from_email: String,
+    pub from_name: Option<String>,
+    pub to_emails: Vec<String>,
+    pub cc_emails: Vec<String>,
+    pub date: DateTime<Utc>,
+    pub subject: String,
+    pub snippet: String,
+    pub headers: serde_json::Value,
+    pub is_internal: bool,
+    pub is_external: bool,
+    pub is_automated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_text: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmailThread {
+    pub id: String,
+    pub analysis_run_id: String,
+    pub gmail_thread_id: String,
+    pub subject: String,
+    pub normalized_subject: String,
+    pub classification: Classification,
+    pub classification_source: ClassificationSource,
+    pub classification_confidence: f64,
+    pub is_valid_client_request: bool,
+    pub is_answered: bool,
+    pub first_client_message_id: Option<String>,
+    pub first_internal_reply_message_id: Option<String>,
+    pub first_client_message_at: Option<DateTime<Utc>>,
+    pub first_internal_reply_at: Option<DateTime<Utc>>,
+    pub response_time_minutes: Option<i64>,
+    pub manual_review_required: bool,
+    pub manual_override_applied: bool,
+    pub reasons: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiAuditResult {
+    pub classification: Classification,
+    pub is_valid_client_request: bool,
+    pub is_answered: bool,
+    pub first_client_message_id: Option<String>,
+    pub first_internal_reply_message_id: Option<String>,
+    pub confidence: f64,
+    pub manual_review_required: bool,
+    pub issues: Vec<String>,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManualReview {
+    pub id: String,
+    pub email_thread_id: String,
+    pub reviewer_label: String,
+    pub new_classification: Classification,
+    pub is_valid_client_request: bool,
+    pub is_answered: bool,
+    pub first_client_message_id: Option<String>,
+    pub first_internal_reply_message_id: Option<String>,
+    pub notes: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+pub fn normalize_subject(subject: &str) -> String {
+    let mut value = subject.trim().to_lowercase();
+    loop {
+        let next = value
+            .strip_prefix("re:")
+            .or_else(|| value.strip_prefix("fw:"))
+            .or_else(|| value.strip_prefix("fwd:"))
+            .map(|s| s.trim().to_string());
+        match next {
+            Some(next) if next != value => value = next,
+            _ => break,
+        }
+    }
+    value
+}
+
+pub fn classify_thread(
+    analysis_run_id: &str,
+    gmail_thread_id: &str,
+    messages: &[EmailMessage],
+    config: &AnalysisConfig,
+) -> EmailThread {
+    let now = Utc::now();
+    let subject = messages
+        .first()
+        .map(|m| m.subject.clone())
+        .unwrap_or_else(|| "(sin asunto)".to_string());
+    let normalized_subject = normalize_subject(&subject);
+    let mut reasons = Vec::new();
+    let lower_subject = subject.to_lowercase();
+
+    if messages.is_empty() {
+        reasons.push("thread has no readable messages".to_string());
+        return build_thread(
+            analysis_run_id,
+            gmail_thread_id,
+            subject,
+            normalized_subject,
+            Classification::Ambiguous,
+            ClassificationSource::Rules,
+            0.2,
+            false,
+            false,
+            None,
+            None,
+            true,
+            reasons,
+            now,
+        );
+    }
+
+    if config
+        .ignored_keywords
+        .iter()
+        .any(|kw| lower_subject.contains(&kw.to_lowercase()))
+    {
+        reasons.push("subject matches ignored keyword".to_string());
+        return ignored_thread(analysis_run_id, gmail_thread_id, subject, normalized_subject, reasons, now);
+    }
+
+    if messages.iter().all(|m| m.is_internal) {
+        reasons.push("all participants are internal".to_string());
+        return build_thread(
+            analysis_run_id,
+            gmail_thread_id,
+            subject,
+            normalized_subject,
+            Classification::Internal,
+            ClassificationSource::Rules,
+            0.98,
+            false,
+            false,
+            None,
+            None,
+            false,
+            reasons,
+            now,
+        );
+    }
+
+    if messages.iter().any(|m| m.is_automated) && messages.iter().all(|m| !m.is_external || m.is_automated) {
+        reasons.push("external messages look automated".to_string());
+        return build_thread(
+            analysis_run_id,
+            gmail_thread_id,
+            subject,
+            normalized_subject,
+            Classification::Automated,
+            ClassificationSource::Rules,
+            0.95,
+            false,
+            false,
+            None,
+            None,
+            false,
+            reasons,
+            now,
+        );
+    }
+
+    if lower_subject.contains("newsletter") || lower_subject.contains("boletin") || lower_subject.contains("boletín") {
+        reasons.push("subject looks like newsletter".to_string());
+        return build_thread(
+            analysis_run_id,
+            gmail_thread_id,
+            subject,
+            normalized_subject,
+            Classification::Newsletter,
+            ClassificationSource::Rules,
+            0.92,
+            false,
+            false,
+            None,
+            None,
+            false,
+            reasons,
+            now,
+        );
+    }
+
+    if messages
+        .iter()
+        .any(|m| sender_is_ignored(&m.from_email, &config.ignored_senders, &config.ignored_domains))
+    {
+        reasons.push("sender/domain is ignored by configuration".to_string());
+        return ignored_thread(analysis_run_id, gmail_thread_id, subject, normalized_subject, reasons, now);
+    }
+
+    let first_client = messages
+        .iter()
+        .filter(|m| m.is_external && !m.is_automated)
+        .min_by_key(|m| m.date);
+
+    let Some(first_client) = first_client else {
+        reasons.push("no clear human external sender found".to_string());
+        return build_thread(
+            analysis_run_id,
+            gmail_thread_id,
+            subject,
+            normalized_subject,
+            Classification::Ambiguous,
+            ClassificationSource::Heuristics,
+            0.45,
+            false,
+            false,
+            None,
+            None,
+            true,
+            reasons,
+            now,
+        );
+    };
+
+    let first_reply = messages
+        .iter()
+        .filter(|m| m.is_internal && !m.is_automated && m.date > first_client.date)
+        .min_by_key(|m| m.date);
+    let response_minutes = first_reply.map(|reply| (reply.date - first_client.date).num_minutes());
+    let suspicious = messages.len() >= 8 || messages.iter().filter(|m| m.is_external).count() >= 4;
+
+    reasons.push("first relevant message comes from an external human sender".to_string());
+    if first_reply.is_some() {
+        reasons.push("found later internal non-automated reply".to_string());
+    } else {
+        reasons.push("no later internal reply found".to_string());
+    }
+    if suspicious {
+        reasons.push("thread shape is suspicious and should be audited".to_string());
+    }
+
+    build_thread(
+        analysis_run_id,
+        gmail_thread_id,
+        subject,
+        normalized_subject,
+        Classification::ValidClientRequest,
+        ClassificationSource::Heuristics,
+        if suspicious { 0.72 } else { 0.86 },
+        true,
+        first_reply.is_some(),
+        Some(first_client.id.clone()),
+        first_reply.map(|m| m.id.clone()),
+        suspicious,
+        reasons,
+        now,
+    )
+    .with_dates(
+        Some(first_client.date),
+        first_reply.map(|m| m.date),
+        response_minutes,
+    )
+}
+
+fn ignored_thread(
+    analysis_run_id: &str,
+    gmail_thread_id: &str,
+    subject: String,
+    normalized_subject: String,
+    reasons: Vec<String>,
+    now: DateTime<Utc>,
+) -> EmailThread {
+    build_thread(
+        analysis_run_id,
+        gmail_thread_id,
+        subject,
+        normalized_subject,
+        Classification::Misc,
+        ClassificationSource::Rules,
+        0.9,
+        false,
+        false,
+        None,
+        None,
+        false,
+        reasons,
+        now,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_thread(
+    analysis_run_id: &str,
+    gmail_thread_id: &str,
+    subject: String,
+    normalized_subject: String,
+    classification: Classification,
+    classification_source: ClassificationSource,
+    classification_confidence: f64,
+    is_valid_client_request: bool,
+    is_answered: bool,
+    first_client_message_id: Option<String>,
+    first_internal_reply_message_id: Option<String>,
+    manual_review_required: bool,
+    reasons: Vec<String>,
+    now: DateTime<Utc>,
+) -> EmailThread {
+    EmailThread {
+        id: gmail_thread_id.to_string(),
+        analysis_run_id: analysis_run_id.to_string(),
+        gmail_thread_id: gmail_thread_id.to_string(),
+        subject,
+        normalized_subject,
+        classification,
+        classification_source,
+        classification_confidence,
+        is_valid_client_request,
+        is_answered,
+        first_client_message_id,
+        first_internal_reply_message_id,
+        first_client_message_at: None,
+        first_internal_reply_at: None,
+        response_time_minutes: None,
+        manual_review_required,
+        manual_override_applied: false,
+        reasons,
+        created_at: now,
+        updated_at: now,
+    }
+}
+
+trait WithDates {
+    fn with_dates(
+        self,
+        first_client_message_at: Option<DateTime<Utc>>,
+        first_internal_reply_at: Option<DateTime<Utc>>,
+        response_time_minutes: Option<i64>,
+    ) -> Self;
+}
+
+impl WithDates for EmailThread {
+    fn with_dates(
+        mut self,
+        first_client_message_at: Option<DateTime<Utc>>,
+        first_internal_reply_at: Option<DateTime<Utc>>,
+        response_time_minutes: Option<i64>,
+    ) -> Self {
+        self.first_client_message_at = first_client_message_at;
+        self.first_internal_reply_at = first_internal_reply_at;
+        self.response_time_minutes = response_time_minutes;
+        self
+    }
+}
+
+pub fn sender_is_ignored(email: &str, ignored_senders: &[String], ignored_domains: &[String]) -> bool {
+    let lower = email.to_lowercase();
+    ignored_senders.iter().any(|s| s.to_lowercase() == lower)
+        || ignored_domains
+            .iter()
+            .any(|domain| lower.ends_with(&format!("@{}", domain.to_lowercase())))
+}
+
+pub fn is_automated_sender(email: &str, headers: &serde_json::Value) -> bool {
+    let lower = email.to_lowercase();
+    lower.contains("no-reply")
+        || lower.contains("noreply")
+        || lower.contains("notification")
+        || lower.contains("mailer-daemon")
+        || headers
+            .get("auto-submitted")
+            .and_then(|v| v.as_str())
+            .map(|value| value.to_lowercase() != "no")
+            .unwrap_or(false)
+        || headers.get("list-unsubscribe").is_some()
+}
+
+pub fn is_internal_email(email: &str, domains: &[String]) -> bool {
+    let lower = email.to_lowercase();
+    domains
+        .iter()
+        .any(|domain| lower.ends_with(&format!("@{}", domain.trim().to_lowercase())))
+}
+
+pub fn calculate_metrics(threads: &[EmailThread], ai_input_tokens: u64, ai_output_tokens: u64) -> AnalysisMetrics {
+    let total_threads = threads.len() as u64;
+    let valid: Vec<_> = threads.iter().filter(|t| t.is_valid_client_request).collect();
+    let valid_requests = valid.len() as u64;
+    let answered = valid.iter().filter(|t| t.is_answered).count() as u64;
+    let ambiguous = threads
+        .iter()
+        .filter(|t| t.classification == Classification::Ambiguous || t.manual_review_required)
+        .count() as u64;
+    let ignored = threads
+        .iter()
+        .filter(|t| !t.is_valid_client_request && t.classification != Classification::Ambiguous)
+        .count() as u64;
+    let manual_overrides = threads.iter().filter(|t| t.manual_override_applied).count() as u64;
+    let mut response_times: Vec<f64> = valid
+        .iter()
+        .filter_map(|t| t.response_time_minutes.map(|v| v as f64))
+        .collect();
+    response_times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let avg = if response_times.is_empty() {
+        None
+    } else {
+        Some(response_times.iter().sum::<f64>() / response_times.len() as f64)
+    };
+
+    let confidence = if total_threads == 0 {
+        1.0
+    } else {
+        (1.0 - (ambiguous as f64 / total_threads as f64)).clamp(0.0, 1.0)
+    };
+
+    AnalysisMetrics {
+        total_threads,
+        valid_requests,
+        answered,
+        unanswered: valid_requests.saturating_sub(answered),
+        ignored,
+        ambiguous,
+        manual_overrides,
+        avg_first_response_minutes: avg,
+        median_first_response_minutes: percentile(&response_times, 0.5),
+        p90_first_response_minutes: percentile(&response_times, 0.9),
+        report_confidence: confidence,
+        ai_input_tokens,
+        ai_output_tokens,
+    }
+}
+
+fn percentile(sorted: &[f64], p: f64) -> Option<f64> {
+    if sorted.is_empty() {
+        return None;
+    }
+    let idx = ((sorted.len() - 1) as f64 * p).ceil() as usize;
+    sorted.get(idx).copied()
+}
+
+pub fn should_auto_apply_ai(result: &AiAuditResult, known_message_ids: &[String]) -> bool {
+    if result.confidence < AI_AUTO_APPLY_THRESHOLD || result.manual_review_required {
+        return false;
+    }
+    let first_client_ok = result
+        .first_client_message_id
+        .as_ref()
+        .map(|id| known_message_ids.contains(id))
+        .unwrap_or(true);
+    let first_reply_ok = result
+        .first_internal_reply_message_id
+        .as_ref()
+        .map(|id| known_message_ids.contains(id))
+        .unwrap_or(true);
+    first_client_ok && first_reply_ok
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn msg(id: &str, from: &str, internal: bool, at_minute: i64) -> EmailMessage {
+        EmailMessage {
+            id: id.to_string(),
+            gmail_message_id: id.to_string(),
+            from_email: from.to_string(),
+            from_name: None,
+            to_emails: vec![],
+            cc_emails: vec![],
+            date: DateTime::from_timestamp(1_700_000_000 + at_minute * 60, 0).unwrap(),
+            subject: "Ayuda con pedido".to_string(),
+            snippet: "hola".to_string(),
+            headers: serde_json::json!({}),
+            is_internal: internal,
+            is_external: !internal,
+            is_automated: false,
+            body_text: None,
+        }
+    }
+
+    #[test]
+    fn classifies_answered_external_request() {
+        let config = AnalysisConfig {
+            date_from: "2026-06-01".to_string(),
+            date_to: "2026-06-12".to_string(),
+            internal_domains: vec!["company.test".to_string()],
+            ignored_senders: vec![],
+            ignored_domains: vec![],
+            ignored_keywords: vec![],
+        };
+        let thread = classify_thread(
+            "run",
+            "thread",
+            &[msg("m1", "client@example.com", false, 0), msg("m2", "agent@company.test", true, 25)],
+            &config,
+        );
+        assert_eq!(thread.classification, Classification::ValidClientRequest);
+        assert!(thread.is_answered);
+        assert_eq!(thread.response_time_minutes, Some(25));
+    }
+
+    #[test]
+    fn metrics_use_valid_requests_only_for_unanswered() {
+        let mut answered = classify_thread(
+            "run",
+            "a",
+            &[msg("m1", "client@example.com", false, 0), msg("m2", "agent@company.test", true, 20)],
+            &AnalysisConfig {
+                date_from: "2026-06-01".to_string(),
+                date_to: "2026-06-12".to_string(),
+                internal_domains: vec![],
+                ignored_senders: vec![],
+                ignored_domains: vec![],
+                ignored_keywords: vec![],
+            },
+        );
+        answered.response_time_minutes = Some(20);
+        let ignored = EmailThread {
+            classification: Classification::Misc,
+            is_valid_client_request: false,
+            ..answered.clone()
+        };
+        let metrics = calculate_metrics(&[answered, ignored], 12, 4);
+        assert_eq!(metrics.valid_requests, 1);
+        assert_eq!(metrics.answered, 1);
+        assert_eq!(metrics.unanswered, 0);
+        assert_eq!(metrics.ai_input_tokens, 12);
+    }
+
+    #[test]
+    fn ai_auto_apply_requires_threshold_and_known_ids() {
+        let result = AiAuditResult {
+            classification: Classification::ValidClientRequest,
+            is_valid_client_request: true,
+            is_answered: true,
+            first_client_message_id: Some("m1".to_string()),
+            first_internal_reply_message_id: Some("m2".to_string()),
+            confidence: 0.93,
+            manual_review_required: false,
+            issues: vec![],
+            input_tokens: 10,
+            output_tokens: 5,
+        };
+        assert!(should_auto_apply_ai(&result, &["m1".to_string(), "m2".to_string()]));
+        assert!(!should_auto_apply_ai(&result, &["m1".to_string()]));
+    }
+}
+

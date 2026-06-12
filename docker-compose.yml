@@ -1,0 +1,34 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    env_file:
+      - path: .env
+        required: false
+    ports:
+      - "8080:8080"
+    depends_on:
+      - ai-worker
+
+  ai-worker:
+    build:
+      context: .
+      dockerfile: apps/ai-worker/Dockerfile
+    env_file:
+      - path: .env
+        required: false
+    ports:
+      - "8090:8090"
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    env_file:
+      - path: .env
+        required: false
+    ports:
+      - "5173:5173"
+    depends_on:
+      - api
