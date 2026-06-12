@@ -8,6 +8,9 @@ from ai_worker.schemas import AuditThreadRequest
 from ai_worker.settings import Settings
 
 
+NOVA_2_LITE_MODEL_ID = "amazon.nova-2-lite-v1:0"
+
+
 def payload() -> AuditThreadRequest:
     return AuditThreadRequest.model_validate(
         {
@@ -48,6 +51,10 @@ def payload() -> AuditThreadRequest:
 async def test_audit_parses_bedrock_response() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         assert request.headers["authorization"] == "Bearer token"
+        assert request.url == httpx.URL(
+            "https://bedrock-runtime.us-east-1.amazonaws.com"
+            "/model/amazon.nova-2-lite-v1%3A0/converse"
+        )
         return httpx.Response(
             200,
             json={
@@ -80,13 +87,20 @@ async def test_audit_parses_bedrock_response() -> None:
     async with httpx.AsyncClient(transport=transport) as client:
         result = await audit_with_bedrock(
             payload(),
-            Settings(AWS_BEARER_TOKEN_BEDROCK="token"),
+            Settings(
+                AWS_BEARER_TOKEN_BEDROCK="token",
+                BEDROCK_MODEL_ID=NOVA_2_LITE_MODEL_ID,
+            ),
             client,
         )
 
     assert result.confidence == 0.94
     assert result.input_tokens == 123
     assert result.output_tokens == 45
+
+
+def test_settings_default_model_is_nova_2_lite() -> None:
+    assert Settings.model_fields["bedrock_model_id"].default == NOVA_2_LITE_MODEL_ID
 
 
 @pytest.mark.asyncio

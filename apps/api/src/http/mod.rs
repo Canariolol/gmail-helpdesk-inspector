@@ -113,7 +113,12 @@ async fn auth_google_login(State(state): State<AppState>) -> Result<impl IntoRes
     let mut headers = HeaderMap::new();
     headers.insert(
         header::SET_COOKIE,
-        HeaderValue::from_str(&oauth_cookie(&signed_oauth)).unwrap(),
+        HeaderValue::from_str(&oauth_cookie(
+            &signed_oauth,
+            &state.config.cookie_same_site,
+            state.config.cookie_secure,
+        ))
+        .unwrap(),
     );
     Ok((headers, Redirect::temporary(url.as_str())))
 }
@@ -186,11 +191,20 @@ async fn auth_google_callback(
     let mut headers = HeaderMap::new();
     headers.append(
         header::SET_COOKIE,
-        HeaderValue::from_str(&session_cookie(&signed)).unwrap(),
+        HeaderValue::from_str(&session_cookie(
+            &signed,
+            &state.config.cookie_same_site,
+            state.config.cookie_secure,
+        ))
+        .unwrap(),
     );
     headers.append(
         header::SET_COOKIE,
-        HeaderValue::from_str(&clear_oauth_cookie()).unwrap(),
+        HeaderValue::from_str(&clear_oauth_cookie(
+            &state.config.cookie_same_site,
+            state.config.cookie_secure,
+        ))
+        .unwrap(),
     );
     headers.insert(
         header::LOCATION,
@@ -199,11 +213,15 @@ async fn auth_google_callback(
     Ok((StatusCode::FOUND, headers))
 }
 
-async fn auth_logout() -> impl IntoResponse {
+async fn auth_logout(State(state): State<AppState>) -> impl IntoResponse {
     let mut headers = HeaderMap::new();
     headers.insert(
         header::SET_COOKIE,
-        HeaderValue::from_str(&clear_session_cookie()).unwrap(),
+        HeaderValue::from_str(&clear_session_cookie(
+            &state.config.cookie_same_site,
+            state.config.cookie_secure,
+        ))
+        .unwrap(),
     );
     (StatusCode::NO_CONTENT, headers)
 }
@@ -396,7 +414,7 @@ async fn get_thread(
     State(state): State<AppState>,
     Path(thread_id): Path<String>,
 ) -> Result<Json<ThreadDetailResponse>, ApiError> {
-    let thread = state
+    let mut thread = state
         .storage
         .get_thread(&thread_id)
         .await?
@@ -405,6 +423,9 @@ async fn get_thread(
         .storage
         .list_messages(&thread.analysis_run_id, &thread.id)
         .await?;
+    if thread.first_message_at.is_none() {
+        thread.first_message_at = messages.iter().map(|message| message.date).min();
+    }
     Ok(Json(ThreadDetailResponse { thread, messages }))
 }
 
@@ -523,6 +544,18 @@ async fn execute_analysis(
             .gmail
             .fetch_thread(&access_token, &thread_id, &run.config)
             .await?;
+        if !data.is_primary_inbox {
+            run.processed_threads += 1;
+            run.progress_message = format!(
+                "Procesados {}/{} hilos · IA entrada {} · salida {} tokens",
+                run.processed_threads,
+                run.total_candidate_threads,
+                ai_input_tokens,
+                ai_output_tokens
+            );
+            state.storage.update_analysis_run(&run).await?;
+            continue;
+        }
         if let Some(first_message) = data.messages.iter().min_by_key(|message| message.date) {
             if !message_is_inside_analysis_window(first_message, &run.config) {
                 run.processed_threads += 1;
@@ -573,19 +606,22 @@ async fn execute_analysis(
                         thread.last_internal_message_id = audit.last_internal_message_id.clone();
                         apply_trace_dates(&mut thread, &data.messages);
                         thread.manual_review_required = false;
-                        thread
-                            .reasons
-                            .push("AI audit auto-applied above strict threshold".to_string());
+                        thread.reasons.push(
+                            "La auditoría IA se aplicó automáticamente por alta confianza."
+                                .to_string(),
+                        );
                     } else {
                         thread.manual_review_required = true;
                         thread
                             .reasons
-                            .push("AI audit requires manual confirmation".to_string());
+                            .push("La auditoría IA requiere confirmación manual.".to_string());
                     }
                 }
                 Err(error) => {
                     thread.manual_review_required = true;
-                    thread.reasons.push(format!("AI audit failed: {error}"));
+                    thread
+                        .reasons
+                        .push(format!("La auditoría IA falló: {error}"));
                 }
             }
         }
@@ -659,7 +695,7 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
         return value.to_string();
     }
     let mut truncated = value.chars().take(max_chars).collect::<String>();
-    truncated.push_str("\n[truncated]");
+    truncated.push_str("\n[truncado]");
     truncated
 }
 
@@ -700,16 +736,28 @@ async fn audit_thread(
         messages: &'a [EmailMessage],
     }
 
-    let response = state
+    let mut request = state
         .http
         .post(format!("{}/audit/thread", state.config.ai.worker_url))
-        .json(&AuditRequest { thread, messages })
+        .json(&AuditRequest { thread, messages });
+    if let Some(audience) = &state.config.ai.worker_audience {
+        request = request.bearer_auth(fetch_cloud_run_identity_token(&state.http, audience).await?);
+    }
+    let response = request.send().await?.error_for_status()?.json().await?;
+    Ok(response)
+}
+
+async fn fetch_cloud_run_identity_token(client: &Client, audience: &str) -> anyhow::Result<String> {
+    let token = client
+        .get("http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity")
+        .header("Metadata-Flavor", "Google")
+        .query(&[("audience", audience)])
         .send()
         .await?
         .error_for_status()?
-        .json()
+        .text()
         .await?;
-    Ok(response)
+    Ok(token)
 }
 
 async fn recalculate_run_metrics(state: &AppState, run_id: &str) -> anyhow::Result<()> {
@@ -736,18 +784,25 @@ fn excluded_sample_ids(ids: &[String]) -> Vec<String> {
 }
 
 async fn require_session(state: &AppState, headers: &HeaderMap) -> Result<UserSession, ApiError> {
-    let cookie = headers
+    let Some(cookie) = headers
         .get(header::COOKIE)
         .and_then(|v| v.to_str().ok())
         .and_then(|cookies| extract_named_cookie(cookies, "ghmi_session"))
-        .ok_or(ApiError::unauthorized())?;
-    let session_id = verify_session_cookie(&cookie, &state.config.session_secret)
-        .ok_or(ApiError::unauthorized())?;
-    state
-        .storage
-        .get_user_session(&session_id)
-        .await?
-        .ok_or(ApiError::unauthorized())
+    else {
+        tracing::warn!("auth rejected: ghmi_session cookie missing");
+        return Err(ApiError::unauthorized());
+    };
+
+    let Some(session_id) = verify_session_cookie(&cookie, &state.config.session_secret) else {
+        tracing::warn!("auth rejected: ghmi_session cookie signature invalid");
+        return Err(ApiError::unauthorized());
+    };
+
+    let session = state.storage.get_user_session(&session_id).await?;
+    if session.is_none() {
+        tracing::warn!(session_id, "auth rejected: session not found in storage");
+    }
+    session.ok_or(ApiError::unauthorized())
 }
 
 fn extract_named_cookie(cookies: &str, expected_name: &str) -> Option<String> {
@@ -780,14 +835,14 @@ impl ApiError {
     fn unauthorized() -> Self {
         Self {
             status: StatusCode::UNAUTHORIZED,
-            message: "authentication required".to_string(),
+            message: "Autenticación requerida".to_string(),
         }
     }
 
     fn forbidden() -> Self {
         Self {
             status: StatusCode::FORBIDDEN,
-            message: "forbidden".to_string(),
+            message: "Acceso denegado".to_string(),
         }
     }
 

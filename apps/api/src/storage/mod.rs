@@ -121,16 +121,27 @@ impl StorageRepository for MemoryStorage {
     }
 
     async fn list_threads(&self, run_id: &str) -> anyhow::Result<Vec<EmailThread>> {
-        let mut threads: Vec<_> = self
-            .inner
-            .read()
-            .await
+        let inner = self.inner.read().await;
+        let mut threads: Vec<_> = inner
             .threads
             .values()
             .filter(|thread| thread.analysis_run_id == run_id)
             .cloned()
             .collect();
-        threads.sort_by_key(|thread| thread.first_client_message_at.unwrap_or(thread.created_at));
+        for thread in &mut threads {
+            if thread.first_message_at.is_none() {
+                thread.first_message_at = inner
+                    .messages
+                    .get(&format!("{run_id}:{}", thread.id))
+                    .and_then(|messages| messages.iter().map(|message| message.date).min());
+            }
+        }
+        threads.sort_by_key(|thread| {
+            thread
+                .first_message_at
+                .or(thread.first_client_message_at)
+                .unwrap_or(thread.created_at)
+        });
         Ok(threads)
     }
 

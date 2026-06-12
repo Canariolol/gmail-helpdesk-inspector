@@ -11,6 +11,9 @@ use serde_json::{Map, Value, json};
 
 use crate::analysis::{AnalysisConfig, EmailMessage, is_automated_sender, is_internal_email};
 
+const PRIMARY_INBOX_LABELS: [&str; 2] = ["INBOX", "CATEGORY_PERSONAL"];
+const EXCLUDED_MESSAGE_LABELS: [&str; 2] = ["SPAM", "TRASH"];
+
 #[derive(Clone)]
 pub struct GmailClient {
     client: Client,
@@ -19,6 +22,7 @@ pub struct GmailClient {
 #[derive(Debug, Clone)]
 pub struct GmailThreadData {
     pub id: String,
+    pub is_primary_inbox: bool,
     pub messages: Vec<EmailMessage>,
 }
 
@@ -45,6 +49,8 @@ struct GmailMessageResponse {
     id: String,
     #[serde(default)]
     snippet: String,
+    #[serde(rename = "labelIds", default)]
+    label_ids: Vec<String>,
     payload: GmailPayload,
     #[serde(rename = "internalDate")]
     internal_date: Option<String>,
@@ -87,16 +93,7 @@ impl GmailClient {
         config: &AnalysisConfig,
         max_threads: u32,
     ) -> anyhow::Result<Vec<String>> {
-        let query = format!(
-            "after:{} before:{}",
-            config.date_from.replace('-', "/"),
-            gmail_end_exclusive(&config.date_to)
-        );
-        let url = format!(
-            "https://gmail.googleapis.com/gmail/v1/users/me/threads?q={}&maxResults={}",
-            utf8_percent_encode(&query, NON_ALPHANUMERIC),
-            max_threads
-        );
+        let url = build_thread_list_url(config, max_threads);
         let response: ThreadListResponse = self
             .client
             .get(url)
@@ -134,16 +131,31 @@ impl GmailClient {
             .json()
             .await?;
 
-        let messages = response
-            .messages
-            .into_iter()
-            .map(|message| normalize_message(message, config))
-            .collect::<anyhow::Result<Vec<_>>>()?;
+        let is_primary_inbox = thread_has_all_labels(&response.messages, &PRIMARY_INBOX_LABELS);
+        let messages = normalize_visible_messages(response.messages, config)?;
         Ok(GmailThreadData {
             id: response.id,
+            is_primary_inbox,
             messages,
         })
     }
+}
+
+fn build_thread_list_url(config: &AnalysisConfig, max_threads: u32) -> String {
+    let query = gmail_thread_search_query(config);
+    format!(
+        "https://gmail.googleapis.com/gmail/v1/users/me/threads?q={}&maxResults={}&includeSpamTrash=false&labelIds=INBOX&labelIds=CATEGORY_PERSONAL",
+        utf8_percent_encode(&query, NON_ALPHANUMERIC),
+        max_threads
+    )
+}
+
+fn gmail_thread_search_query(config: &AnalysisConfig) -> String {
+    format!(
+        "after:{} before:{}",
+        config.date_from.replace('-', "/"),
+        gmail_end_exclusive(&config.date_to)
+    )
 }
 
 fn gmail_end_exclusive(date_to: &str) -> String {
@@ -152,6 +164,38 @@ fn gmail_end_exclusive(date_to: &str) -> String {
         .and_then(|date| date.checked_add_days(Days::new(1)))
         .map(|date| date.format("%Y/%m/%d").to_string())
         .unwrap_or_else(|| date_to.replace('-', "/"))
+}
+
+fn message_has_label(message: &GmailMessageResponse, label: &str) -> bool {
+    message
+        .label_ids
+        .iter()
+        .any(|message_label| message_label.eq_ignore_ascii_case(label))
+}
+
+fn message_has_any_label(message: &GmailMessageResponse, labels: &[&str]) -> bool {
+    labels.iter().any(|label| message_has_label(message, label))
+}
+
+fn message_has_all_labels(message: &GmailMessageResponse, labels: &[&str]) -> bool {
+    labels.iter().all(|label| message_has_label(message, label))
+}
+
+fn thread_has_all_labels(messages: &[GmailMessageResponse], labels: &[&str]) -> bool {
+    messages
+        .iter()
+        .any(|message| message_has_all_labels(message, labels))
+}
+
+fn normalize_visible_messages(
+    messages: Vec<GmailMessageResponse>,
+    config: &AnalysisConfig,
+) -> anyhow::Result<Vec<EmailMessage>> {
+    messages
+        .into_iter()
+        .filter(|message| !message_has_any_label(message, &EXCLUDED_MESSAGE_LABELS))
+        .map(|message| normalize_message(message, config))
+        .collect()
 }
 
 fn normalize_message(
@@ -271,4 +315,107 @@ fn collect_text(payload: &GmailPayload, chunks: &mut Vec<String>) {
 fn html_to_text(html: &str) -> String {
     let fragment = scraper::Html::parse_fragment(html);
     fragment.root_element().text().collect::<Vec<_>>().join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config() -> AnalysisConfig {
+        AnalysisConfig {
+            date_from: "2026-06-01".to_string(),
+            date_to: "2026-06-12".to_string(),
+            time_from: "00:00".to_string(),
+            time_to: "23:59".to_string(),
+            timezone: "America/Santiago".to_string(),
+            internal_domains: vec!["company.test".to_string()],
+            ignored_senders: vec![],
+            ignored_domains: vec![],
+            ignored_keywords: vec![],
+        }
+    }
+
+    fn gmail_message(id: &str, labels: Vec<&str>) -> GmailMessageResponse {
+        GmailMessageResponse {
+            id: id.to_string(),
+            snippet: "hola".to_string(),
+            label_ids: labels.into_iter().map(str::to_string).collect(),
+            payload: GmailPayload {
+                mime_type: None,
+                headers: vec![
+                    GmailHeader {
+                        name: "From".to_string(),
+                        value: "Cliente <client@example.com>".to_string(),
+                    },
+                    GmailHeader {
+                        name: "Subject".to_string(),
+                        value: "Ayuda".to_string(),
+                    },
+                ],
+                body: None,
+                parts: vec![],
+            },
+            internal_date: Some("1780358400000".to_string()),
+        }
+    }
+
+    #[test]
+    fn thread_list_url_requests_primary_inbox_and_excludes_spam_and_trash() {
+        let url = url::Url::parse(&build_thread_list_url(&config(), 25)).unwrap();
+        let query = url
+            .query_pairs()
+            .collect::<std::collections::HashMap<_, _>>();
+        let label_ids = url
+            .query_pairs()
+            .filter_map(|(key, value)| (key == "labelIds").then(|| value.to_string()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            query.get("q").map(|value| value.as_ref()),
+            Some("after:2026/06/01 before:2026/06/13")
+        );
+        assert_eq!(
+            query.get("maxResults").map(|value| value.as_ref()),
+            Some("25")
+        );
+        assert_eq!(
+            query.get("includeSpamTrash").map(|value| value.as_ref()),
+            Some("false")
+        );
+        assert_eq!(label_ids, vec!["INBOX", "CATEGORY_PERSONAL"]);
+    }
+
+    #[test]
+    fn normalize_visible_messages_omits_messages_labeled_as_spam_or_trash() {
+        let messages = normalize_visible_messages(
+            vec![
+                gmail_message("keep", vec!["INBOX"]),
+                gmail_message("skip", vec!["SPAM"]),
+                gmail_message("trash", vec!["TRASH"]),
+            ],
+            &config(),
+        )
+        .unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].id, "keep");
+    }
+
+    #[test]
+    fn thread_primary_inbox_requires_inbox_and_personal_labels_on_one_message() {
+        assert!(thread_has_all_labels(
+            &[
+                gmail_message("primary", vec!["INBOX", "CATEGORY_PERSONAL"]),
+                gmail_message("sent", vec!["SENT"]),
+            ],
+            &PRIMARY_INBOX_LABELS,
+        ));
+        assert!(!thread_has_all_labels(
+            &[
+                gmail_message("promo", vec!["INBOX", "CATEGORY_PROMOTIONS"]),
+                gmail_message("sent", vec!["SENT"]),
+            ],
+            &PRIMARY_INBOX_LABELS,
+        ));
+    }
 }

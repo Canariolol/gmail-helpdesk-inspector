@@ -8,6 +8,8 @@ pub struct AppConfig {
     pub api_port: u16,
     pub web_base_url: String,
     pub api_base_url: String,
+    pub cookie_secure: bool,
+    pub cookie_same_site: String,
     pub app_storage: String,
     pub encryption_key: String,
     pub session_secret: String,
@@ -35,6 +37,7 @@ pub struct FirestoreConfig {
 #[derive(Debug, Clone)]
 pub struct AiConfig {
     pub worker_url: String,
+    pub worker_audience: Option<String>,
     pub apply_confidence_threshold: f64,
 }
 
@@ -57,12 +60,25 @@ impl AppConfig {
             require("GCP_PROJECT_ID")?;
         }
 
+        let api_base_url = env_or("API_BASE_URL", "http://localhost:8080");
+        let cookie_secure = env::var("APP_COOKIE_SECURE")
+            .ok()
+            .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+            .unwrap_or_else(|| api_base_url.starts_with("https://"));
+        let cookie_same_site = env_or(
+            "APP_COOKIE_SAMESITE",
+            if cookie_secure { "None" } else { "Lax" },
+        );
+
         Ok(Self {
-            api_port: env_or("API_PORT", "8080")
+            api_port: env::var("PORT")
+                .unwrap_or_else(|_| env_or("API_PORT", "8080"))
                 .parse()
                 .context("invalid API_PORT")?,
             web_base_url: env_or("WEB_BASE_URL", "http://localhost:5173"),
-            api_base_url: env_or("API_BASE_URL", "http://localhost:8080"),
+            api_base_url,
+            cookie_secure,
+            cookie_same_site,
             app_storage,
             encryption_key: require("APP_ENCRYPTION_KEY")
                 .unwrap_or_else(|_| "development-only-change-me-32-bytes".to_string()),
@@ -79,6 +95,7 @@ impl AppConfig {
             },
             ai: AiConfig {
                 worker_url: env_or("AI_WORKER_URL", "http://localhost:8090"),
+                worker_audience: empty_to_none(env::var("AI_WORKER_AUDIENCE").ok()),
                 apply_confidence_threshold: env_or("AI_APPLY_CONFIDENCE_THRESHOLD", "0.92")
                     .parse()
                     .context("invalid AI_APPLY_CONFIDENCE_THRESHOLD")?,

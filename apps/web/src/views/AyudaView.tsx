@@ -1,0 +1,76 @@
+import type { Classification } from "../api/types";
+import { StatusBadge } from "../components/common/StatusBadge";
+
+const classifications: Classification[] = [
+  "valid_client_request",
+  "internal",
+  "automated",
+  "newsletter",
+  "spam",
+  "misc",
+  "ambiguous",
+];
+
+export function AyudaView() {
+  return (
+    <div className="view ayuda">
+      <section className="card">
+        <h2>Cómo usar Gmail Inspector</h2>
+        <ol className="help-steps">
+          <li>
+            <strong>Configura y analiza.</strong> En <em>Resumen</em>, define el rango de fechas y horario, los dominios
+            internos de tu empresa y lo que quieres ignorar (dominios y palabras clave). Pulsa <em>Analizar</em> para
+            crear e iniciar el análisis de la casilla.
+          </li>
+          <li>
+            <strong>Sigue el progreso.</strong> El banner muestra el avance (hilos procesados y tokens de IA consumidos).
+            Las métricas y gráficos se actualizan automáticamente cada pocos segundos.
+          </li>
+          <li>
+            <strong>Audita los hilos.</strong> En <em>Hilos</em> puedes ver cada conversación con su recepción, primera
+            respuesta y último envío. Haz clic en un hilo para ver la línea de tiempo de mensajes y sus razones de
+            clasificación.
+          </li>
+          <li>
+            <strong>Revisa manualmente.</strong> En <em>Revisión manual</em> encontrarás los hilos donde la IA tuvo dudas.
+            Corrige la clasificación, marca si fue respondido y guarda la revisión: las métricas se recalculan.
+          </li>
+          <li>
+            <strong>Genera reportes.</strong> En <em>Reportes</em> obtienes un consolidado gerencial de varios análisis en
+            un rango de tiempo: totales, promedios ponderados y tendencias.
+          </li>
+        </ol>
+      </section>
+      <section className="card">
+        <h2>Clasificaciones</h2>
+        <ul className="help-list">
+          {classifications.map((classification) => (
+            <li key={classification}>
+              <StatusBadge classification={classification} />
+              <span>{classificationDescriptions[classification]}</span>
+            </li>
+          ))}
+        </ul>
+      </section>
+      <section className="card">
+        <h2>Métricas</h2>
+        <ul className="help-list plain">
+          <li><strong>T. medio respuesta:</strong> promedio entre la recepción del primer mensaje del cliente y la primera respuesta interna.</li>
+          <li><strong>P90 respuesta:</strong> el 90% de las solicitudes se respondió en este tiempo o menos.</li>
+          <li><strong>Cierre medio:</strong> promedio entre la recepción y el último envío interno del hilo.</li>
+          <li><strong>Confianza:</strong> certeza promedio de la clasificación automática (reglas + IA).</li>
+        </ul>
+      </section>
+    </div>
+  );
+}
+
+const classificationDescriptions: Record<Classification, string> = {
+  valid_client_request: "Solicitud real de un cliente que requiere atención del equipo.",
+  internal: "Conversación entre miembros del equipo interno.",
+  automated: "Mensaje generado automáticamente (confirmaciones, avisos de sistema).",
+  newsletter: "Boletines y correos de marketing.",
+  spam: "Correo no deseado.",
+  misc: "Correo ignorado según los filtros configurados.",
+  ambiguous: "La IA no pudo clasificarlo con certeza; requiere revisión manual.",
+};

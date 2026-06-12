@@ -5,7 +5,7 @@ import re
 
 import httpx
 
-from ai_worker.schemas import AuditThreadRequest, AuditThreadResponse, ClaudeDecision
+from ai_worker.schemas import AuditThreadRequest, AuditThreadResponse, BedrockDecision
 from ai_worker.settings import Settings
 
 
@@ -125,7 +125,7 @@ async def audit_with_bedrock(
         .get("content", [{}])[0]
         .get("text", "")
     )
-    decision = ClaudeDecision.model_validate_json(extract_json_text(text))
+    decision = BedrockDecision.model_validate_json(extract_json_text(text))
     usage = raw.get("usage", {})
     return AuditThreadResponse(
         **decision.model_dump(),

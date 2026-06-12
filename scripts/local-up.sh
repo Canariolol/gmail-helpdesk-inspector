@@ -46,8 +46,8 @@ elif [[ "$google_credentials" == /secrets/* ]]; then
 fi
 
 echo "Starting Gmail Helpdesk Inspector..."
-echo "Web:        http://localhost:5173"
-echo "API health: http://localhost:8080/health"
-echo "Worker:     http://localhost:8090/health"
+echo "Web:        http://127.0.0.1:5173"
+echo "API health: http://127.0.0.1:8080/health"
+echo "Worker:     http://127.0.0.1:8090/health"
 
 exec docker compose up --build "$@"

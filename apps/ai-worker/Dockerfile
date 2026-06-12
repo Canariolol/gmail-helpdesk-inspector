@@ -5,4 +5,4 @@ RUN pip install --no-cache-dir ".[test]"
 COPY apps/ai-worker/src src
 ENV PYTHONPATH=/app/src
 EXPOSE 8090
-CMD ["uvicorn", "ai_worker.main:app", "--host", "0.0.0.0", "--port", "8090"]
+CMD ["sh", "-c", "uvicorn ai_worker.main:app --host 0.0.0.0 --port ${PORT:-8090}"]

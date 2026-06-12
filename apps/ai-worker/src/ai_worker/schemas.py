@@ -71,7 +71,7 @@ class AuditThreadResponse(BaseModel):
     output_tokens: int = Field(ge=0)
 
 
-class ClaudeDecision(BaseModel):
+class BedrockDecision(BaseModel):
     classification: Classification
     is_valid_client_request: bool
     is_answered: bool

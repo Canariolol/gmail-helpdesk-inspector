@@ -151,6 +151,8 @@ pub struct EmailThread {
     pub classification_confidence: f64,
     pub is_valid_client_request: bool,
     pub is_answered: bool,
+    #[serde(default)]
+    pub first_message_at: Option<DateTime<Utc>>,
     pub first_client_message_id: Option<String>,
     pub first_internal_reply_message_id: Option<String>,
     #[serde(default)]
@@ -237,7 +239,7 @@ pub fn classify_thread(
     let lower_subject = subject.to_lowercase();
 
     if messages.is_empty() {
-        reasons.push("thread has no readable messages".to_string());
+        reasons.push("El hilo no tiene mensajes legibles.".to_string());
         return build_thread(
             analysis_run_id,
             gmail_thread_id,
@@ -248,6 +250,7 @@ pub fn classify_thread(
             0.2,
             false,
             false,
+            None,
             None,
             None,
             None,
@@ -264,8 +267,7 @@ pub fn classify_thread(
 
     if first_message.is_internal {
         reasons.push(
-            "thread starts with an internal sender; outbound-origin threads are excluded"
-                .to_string(),
+            "El hilo comenzó con un correo interno; se excluye por ser saliente.".to_string(),
         );
         return build_thread(
             analysis_run_id,
@@ -280,6 +282,7 @@ pub fn classify_thread(
             None,
             None,
             None,
+            Some(first_message.date),
             false,
             reasons,
             now,
@@ -287,7 +290,7 @@ pub fn classify_thread(
     }
 
     if first_message.is_automated {
-        reasons.push("thread starts with an automated external sender".to_string());
+        reasons.push("El hilo comenzó con un remitente externo automático.".to_string());
         return build_thread(
             analysis_run_id,
             gmail_thread_id,
@@ -301,6 +304,7 @@ pub fn classify_thread(
             None,
             None,
             None,
+            Some(first_message.date),
             false,
             reasons,
             now,
@@ -312,19 +316,20 @@ pub fn classify_thread(
         .iter()
         .any(|kw| lower_subject.contains(&kw.to_lowercase()))
     {
-        reasons.push("subject matches ignored keyword".to_string());
+        reasons.push("El asunto coincide con una palabra ignorada.".to_string());
         return ignored_thread(
             analysis_run_id,
             gmail_thread_id,
             subject,
             normalized_subject,
+            Some(first_message.date),
             reasons,
             now,
         );
     }
 
     if messages.iter().all(|m| m.is_internal) {
-        reasons.push("all participants are internal".to_string());
+        reasons.push("Todos los participantes son internos.".to_string());
         return build_thread(
             analysis_run_id,
             gmail_thread_id,
@@ -338,6 +343,7 @@ pub fn classify_thread(
             None,
             None,
             None,
+            Some(first_message.date),
             false,
             reasons,
             now,
@@ -347,7 +353,7 @@ pub fn classify_thread(
     if messages.iter().any(|m| m.is_automated)
         && messages.iter().all(|m| !m.is_external || m.is_automated)
     {
-        reasons.push("external messages look automated".to_string());
+        reasons.push("Los mensajes externos parecen automáticos.".to_string());
         return build_thread(
             analysis_run_id,
             gmail_thread_id,
@@ -361,6 +367,7 @@ pub fn classify_thread(
             None,
             None,
             None,
+            Some(first_message.date),
             false,
             reasons,
             now,
@@ -371,7 +378,7 @@ pub fn classify_thread(
         || lower_subject.contains("boletin")
         || lower_subject.contains("boletín")
     {
-        reasons.push("subject looks like newsletter".to_string());
+        reasons.push("El asunto parece un boletín o correo promocional.".to_string());
         return build_thread(
             analysis_run_id,
             gmail_thread_id,
@@ -385,6 +392,7 @@ pub fn classify_thread(
             None,
             None,
             None,
+            Some(first_message.date),
             false,
             reasons,
             now,
@@ -398,12 +406,13 @@ pub fn classify_thread(
             &config.ignored_domains,
         )
     }) {
-        reasons.push("sender/domain is ignored by configuration".to_string());
+        reasons.push("El remitente o dominio está configurado como ignorado.".to_string());
         return ignored_thread(
             analysis_run_id,
             gmail_thread_id,
             subject,
             normalized_subject,
+            Some(first_message.date),
             reasons,
             now,
         );
@@ -415,7 +424,7 @@ pub fn classify_thread(
         .min_by_key(|m| m.date);
 
     let Some(first_client) = first_client else {
-        reasons.push("no clear human external sender found".to_string());
+        reasons.push("No se encontró un remitente externo humano claro.".to_string());
         return build_thread(
             analysis_run_id,
             gmail_thread_id,
@@ -429,6 +438,7 @@ pub fn classify_thread(
             None,
             None,
             None,
+            Some(first_message.date),
             true,
             reasons,
             now,
@@ -448,14 +458,14 @@ pub fn classify_thread(
         last_internal.map(|message| (message.date - first_client.date).num_minutes());
     let suspicious = messages.len() >= 8 || messages.iter().filter(|m| m.is_external).count() >= 4;
 
-    reasons.push("first relevant message comes from an external human sender".to_string());
+    reasons.push("El primer mensaje relevante viene de un remitente externo humano.".to_string());
     if first_reply.is_some() {
-        reasons.push("found later internal non-automated reply".to_string());
+        reasons.push("Se encontró una respuesta interna posterior no automática.".to_string());
     } else {
-        reasons.push("no later internal reply found".to_string());
+        reasons.push("No se encontró una respuesta interna posterior.".to_string());
     }
     if suspicious {
-        reasons.push("thread shape is suspicious and should be audited".to_string());
+        reasons.push("La forma del hilo es sospechosa y requiere auditoría.".to_string());
     }
 
     build_thread(
@@ -471,6 +481,7 @@ pub fn classify_thread(
         Some(first_client.id.clone()),
         first_reply.map(|m| m.id.clone()),
         last_internal.map(|m| m.id.clone()),
+        Some(first_message.date),
         suspicious,
         reasons,
         now,
@@ -489,6 +500,7 @@ fn ignored_thread(
     gmail_thread_id: &str,
     subject: String,
     normalized_subject: String,
+    first_message_at: Option<DateTime<Utc>>,
     reasons: Vec<String>,
     now: DateTime<Utc>,
 ) -> EmailThread {
@@ -505,6 +517,7 @@ fn ignored_thread(
         None,
         None,
         None,
+        first_message_at,
         false,
         reasons,
         now,
@@ -525,6 +538,7 @@ fn build_thread(
     first_client_message_id: Option<String>,
     first_internal_reply_message_id: Option<String>,
     last_internal_message_id: Option<String>,
+    first_message_at: Option<DateTime<Utc>>,
     manual_review_required: bool,
     reasons: Vec<String>,
     now: DateTime<Utc>,
@@ -540,6 +554,7 @@ fn build_thread(
         classification_confidence,
         is_valid_client_request,
         is_answered,
+        first_message_at,
         first_client_message_id,
         first_internal_reply_message_id,
         last_internal_message_id,
@@ -594,7 +609,7 @@ pub fn sender_is_ignored(
     ignored_senders.iter().any(|s| s.to_lowercase() == lower)
         || ignored_domains
             .iter()
-            .any(|domain| lower.ends_with(&format!("@{}", domain.to_lowercase())))
+            .any(|domain| email_matches_domain(&lower, domain))
 }
 
 pub fn is_automated_sender(email: &str, headers: &serde_json::Value) -> bool {
@@ -615,7 +630,12 @@ pub fn is_internal_email(email: &str, domains: &[String]) -> bool {
     let lower = email.to_lowercase();
     domains
         .iter()
-        .any(|domain| lower.ends_with(&format!("@{}", domain.trim().to_lowercase())))
+        .any(|domain| email_matches_domain(&lower, domain))
+}
+
+fn email_matches_domain(lower_email: &str, domain: &str) -> bool {
+    let normalized = domain.trim().trim_start_matches('@').to_lowercase();
+    !normalized.is_empty() && lower_email.ends_with(&format!("@{normalized}"))
 }
 
 pub fn message_is_inside_analysis_window(message: &EmailMessage, config: &AnalysisConfig) -> bool {
@@ -821,6 +841,32 @@ mod tests {
     }
 
     #[test]
+    fn stores_first_message_timestamp_for_non_valid_threads() {
+        let message = msg("m1", "agent@company.test", true, 0);
+        let expected_at = message.date;
+        let thread = classify_thread(
+            "run",
+            "outbound",
+            &[message],
+            &AnalysisConfig {
+                date_from: "2026-06-01".to_string(),
+                date_to: "2026-06-12".to_string(),
+                time_from: "00:00".to_string(),
+                time_to: "23:59".to_string(),
+                timezone: "America/Santiago".to_string(),
+                internal_domains: vec!["company.test".to_string()],
+                ignored_senders: vec![],
+                ignored_domains: vec![],
+                ignored_keywords: vec![],
+            },
+        );
+
+        assert_eq!(thread.classification, Classification::Misc);
+        assert_eq!(thread.first_message_at, Some(expected_at));
+        assert_eq!(thread.first_client_message_at, None);
+    }
+
+    #[test]
     fn ai_auto_apply_requires_threshold_and_known_ids() {
         let result = AiAuditResult {
             classification: Classification::ValidClientRequest,
@@ -840,5 +886,21 @@ mod tests {
             &["m1".to_string(), "m2".to_string()]
         ));
         assert!(!should_auto_apply_ai(&result, &["m1".to_string()]));
+    }
+
+    #[test]
+    fn internal_domain_matching_accepts_leading_at() {
+        assert!(is_internal_email(
+            "agente@west-ingenieria.cl",
+            &["@west-ingenieria.cl".to_string()]
+        ));
+        assert!(is_internal_email(
+            "agente@west-ingenieria.cl",
+            &["west-ingenieria.cl".to_string()]
+        ));
+        assert!(!is_internal_email(
+            "agente@otra-west-ingenieria.cl",
+            &["@west-ingenieria.cl".to_string()]
+        ));
     }
 }

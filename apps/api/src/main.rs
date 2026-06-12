@@ -26,7 +26,10 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::registry()
-        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,tower_http=info".into()))
+        .with(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info,tower_http=info,html5ever::tree_builder=error".into()),
+        )
         .with(tracing_subscriber::fmt::layer())
         .init();
 

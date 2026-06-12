@@ -7,7 +7,8 @@
 ```
 
 This builds and starts the local web, API, and AI worker with Docker Compose.
-Open `http://localhost:5173` when the services are ready.
+Open `http://127.0.0.1:5173` when the services are ready.
+Docker publishes local ports on loopback only.
 
 Open-source MVP for auditing a Gmail inbox used as a lightweight help desk.
 
@@ -40,7 +41,7 @@ Amazon Bedrock as a mandatory quality auditor.
    ./scripts/local-up.sh
    ```
 
-4. Open `http://localhost:5173`.
+4. Open `http://127.0.0.1:5173`.
 
 ## Firestore Notes
 

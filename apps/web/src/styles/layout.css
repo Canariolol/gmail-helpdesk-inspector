@@ -1,0 +1,253 @@
+.app-shell {
+  display: grid;
+  grid-template-columns: 252px minmax(0, 1fr);
+  min-height: 100vh;
+}
+
+/* Sidebar */
+.sidebar {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  background: var(--surface-soft);
+  border-right: 1px solid var(--border);
+  padding: var(--space-6) var(--space-4);
+  overflow-y: auto;
+}
+
+.sidebar-brand {
+  display: grid;
+  justify-items: center;
+  gap: 2px;
+  text-align: center;
+  padding-bottom: var(--space-2);
+}
+
+.sidebar-brand img {
+  width: 84px;
+  height: 84px;
+  object-fit: contain;
+  margin-bottom: var(--space-2);
+}
+
+.sidebar-brand strong {
+  font-size: 1.2rem;
+  color: var(--text-strong);
+}
+
+.sidebar-brand span {
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+}
+
+.sidebar-nav {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  color: var(--text-muted);
+  font-weight: 700;
+  text-align: left;
+  transition: background-color 150ms ease, color 150ms ease;
+}
+
+.nav-item:hover {
+  background: var(--primary-soft);
+  color: var(--primary-strong);
+}
+
+.nav-item.active {
+  background: var(--primary-soft);
+  color: var(--primary-strong);
+}
+
+.nav-item > span:not(.nav-badge) {
+  flex: 1;
+}
+
+.nav-badge {
+  flex: 0 0 auto;
+  background: var(--primary);
+  color: #fff;
+  border-radius: var(--radius-pill);
+  font-size: 0.72rem;
+  padding: 2px 8px;
+}
+
+.sidebar-user {
+  margin-top: auto;
+  display: grid;
+  justify-items: center;
+  gap: var(--space-2);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-4);
+  text-align: center;
+}
+
+.sidebar-user img {
+  width: 40px;
+  height: 40px;
+  object-fit: contain;
+}
+
+.sidebar-user-email {
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+  word-break: break-all;
+}
+
+.logout-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  color: var(--text);
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-2);
+  width: 100%;
+  justify-content: center;
+}
+
+.logout-button:hover {
+  color: var(--primary-strong);
+}
+
+/* Área principal */
+.main-area {
+  padding: var(--space-6);
+  min-width: 0;
+}
+
+.view {
+  display: grid;
+  gap: var(--space-4);
+  align-content: start;
+}
+
+.view-col {
+  display: grid;
+  gap: var(--space-4);
+  min-width: 0;
+  align-content: start;
+}
+
+.split-view {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 372px;
+  gap: var(--space-4);
+  align-items: start;
+}
+
+.detail-rail {
+  position: sticky;
+  top: var(--space-6);
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+  min-width: 0;
+}
+
+/* Responsive */
+@media (max-width: 1380px) {
+  .split-view {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .detail-rail {
+    position: static;
+    max-height: none;
+  }
+}
+
+@media (max-width: 1180px) {
+  .app-shell {
+    grid-template-columns: 76px minmax(0, 1fr);
+  }
+
+  .sidebar {
+    padding: var(--space-5) var(--space-2);
+    align-items: center;
+  }
+
+  .sidebar-brand strong,
+  .sidebar-brand span,
+  .nav-item span,
+  .nav-badge,
+  .sidebar-user-info,
+  .logout-button span {
+    display: none;
+  }
+
+  .sidebar-brand img {
+    width: 44px;
+    height: 44px;
+  }
+
+  .nav-item {
+    justify-content: center;
+    padding: 12px;
+  }
+
+  .sidebar-user {
+    padding: var(--space-2);
+    border: 0;
+    background: none;
+  }
+}
+
+@media (max-width: 760px) {
+  .app-shell {
+    display: block;
+  }
+
+  .sidebar {
+    position: static;
+    height: auto;
+    flex-direction: row;
+    align-items: center;
+    gap: var(--space-2);
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+    padding: var(--space-2) var(--space-3);
+    overflow-x: auto;
+  }
+
+  .sidebar-brand {
+    padding-bottom: 0;
+  }
+
+  .sidebar-brand img {
+    width: 36px;
+    height: 36px;
+    margin-bottom: 0;
+  }
+
+  .sidebar-nav {
+    display: flex;
+    gap: var(--space-1);
+  }
+
+  .sidebar-user {
+    margin-top: 0;
+    margin-left: auto;
+  }
+
+  .sidebar-user img {
+    display: none;
+  }
+
+  .main-area {
+    padding: var(--space-4);
+  }
+}

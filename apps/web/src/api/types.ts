@@ -60,6 +60,7 @@ export interface EmailThread {
   classification_confidence: number;
   is_valid_client_request: boolean;
   is_answered: boolean;
+  first_message_at?: string | null;
   first_client_message_id: string | null;
   first_internal_reply_message_id: string | null;
   last_internal_message_id: string | null;

@@ -77,18 +77,25 @@ pub fn verify_session_cookie(cookie_value: &str, secret: &str) -> Option<String>
     }
 }
 
-pub fn session_cookie(value: &str) -> String {
-    format!("ghmi_session={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000")
+pub fn session_cookie(value: &str, same_site: &str, secure: bool) -> String {
+    cookie("ghmi_session", value, 2_592_000, same_site, secure)
 }
 
-pub fn oauth_cookie(value: &str) -> String {
-    format!("ghmi_oauth={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=600")
+pub fn oauth_cookie(value: &str, same_site: &str, secure: bool) -> String {
+    cookie("ghmi_oauth", value, 600, same_site, secure)
 }
 
-pub fn clear_session_cookie() -> String {
-    "ghmi_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0".to_string()
+pub fn clear_session_cookie(same_site: &str, secure: bool) -> String {
+    cookie("ghmi_session", "", 0, same_site, secure)
 }
 
-pub fn clear_oauth_cookie() -> String {
-    "ghmi_oauth=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0".to_string()
+pub fn clear_oauth_cookie(same_site: &str, secure: bool) -> String {
+    cookie("ghmi_oauth", "", 0, same_site, secure)
+}
+
+fn cookie(name: &str, value: &str, max_age: i64, same_site: &str, secure: bool) -> String {
+    let secure_attr = if secure { "; Secure" } else { "" };
+    format!(
+        "{name}={value}; Path=/; HttpOnly; SameSite={same_site}; Max-Age={max_age}{secure_attr}"
+    )
 }

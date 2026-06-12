@@ -271,7 +271,23 @@ impl StorageRepository for FirestoreStorage {
         let mut threads: Vec<EmailThread> = self
             .list(&format!("analysisRuns/{run_id}"), "threads")
             .await?;
-        threads.sort_by_key(|thread| thread.first_client_message_at.unwrap_or(thread.created_at));
+        for thread in &mut threads {
+            if thread.first_message_at.is_none() {
+                let messages: Vec<EmailMessage> = self
+                    .list(
+                        &format!("analysisRuns/{run_id}/threads/{}", thread.id),
+                        "messages",
+                    )
+                    .await?;
+                thread.first_message_at = messages.iter().map(|message| message.date).min();
+            }
+        }
+        threads.sort_by_key(|thread| {
+            thread
+                .first_message_at
+                .or(thread.first_client_message_at)
+                .unwrap_or(thread.created_at)
+        });
         Ok(threads)
     }
 
