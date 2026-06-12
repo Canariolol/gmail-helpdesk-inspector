@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     aws_bearer_token_bedrock: str = Field(default="", alias="AWS_BEARER_TOKEN_BEDROCK")
     aws_region: str = Field(default="us-east-1", alias="AWS_REGION")
     bedrock_model_id: str = Field(
-        default="amazon.nova-2-lite-v1:0",
+        default="us.anthropic.claude-sonnet-4-6",
         alias="BEDROCK_MODEL_ID",
     )
 

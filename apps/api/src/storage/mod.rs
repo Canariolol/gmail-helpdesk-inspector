@@ -8,12 +8,23 @@ use tokio::sync::RwLock;
 use crate::{
     analysis::{AiAuditResult, AnalysisRun, EmailMessage, EmailThread, ManualReview},
     auth::UserSession,
+    scheduler::model::{ScheduleConfig, ScheduleState},
 };
 
 #[async_trait]
 pub trait StorageRepository: Send + Sync {
     async fn upsert_user_session(&self, session: &UserSession) -> anyhow::Result<()>;
     async fn get_user_session(&self, id: &str) -> anyhow::Result<Option<UserSession>>;
+    /// Sesión más reciente del usuario que tenga refresh token; la usa el
+    /// análisis programado para operar sin cookie de sesión.
+    async fn find_latest_session_with_refresh_token(
+        &self,
+        email: &str,
+    ) -> anyhow::Result<Option<UserSession>>;
+    async fn list_schedule_configs(&self) -> anyhow::Result<Vec<ScheduleConfig>>;
+    async fn upsert_schedule_config(&self, config: &ScheduleConfig) -> anyhow::Result<()>;
+    async fn get_schedule_state(&self, user_email: &str) -> anyhow::Result<Option<ScheduleState>>;
+    async fn upsert_schedule_state(&self, state: &ScheduleState) -> anyhow::Result<()>;
     async fn create_analysis_run(&self, run: &AnalysisRun) -> anyhow::Result<()>;
     async fn update_analysis_run(&self, run: &AnalysisRun) -> anyhow::Result<()>;
     async fn get_analysis_run(&self, id: &str) -> anyhow::Result<Option<AnalysisRun>>;
@@ -52,6 +63,8 @@ struct MemoryInner {
     messages: HashMap<String, Vec<EmailMessage>>,
     audits: HashMap<String, Vec<AiAuditResult>>,
     reviews: Vec<ManualReview>,
+    schedule_configs: HashMap<String, ScheduleConfig>,
+    schedule_states: HashMap<String, ScheduleState>,
 }
 
 #[async_trait]
@@ -67,6 +80,62 @@ impl StorageRepository for MemoryStorage {
 
     async fn get_user_session(&self, id: &str) -> anyhow::Result<Option<UserSession>> {
         Ok(self.inner.read().await.sessions.get(id).cloned())
+    }
+
+    async fn find_latest_session_with_refresh_token(
+        &self,
+        email: &str,
+    ) -> anyhow::Result<Option<UserSession>> {
+        Ok(self
+            .inner
+            .read()
+            .await
+            .sessions
+            .values()
+            .filter(|session| {
+                session.google_account_email == email && session.refresh_token_encrypted.is_some()
+            })
+            .max_by_key(|session| session.updated_at)
+            .cloned())
+    }
+
+    async fn list_schedule_configs(&self) -> anyhow::Result<Vec<ScheduleConfig>> {
+        Ok(self
+            .inner
+            .read()
+            .await
+            .schedule_configs
+            .values()
+            .cloned()
+            .collect())
+    }
+
+    async fn upsert_schedule_config(&self, config: &ScheduleConfig) -> anyhow::Result<()> {
+        self.inner
+            .write()
+            .await
+            .schedule_configs
+            .insert(config.user_email.clone(), config.clone());
+        Ok(())
+    }
+
+    async fn get_schedule_state(&self, user_email: &str) -> anyhow::Result<Option<ScheduleState>> {
+        Ok(self
+            .inner
+            .read()
+            .await
+            .schedule_states
+            .get(user_email)
+            .cloned())
+    }
+
+    async fn upsert_schedule_state(&self, state: &ScheduleState) -> anyhow::Result<()> {
+        self.inner
+            .write()
+            .await
+            .schedule_states
+            .insert(state.user_email.clone(), state.clone());
+        Ok(())
     }
 
     async fn create_analysis_run(&self, run: &AnalysisRun) -> anyhow::Result<()> {
@@ -223,5 +292,117 @@ impl StorageRepository for MemoryStorage {
             return Err(anyhow!("run not found"));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{Duration, Utc};
+
+    use super::*;
+    use crate::scheduler::model::ScheduleRunStatus;
+
+    fn session(id: &str, email: &str, refresh: Option<&str>, age_minutes: i64) -> UserSession {
+        let at = Utc::now() - Duration::minutes(age_minutes);
+        UserSession {
+            id: id.to_string(),
+            google_account_email: email.to_string(),
+            access_token_encrypted: "access".to_string(),
+            refresh_token_encrypted: refresh.map(ToOwned::to_owned),
+            created_at: at,
+            updated_at: at,
+        }
+    }
+
+    #[tokio::test]
+    async fn finds_latest_session_with_refresh_token_for_email() {
+        let storage = MemoryStorage::default();
+        storage
+            .upsert_user_session(&session("old", "a@x.cl", Some("r1"), 120))
+            .await
+            .unwrap();
+        storage
+            .upsert_user_session(&session("newest-no-refresh", "a@x.cl", None, 1))
+            .await
+            .unwrap();
+        storage
+            .upsert_user_session(&session("newer", "a@x.cl", Some("r2"), 30))
+            .await
+            .unwrap();
+        storage
+            .upsert_user_session(&session("other-user", "b@x.cl", Some("r3"), 0))
+            .await
+            .unwrap();
+
+        let found = storage
+            .find_latest_session_with_refresh_token("a@x.cl")
+            .await
+            .unwrap()
+            .expect("session expected");
+        assert_eq!(found.id, "newer");
+    }
+
+    #[tokio::test]
+    async fn returns_none_when_no_session_has_refresh_token() {
+        let storage = MemoryStorage::default();
+        storage
+            .upsert_user_session(&session("s1", "a@x.cl", None, 5))
+            .await
+            .unwrap();
+
+        let found = storage
+            .find_latest_session_with_refresh_token("a@x.cl")
+            .await
+            .unwrap();
+        assert!(found.is_none());
+    }
+
+    #[tokio::test]
+    async fn schedule_config_and_state_round_trip() {
+        let storage = MemoryStorage::default();
+        let config = ScheduleConfig {
+            user_email: "a@x.cl".to_string(),
+            enabled: true,
+            recipients: vec!["jefa@x.cl".to_string()],
+            internal_domains: vec!["x.cl".to_string()],
+            ignored_senders: vec![],
+            ignored_domains: vec![],
+            ignored_keywords: vec![],
+            timezone: "America/Santiago".to_string(),
+            gmail_max_threads: Some(120),
+            updated_at: Utc::now(),
+        };
+        storage.upsert_schedule_config(&config).await.unwrap();
+        let configs = storage.list_schedule_configs().await.unwrap();
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].user_email, "a@x.cl");
+        assert_eq!(configs[0].gmail_max_threads, Some(120));
+
+        let state = ScheduleState {
+            user_email: "a@x.cl".to_string(),
+            window_date_from: "2026-06-11".to_string(),
+            window_date_to: "2026-06-11".to_string(),
+            status: ScheduleRunStatus::Completed,
+            run_id: Some("run-1".to_string()),
+            email_sent: true,
+            error_message: None,
+            started_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        storage.upsert_schedule_state(&state).await.unwrap();
+        let loaded = storage
+            .get_schedule_state("a@x.cl")
+            .await
+            .unwrap()
+            .expect("state expected");
+        assert_eq!(loaded.status, ScheduleRunStatus::Completed);
+        assert_eq!(loaded.run_id.as_deref(), Some("run-1"));
+        assert!(
+            storage
+                .get_schedule_state("b@x.cl")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 }

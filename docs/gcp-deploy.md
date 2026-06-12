@@ -301,6 +301,75 @@ En el OAuth Client de Google agrega:
 - URI de redireccionamiento: `https://${WEB_DOMAIN}/auth/google/callback`.
 - Origen JavaScript autorizado: `https://${WEB_DOMAIN}`.
 
+## 10. Programador diario (Cloud Scheduler)
+
+El analisis programado corre de lunes a viernes a las 08:00 (America/Santiago)
+y envia el reporte por correo via Resend. En Cloud Run usa Cloud Scheduler con
+`SCHEDULER_ENABLED=false`: el servicio puede escalar a cero y el loop interno
+no es confiable ahi. El loop interno (`SCHEDULER_ENABLED=true`) es para hosts
+always-on como docker-compose o una VPS.
+
+Sube los secretos nuevos:
+
+```bash
+export CRON_SECRET="$(openssl rand -base64 32)"
+# RESEND_API_KEY debe venir de tu cuenta de Resend (cargala en el .env).
+
+gcloud secrets describe cron-secret >/dev/null 2>&1 || gcloud secrets create cron-secret
+printf '%s' "$CRON_SECRET" | gcloud secrets versions add cron-secret --data-file=-
+
+gcloud secrets describe resend-api-key >/dev/null 2>&1 || gcloud secrets create resend-api-key
+printf '%s' "$RESEND_API_KEY" | gcloud secrets versions add resend-api-key --data-file=-
+```
+
+Actualiza la API con la configuracion del reporte. El prefijo `^|^` cambia el
+separador de gcloud de coma a `|`, necesario porque `REPORT_TO_EMAIL` y
+`SCHEDULE_INTERNAL_DOMAINS` pueden llevar comas (con el `.env` cargado en la
+terminal, las variables se expanden solas):
+
+```bash
+gcloud run services update "$API_SERVICE" \
+  --region "$GCP_REGION" \
+  --update-env-vars "^|^SCHEDULER_ENABLED=false|REPORT_FROM_EMAIL=${REPORT_FROM_EMAIL}|REPORT_TO_EMAIL=${REPORT_TO_EMAIL}|SCHEDULE_USER_EMAIL=${SCHEDULE_USER_EMAIL}|SCHEDULE_INTERNAL_DOMAINS=${SCHEDULE_INTERNAL_DOMAINS}|SCHEDULE_GMAIL_MAX_THREADS=${SCHEDULE_GMAIL_MAX_THREADS}" \
+  --update-secrets "CRON_SECRET=cron-secret:latest,RESEND_API_KEY=resend-api-key:latest"
+```
+
+Habilita Cloud Scheduler y crea el job (el deadline alto importa: el endpoint
+espera el analisis completo antes de responder):
+
+```bash
+gcloud services enable cloudscheduler.googleapis.com
+
+gcloud scheduler jobs create http ghmi-daily-report \
+  --location "$GCP_REGION" \
+  --schedule "0 8 * * 1-5" \
+  --time-zone "America/Santiago" \
+  --uri "${API_URL}/internal/scheduled-analysis" \
+  --http-method POST \
+  --headers "x-cron-secret=${CRON_SECRET}" \
+  --attempt-deadline 1800s
+```
+
+Para probar el job sin esperar a las 08:00:
+
+```bash
+gcloud scheduler jobs run ghmi-daily-report --location "$GCP_REGION"
+gcloud scheduler jobs describe ghmi-daily-report --location "$GCP_REGION" --format='value(status)'
+```
+
+Notas:
+
+- La primera ejecucion siembra `scheduleConfigs/{email}` en Firestore desde las
+  variables `SCHEDULE_*`; despues edita ese documento directamente para cambiar
+  destinatarios, dominios o listas ignoradas.
+- Una ventana ya completada no se repite (estado en `scheduleStates/{email}`),
+  asi que los reintentos de Cloud Scheduler tras un exito devuelven `skipped`.
+- Para rellenar un dia perdido dispara manualmente con
+  `-d '{"as_of_date":"YYYY-MM-DD"}'`.
+- Mientras la app OAuth este en estado "Testing", los refresh token caducan a
+  los 7 dias y llegara un correo pidiendo iniciar sesion de nuevo; publica la
+  app a Production para evitarlo.
+
 ## Troubleshooting login en Cloud Run
 
 Si el callback de Google funciona pero la web vuelve al login y `/auth/me` responde `401`, revisa:

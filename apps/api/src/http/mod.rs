@@ -1,3 +1,5 @@
+mod internal;
+
 use std::{convert::Infallible, sync::Arc, time::Duration};
 
 use axum::{
@@ -79,6 +81,10 @@ pub fn router(state: AppState) -> Router {
         .route("/analysis-runs/{id}/threads", get(list_threads))
         .route("/threads/{thread_id}", get(get_thread))
         .route("/threads/{thread_id}/manual-review", patch(manual_review))
+        .route(
+            "/internal/scheduled-analysis",
+            post(internal::scheduled_analysis),
+        )
         .with_state(state)
 }
 
@@ -338,13 +344,7 @@ async fn start_analysis_run(
         if let Err(error) =
             execute_analysis(worker_state.clone(), run_id.clone(), access_token).await
         {
-            tracing::error!(?error, "analysis failed");
-            if let Ok(Some(mut failed)) = worker_state.storage.get_analysis_run(&run_id).await {
-                failed.status = AnalysisStatus::Failed;
-                failed.error_message = Some(error.to_string());
-                failed.progress_message = "El análisis falló".to_string();
-                let _ = worker_state.storage.update_analysis_run(&failed).await;
-            }
+            mark_run_failed(&worker_state, &run_id, &error).await;
         }
     });
 
@@ -513,7 +513,17 @@ async fn manual_review(
     Ok(Json(run))
 }
 
-async fn execute_analysis(
+pub(crate) async fn mark_run_failed(state: &AppState, run_id: &str, error: &anyhow::Error) {
+    tracing::error!(?error, run_id, "analysis failed");
+    if let Ok(Some(mut failed)) = state.storage.get_analysis_run(run_id).await {
+        failed.status = AnalysisStatus::Failed;
+        failed.error_message = Some(error.to_string());
+        failed.progress_message = "El análisis falló".to_string();
+        let _ = state.storage.update_analysis_run(&failed).await;
+    }
+}
+
+pub(crate) async fn execute_analysis(
     state: AppState,
     run_id: String,
     access_token: String,

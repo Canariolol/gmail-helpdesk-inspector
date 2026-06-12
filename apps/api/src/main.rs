@@ -4,6 +4,8 @@ mod config;
 mod firestore;
 mod gmail;
 mod http;
+mod report;
+mod scheduler;
 mod storage;
 
 use std::sync::Arc;
@@ -40,7 +42,11 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(FirestoreStorage::new(config.firestore.clone())?)
     };
 
-    let app = build_app(config.clone(), storage);
+    let state = AppState::new(config.clone(), storage);
+    if config.scheduler.enabled {
+        scheduler::spawn(state.clone());
+    }
+    let app = build_app_from_state(state);
     let addr = format!("0.0.0.0:{}", config.api_port);
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
@@ -52,9 +58,13 @@ async fn main() -> anyhow::Result<()> {
 }
 
 pub fn build_app(config: AppConfig, storage: Arc<dyn StorageRepository>) -> Router {
+    build_app_from_state(AppState::new(config, storage))
+}
+
+pub fn build_app_from_state(state: AppState) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(AllowOrigin::exact(
-            HeaderValue::from_str(&config.web_base_url).expect("valid WEB_BASE_URL"),
+            HeaderValue::from_str(&state.config.web_base_url).expect("valid WEB_BASE_URL"),
         ))
         .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::OPTIONS])
         .allow_headers([
@@ -64,7 +74,6 @@ pub fn build_app(config: AppConfig, storage: Arc<dyn StorageRepository>) -> Rout
             HeaderName::from_static("x-requested-with"),
         ])
         .allow_credentials(true);
-    let state = AppState::new(config, storage);
 
     http::router(state)
         .layer(cors)

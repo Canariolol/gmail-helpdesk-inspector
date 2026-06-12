@@ -17,6 +17,7 @@ use crate::{
     analysis::{AiAuditResult, AnalysisRun, EmailMessage, EmailThread, ManualReview},
     auth::UserSession,
     config::{FirestoreConfig, ServiceAccountKey},
+    scheduler::model::{ScheduleConfig, ScheduleState},
     storage::StorageRepository,
 };
 
@@ -221,6 +222,41 @@ impl StorageRepository for FirestoreStorage {
 
     async fn get_user_session(&self, id: &str) -> anyhow::Result<Option<UserSession>> {
         self.get(&format!("users/{id}")).await
+    }
+
+    async fn find_latest_session_with_refresh_token(
+        &self,
+        email: &str,
+    ) -> anyhow::Result<Option<UserSession>> {
+        // El helper `list` pagina a 300 documentos y cada login crea un doc
+        // nuevo en `users/`; con un despliegue mono-usuario alcanza de sobra.
+        // Si la colección creciera, el siguiente paso es limpiar sesiones
+        // antiguas o paginar con orderBy.
+        let sessions: Vec<UserSession> = self.list("", "users").await?;
+        Ok(sessions
+            .into_iter()
+            .filter(|session| {
+                session.google_account_email == email && session.refresh_token_encrypted.is_some()
+            })
+            .max_by_key(|session| session.updated_at))
+    }
+
+    async fn list_schedule_configs(&self) -> anyhow::Result<Vec<ScheduleConfig>> {
+        self.list("", "scheduleConfigs").await
+    }
+
+    async fn upsert_schedule_config(&self, config: &ScheduleConfig) -> anyhow::Result<()> {
+        self.put(&format!("scheduleConfigs/{}", config.user_email), config)
+            .await
+    }
+
+    async fn get_schedule_state(&self, user_email: &str) -> anyhow::Result<Option<ScheduleState>> {
+        self.get(&format!("scheduleStates/{user_email}")).await
+    }
+
+    async fn upsert_schedule_state(&self, state: &ScheduleState) -> anyhow::Result<()> {
+        self.put(&format!("scheduleStates/{}", state.user_email), state)
+            .await
     }
 
     async fn create_analysis_run(&self, run: &AnalysisRun) -> anyhow::Result<()> {
