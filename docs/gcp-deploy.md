@@ -1,3 +1,21 @@
+# TLDR Redeploy:
+
+## API (Rust)
+docker build -f apps/api/Dockerfile -t "${IMAGE_BASE}/api:latest" .
+docker push "${IMAGE_BASE}/api:latest"
+gcloud run deploy "$API_SERVICE" --image "${IMAGE_BASE}/api:latest" --region "$GCP_REGION"
+
+## AI worker (Python) — solo si tocas apps/ai-worker
+docker build -f apps/ai-worker/Dockerfile -t "${IMAGE_BASE}/ai-worker:latest" .
+docker push "${IMAGE_BASE}/ai-worker:latest"
+gcloud run deploy ghmi-ai-worker --image "${IMAGE_BASE}/ai-worker:latest" --region "$GCP_REGION"
+
+## Web (React) — solo si tocas apps/web (ojo con el build-arg, igual que en el runbook)
+docker build -f apps/web/Dockerfile --build-arg "VITE_API_BASE_URL=" -t "${IMAGE_BASE}/web:latest" .
+docker push "${IMAGE_BASE}/web:latest"
+gcloud run deploy ghmi-web --image "${IMAGE_BASE}/web:latest" --region "$GCP_REGION"
+
+
 # Despliegue en GCP
 
 Este runbook despliega tres servicios en Cloud Run:
