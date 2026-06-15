@@ -1,19 +1,44 @@
 # TLDR Redeploy:
 
-## API (Rust)
+## Prep Variables (puede ser todo junto)
+
+export GCP_PROJECT_ID="$(gcloud config get-value project 2>/dev/null)"
+export GCP_REGION="us-central1"
+export ARTIFACT_REPO="ghmi"
+export API_SERVICE="ghmi-api"
+export WORKER_SERVICE="ghmi-ai-worker"
+export WEB_SERVICE="ghmi-web"
+export IMAGE_BASE="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${ARTIFACT_REPO}"
+
+printf 'GCP_PROJECT_ID=%s\nGCP_REGION=%s\nAPI_SERVICE=%s\nIMAGE_BASE=%s\n' \
+  "$GCP_PROJECT_ID" "$GCP_REGION" "$API_SERVICE" "$IMAGE_BASE"
+
+: "${GCP_PROJECT_ID:?Falta GCP_PROJECT_ID}"
+: "${IMAGE_BASE:?Falta IMAGE_BASE}"
+: "${API_SERVICE:?Falta API_SERVICE}"
+
+## API
 docker build -f apps/api/Dockerfile -t "${IMAGE_BASE}/api:latest" .
 docker push "${IMAGE_BASE}/api:latest"
-gcloud run deploy "$API_SERVICE" --image "${IMAGE_BASE}/api:latest" --region "$GCP_REGION"
+gcloud run deploy "$API_SERVICE" \
+  --image "${IMAGE_BASE}/api:latest" \
+  --region "$GCP_REGION"
 
-## AI worker (Python) — solo si tocas apps/ai-worker
+## AI worker, solo si cambió apps/ai-worker
 docker build -f apps/ai-worker/Dockerfile -t "${IMAGE_BASE}/ai-worker:latest" .
 docker push "${IMAGE_BASE}/ai-worker:latest"
-gcloud run deploy ghmi-ai-worker --image "${IMAGE_BASE}/ai-worker:latest" --region "$GCP_REGION"
+gcloud run deploy "$WORKER_SERVICE" \
+  --image "${IMAGE_BASE}/ai-worker:latest" \
+  --region "$GCP_REGION"
 
-## Web (React) — solo si tocas apps/web (ojo con el build-arg, igual que en el runbook)
-docker build -f apps/web/Dockerfile --build-arg "VITE_API_BASE_URL=" -t "${IMAGE_BASE}/web:latest" .
+## Web, solo si cambió apps/web
+docker build -f apps/web/Dockerfile \
+  --build-arg "VITE_API_BASE_URL=" \
+  -t "${IMAGE_BASE}/web:latest" .
 docker push "${IMAGE_BASE}/web:latest"
-gcloud run deploy ghmi-web --image "${IMAGE_BASE}/web:latest" --region "$GCP_REGION"
+gcloud run deploy "$WEB_SERVICE" \
+  --image "${IMAGE_BASE}/web:latest" \
+  --region "$GCP_REGION"
 
 
 # Despliegue en GCP
@@ -29,7 +54,7 @@ Este runbook despliega tres servicios en Cloud Run:
 Reemplaza `tu-project-id-real` por el ID real del proyecto GCP, no por el nombre visible del proyecto ni por el OAuth Client ID.
 
 ```bash
-export GCP_PROJECT_ID="tu-project-id-real"
+export GCP_PROJECT_ID="gmail-helpdesk-inspector"
 export GCP_REGION="us-central1"
 export ARTIFACT_REPO="ghmi"
 export API_SERVICE="ghmi-api"
