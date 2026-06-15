@@ -152,6 +152,7 @@ fn metrics_section(run: &AnalysisRun) -> String {
             None,
         ),
         metric_card("Hilos ambiguos", &metrics.ambiguous.to_string(), None),
+        metric_card("Descartados", &metrics.ignored.to_string(), None),
         metric_card(
             "Confianza del reporte",
             &format!("{:.0}%", metrics.report_confidence * 100.0),
@@ -165,7 +166,21 @@ fn metrics_section(run: &AnalysisRun) -> String {
             pair.join(r#"<td style="width:8px;"></td>"#)
         ));
     }
+    rows.push_str(&breakdown_row(run));
     rows
+}
+
+/// Shows where the non-valid threads landed, so wrongly-suppressed client
+/// requests (which all collapse into "Descartados") are at least visible.
+fn breakdown_row(run: &AnalysisRun) -> String {
+    let b = &run.metrics.classification_breakdown;
+    format!(
+        r#"<tr><td style="padding:6px 28px 4px 28px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td style="background:{SURFACE_SOFT};border:1px solid {BORDER};border-radius:12px;padding:12px 16px;">
+<div style="color:{TEXT_STRONG};font-size:13px;font-weight:700;">Destino de los hilos no válidos</div>
+<div style="color:{TEXT_MUTED};font-size:12px;line-height:1.8;margin-top:4px;">Interno: {} · Automático: {} · Newsletter: {} · Spam: {} · Misc: {} · Ambiguo (a revisión): {}</div>
+</td></tr></table></td></tr>"#,
+        b.internal, b.automated, b.newsletter, b.spam, b.misc, b.ambiguous
+    )
 }
 
 fn metric_card(label: &str, value: &str, colors: Option<(&str, &str)>) -> String {

@@ -59,7 +59,10 @@ impl FirestoreStorage {
             return Err(anyhow!("GCP_PROJECT_ID is required for Firestore storage"));
         }
         Ok(Self {
-            client: Client::new(),
+            client: Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .build()?,
             config,
             token_cache: Mutex::new(None),
         })

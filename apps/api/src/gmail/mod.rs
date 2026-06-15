@@ -81,7 +81,11 @@ struct GmailBody {
 impl Default for GmailClient {
     fn default() -> Self {
         Self {
-            client: Client::new(),
+            client: Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .build()
+                .expect("failed to build gmail http client"),
         }
     }
 }

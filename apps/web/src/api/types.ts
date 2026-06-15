@@ -8,6 +8,16 @@ export type Classification =
   | "misc"
   | "ambiguous";
 
+export interface ClassificationBreakdown {
+  valid_client_request: number;
+  internal: number;
+  automated: number;
+  newsletter: number;
+  spam: number;
+  misc: number;
+  ambiguous: number;
+}
+
 export interface Metrics {
   total_threads: number;
   valid_requests: number;
@@ -24,6 +34,7 @@ export interface Metrics {
   report_confidence: number;
   ai_input_tokens: number;
   ai_output_tokens: number;
+  classification_breakdown?: ClassificationBreakdown;
 }
 
 export interface AnalysisRun {

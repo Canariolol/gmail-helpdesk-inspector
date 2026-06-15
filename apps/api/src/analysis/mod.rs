@@ -62,6 +62,26 @@ fn default_timezone() -> String {
     "America/Santiago".to_string()
 }
 
+/// Count of threads per final classification, so wrongly-suppressed threads
+/// (which fold into `ignored`) are visible instead of vanishing silently.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ClassificationBreakdown {
+    #[serde(default)]
+    pub valid_client_request: u64,
+    #[serde(default)]
+    pub internal: u64,
+    #[serde(default)]
+    pub automated: u64,
+    #[serde(default)]
+    pub newsletter: u64,
+    #[serde(default)]
+    pub spam: u64,
+    #[serde(default)]
+    pub misc: u64,
+    #[serde(default)]
+    pub ambiguous: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnalysisMetrics {
     pub total_threads: u64,
@@ -81,6 +101,8 @@ pub struct AnalysisMetrics {
     pub report_confidence: f64,
     pub ai_input_tokens: u64,
     pub ai_output_tokens: u64,
+    #[serde(default)]
+    pub classification_breakdown: ClassificationBreakdown,
 }
 
 impl Default for AnalysisMetrics {
@@ -101,6 +123,7 @@ impl Default for AnalysisMetrics {
             report_confidence: 1.0,
             ai_input_tokens: 0,
             ai_output_tokens: 0,
+            classification_breakdown: ClassificationBreakdown::default(),
         }
     }
 }
@@ -698,6 +721,21 @@ pub fn calculate_metrics(
         (1.0 - (ambiguous as f64 / total_threads as f64)).clamp(0.0, 1.0)
     };
 
+    let mut classification_breakdown = ClassificationBreakdown::default();
+    for thread in threads {
+        match thread.classification {
+            Classification::ValidClientRequest => {
+                classification_breakdown.valid_client_request += 1
+            }
+            Classification::Internal => classification_breakdown.internal += 1,
+            Classification::Automated => classification_breakdown.automated += 1,
+            Classification::Newsletter => classification_breakdown.newsletter += 1,
+            Classification::Spam => classification_breakdown.spam += 1,
+            Classification::Misc => classification_breakdown.misc += 1,
+            Classification::Ambiguous => classification_breakdown.ambiguous += 1,
+        }
+    }
+
     AnalysisMetrics {
         total_threads,
         valid_requests,
@@ -714,6 +752,7 @@ pub fn calculate_metrics(
         report_confidence: confidence,
         ai_input_tokens,
         ai_output_tokens,
+        classification_breakdown,
     }
 }
 

@@ -14,7 +14,7 @@ use axum::{
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
-use futures_util::stream;
+use futures_util::{StreamExt, stream};
 use rand::RngCore;
 use reqwest::Client;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -56,7 +56,11 @@ impl AppState {
         Self {
             config,
             storage,
-            http: Client::new(),
+            http: Client::builder()
+                .timeout(Duration::from_secs(30))
+                .connect_timeout(Duration::from_secs(10))
+                .build()
+                .expect("failed to build http client"),
             gmail: GmailClient::default(),
         }
     }
@@ -545,116 +549,59 @@ pub(crate) async fn execute_analysis(
     run.progress_message = format!("{} hilos encontrados en Gmail", thread_ids.len());
     state.storage.update_analysis_run(&run).await?;
 
-    let mut ai_input_tokens = 0;
-    let mut ai_output_tokens = 0;
+    let mut ai_input_tokens = 0u64;
+    let mut ai_output_tokens = 0u64;
     let excluded_sample = excluded_sample_ids(&thread_ids);
 
-    for thread_id in thread_ids {
-        let data = state
-            .gmail
-            .fetch_thread(&access_token, &thread_id, &run.config)
-            .await?;
-        if !data.is_primary_inbox {
-            run.processed_threads += 1;
-            run.progress_message = format!(
-                "Procesados {}/{} hilos · IA entrada {} · salida {} tokens",
-                run.processed_threads,
-                run.total_candidate_threads,
-                ai_input_tokens,
-                ai_output_tokens
-            );
-            state.storage.update_analysis_run(&run).await?;
-            continue;
-        }
-        if let Some(first_message) = data.messages.iter().min_by_key(|message| message.date) {
-            if !message_is_inside_analysis_window(first_message, &run.config) {
-                run.processed_threads += 1;
-                run.progress_message = format!(
-                    "Procesados {}/{} hilos · IA entrada {} · salida {} tokens",
-                    run.processed_threads,
-                    run.total_candidate_threads,
-                    ai_input_tokens,
-                    ai_output_tokens
-                );
-                state.storage.update_analysis_run(&run).await?;
-                continue;
-            }
-        }
-        let mut thread = classify_thread(&run.id, &data.id, &data.messages, &run.config);
-        let received_human_thread = thread.first_client_message_id.is_some();
-        let should_audit = received_human_thread
-            && (thread.is_valid_client_request
-                || thread.manual_review_required
-                || excluded_sample.contains(&thread.gmail_thread_id));
+    // Process threads with bounded concurrency: each thread's Gmail fetch, local
+    // classification, AI audit and storage writes are independent, so we run up to
+    // ANALYSIS_CONCURRENCY of them at once instead of strictly one-at-a-time.
+    let config = run.config.clone();
+    let run_id = run.id.clone();
+    let total = run.total_candidate_threads;
+    {
+        let state_ref = &state;
+        let access_ref = access_token.as_str();
+        let config_ref = &config;
+        let excluded_ref = &excluded_sample;
+        let run_id_ref = run_id.as_str();
+        let mut task_stream = stream::iter(thread_ids.into_iter().map(|thread_id| async move {
+            process_one_thread(
+                state_ref,
+                access_ref,
+                run_id_ref,
+                config_ref,
+                excluded_ref,
+                thread_id,
+            )
+            .await
+        }))
+        .buffer_unordered(ANALYSIS_CONCURRENCY);
 
-        if should_audit {
-            let audit_messages = audit_messages_for_thread(&thread, &data.messages);
-            match audit_thread(&state, &thread, &audit_messages).await {
-                Ok(audit) => {
-                    ai_input_tokens += audit.input_tokens;
-                    ai_output_tokens += audit.output_tokens;
-                    state
-                        .storage
-                        .add_ai_audit(&run.id, &thread.id, &audit)
-                        .await?;
-                    let known_ids = data
-                        .messages
-                        .iter()
-                        .map(|m| m.id.clone())
-                        .collect::<Vec<_>>();
-                    if should_auto_apply_ai(&audit, &known_ids)
-                        && audit.confidence >= state.config.ai.apply_confidence_threshold
-                    {
-                        thread.classification = audit.classification.clone();
-                        thread.classification_source = ClassificationSource::Ai;
-                        thread.classification_confidence = audit.confidence;
-                        thread.is_valid_client_request = audit.is_valid_client_request;
-                        thread.is_answered = audit.is_answered;
-                        thread.first_client_message_id = audit.first_client_message_id.clone();
-                        thread.first_internal_reply_message_id =
-                            audit.first_internal_reply_message_id.clone();
-                        thread.last_internal_message_id = audit.last_internal_message_id.clone();
-                        apply_trace_dates(&mut thread, &data.messages);
-                        thread.manual_review_required = false;
-                        thread.reasons.push(
-                            "La auditoría IA se aplicó automáticamente por alta confianza."
-                                .to_string(),
-                        );
-                    } else {
-                        thread.manual_review_required = true;
-                        thread
-                            .reasons
-                            .push("La auditoría IA requiere confirmación manual.".to_string());
-                    }
+        let mut processed = 0u64;
+        while let Some(result) = task_stream.next().await {
+            processed += 1;
+            match result {
+                Ok(outcome) => {
+                    ai_input_tokens += outcome.input_tokens;
+                    ai_output_tokens += outcome.output_tokens;
                 }
                 Err(error) => {
-                    thread.manual_review_required = true;
-                    thread
-                        .reasons
-                        .push(format!("La auditoría IA falló: {error}"));
+                    tracing::warn!(?error, "el procesamiento de un hilo falló; se omite");
                 }
             }
+            if processed % PROGRESS_UPDATE_EVERY == 0 {
+                run.processed_threads = processed;
+                run.metrics.ai_input_tokens = ai_input_tokens;
+                run.metrics.ai_output_tokens = ai_output_tokens;
+                run.progress_message = format!(
+                    "Procesados {}/{} hilos · IA entrada {} · salida {} tokens",
+                    processed, total, ai_input_tokens, ai_output_tokens
+                );
+                state.storage.update_analysis_run(&run).await?;
+            }
         }
-
-        let sanitized = data
-            .messages
-            .iter()
-            .cloned()
-            .map(|mut message| {
-                message.body_text = None;
-                message
-            })
-            .collect::<Vec<_>>();
-        state.storage.upsert_thread(&thread, &sanitized).await?;
-
-        run.processed_threads += 1;
-        run.metrics.ai_input_tokens = ai_input_tokens;
-        run.metrics.ai_output_tokens = ai_output_tokens;
-        run.progress_message = format!(
-            "Procesados {}/{} hilos · IA entrada {} · salida {} tokens",
-            run.processed_threads, run.total_candidate_threads, ai_input_tokens, ai_output_tokens
-        );
-        state.storage.update_analysis_run(&run).await?;
+        run.processed_threads = processed;
     }
 
     let threads = state.storage.list_threads(&run.id).await?;
@@ -664,6 +611,108 @@ pub(crate) async fn execute_analysis(
     run.completed_at = Some(Utc::now());
     state.storage.update_analysis_run(&run).await?;
     Ok(())
+}
+
+/// Maximum number of threads processed concurrently in a single analysis run.
+const ANALYSIS_CONCURRENCY: usize = 5;
+/// Write run progress to storage every N processed threads (instead of every one).
+const PROGRESS_UPDATE_EVERY: u64 = 5;
+
+#[derive(Default)]
+struct ThreadOutcome {
+    input_tokens: u64,
+    output_tokens: u64,
+}
+
+async fn process_one_thread(
+    state: &AppState,
+    access_token: &str,
+    run_id: &str,
+    config: &AnalysisConfig,
+    excluded_sample: &[String],
+    thread_id: String,
+) -> anyhow::Result<ThreadOutcome> {
+    let data = state
+        .gmail
+        .fetch_thread(access_token, &thread_id, config)
+        .await?;
+    if !data.is_primary_inbox {
+        return Ok(ThreadOutcome::default());
+    }
+    if let Some(first_message) = data.messages.iter().min_by_key(|message| message.date) {
+        if !message_is_inside_analysis_window(first_message, config) {
+            return Ok(ThreadOutcome::default());
+        }
+    }
+
+    let mut thread = classify_thread(run_id, &data.id, &data.messages, config);
+    let received_human_thread = thread.first_client_message_id.is_some();
+    let should_audit = received_human_thread
+        && (thread.is_valid_client_request
+            || thread.manual_review_required
+            || excluded_sample.contains(&thread.gmail_thread_id));
+
+    let mut outcome = ThreadOutcome::default();
+    if should_audit {
+        let audit_messages = audit_messages_for_thread(&thread, &data.messages);
+        match audit_thread(state, &thread, &audit_messages).await {
+            Ok(audit) => {
+                outcome.input_tokens = audit.input_tokens;
+                outcome.output_tokens = audit.output_tokens;
+                state
+                    .storage
+                    .add_ai_audit(run_id, &thread.id, &audit)
+                    .await?;
+                let known_ids = data
+                    .messages
+                    .iter()
+                    .map(|m| m.id.clone())
+                    .collect::<Vec<_>>();
+                if should_auto_apply_ai(&audit, &known_ids)
+                    && audit.confidence >= state.config.ai.apply_confidence_threshold
+                {
+                    thread.classification = audit.classification.clone();
+                    thread.classification_source = ClassificationSource::Ai;
+                    thread.classification_confidence = audit.confidence;
+                    thread.is_valid_client_request = audit.is_valid_client_request;
+                    thread.is_answered = audit.is_answered;
+                    thread.first_client_message_id = audit.first_client_message_id.clone();
+                    thread.first_internal_reply_message_id =
+                        audit.first_internal_reply_message_id.clone();
+                    thread.last_internal_message_id = audit.last_internal_message_id.clone();
+                    apply_trace_dates(&mut thread, &data.messages);
+                    thread.manual_review_required = false;
+                    thread.reasons.push(
+                        "La auditoría IA se aplicó automáticamente por alta confianza."
+                            .to_string(),
+                    );
+                } else {
+                    thread.manual_review_required = true;
+                    thread
+                        .reasons
+                        .push("La auditoría IA requiere confirmación manual.".to_string());
+                }
+            }
+            Err(error) => {
+                thread.manual_review_required = true;
+                thread
+                    .reasons
+                    .push(format!("La auditoría IA falló: {error}"));
+            }
+        }
+    }
+
+    let sanitized = data
+        .messages
+        .iter()
+        .cloned()
+        .map(|mut message| {
+            message.body_text = None;
+            message
+        })
+        .collect::<Vec<_>>();
+    state.storage.upsert_thread(&thread, &sanitized).await?;
+    Ok(outcome)
 }
 
 fn audit_messages_for_thread(thread: &EmailThread, messages: &[EmailMessage]) -> Vec<EmailMessage> {
