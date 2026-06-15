@@ -14,6 +14,19 @@ class Settings(BaseSettings):
         alias="BEDROCK_MODEL_ID",
     )
 
+    # Service-desk context injected into the auditor's system prompt.
+    desk_mailbox: str = Field(
+        default="soporte@west-ingenieria.cl", alias="DESK_MAILBOX"
+    )
+    analyzed_mailbox: str = Field(
+        default="catherine.trivino@west-ingenieria.cl", alias="ANALYZED_MAILBOX"
+    )
+    internal_domain: str = Field(default="west-ingenieria.cl", alias="INTERNAL_DOMAIN")
+    desk_members: str = Field(
+        default="Juan, Andrea, Nicolás, Iván, Tatiana, Constanza, Catherine",
+        alias="DESK_MEMBERS",
+    )
+
     @property
     def invoke_url(self) -> str:
         model = quote(self.bedrock_model_id, safe="")

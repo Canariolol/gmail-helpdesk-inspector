@@ -639,10 +639,18 @@ async fn process_one_thread(
     if !data.is_primary_inbox {
         return Ok(ThreadOutcome::default());
     }
-    if let Some(first_message) = data.messages.iter().min_by_key(|message| message.date) {
-        if !message_is_inside_analysis_window(first_message, config) {
-            return Ok(ThreadOutcome::default());
-        }
+    // The report counts "requests received in the window". Keep the thread only if some
+    // EXTERNAL message lands inside the window — a new client request, a follow-up, or
+    // (for visibility) system/automated external mail. A thread whose only in-window
+    // activity is internal (the desk acting on an older request) is out of scope for this
+    // window and is skipped. classify_thread then anchors its metrics on the in-window
+    // client message and routes re-opened-after-answered threads to review.
+    let has_external_in_window = data
+        .messages
+        .iter()
+        .any(|message| message.is_external && message_is_inside_analysis_window(message, config));
+    if !has_external_in_window {
+        return Ok(ThreadOutcome::default());
     }
 
     let mut thread = classify_thread(run_id, &data.id, &data.messages, config);
@@ -716,37 +724,51 @@ async fn process_one_thread(
 }
 
 fn audit_messages_for_thread(thread: &EmailThread, messages: &[EmailMessage]) -> Vec<EmailMessage> {
-    const MAX_AUDIT_TEXT_CHARS: usize = 1600;
+    // For the AI arbiter, breadth beats depth: send a compact view of as many messages
+    // as possible (short body excerpts) so it can see who is involved and the gist of
+    // each, instead of only a few full-body "milestones" the heuristic may have mis-picked.
+    const MAX_AUDIT_BODY_CHARS: usize = 280;
+    const MAX_AUDIT_MESSAGES: usize = 14;
 
-    let mut ids = Vec::new();
-    if let Some(id) = &thread.first_client_message_id {
-        ids.push(id.clone());
-    }
-    if let Some(id) = &thread.first_internal_reply_message_id {
-        ids.push(id.clone());
-    }
-    if let Some(id) = &thread.last_internal_message_id {
-        ids.push(id.clone());
+    let mut ordered = messages.to_vec();
+    ordered.sort_by_key(|message| message.date);
+
+    if ordered.len() > MAX_AUDIT_MESSAGES {
+        // Long thread: keep the messages that matter for validity/answered — all
+        // external (client) messages, the heuristic milestones, and the latest few —
+        // and drop internal back-and-forth from the middle.
+        let len = ordered.len();
+        let milestones: Vec<String> = [
+            thread.first_client_message_id.clone(),
+            thread.first_internal_reply_message_id.clone(),
+            thread.last_internal_message_id.clone(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let mut kept: Vec<EmailMessage> = ordered
+            .iter()
+            .enumerate()
+            .filter(|(idx, message)| {
+                message.is_external
+                    || milestones.iter().any(|id| id == &message.id)
+                    || *idx >= len.saturating_sub(4)
+            })
+            .map(|(_, message)| message.clone())
+            .collect();
+        kept.truncate(MAX_AUDIT_MESSAGES);
+        ordered = kept;
     }
 
-    if ids.is_empty() {
-        ids.extend(messages.iter().take(3).map(|message| message.id.clone()));
-    }
-
-    let mut selected = messages
-        .iter()
-        .filter(|message| ids.contains(&message.id))
-        .cloned()
+    ordered
+        .into_iter()
         .map(|mut message| {
             if let Some(text) = &message.body_text {
-                message.body_text = Some(truncate_chars(text, MAX_AUDIT_TEXT_CHARS));
+                message.body_text = Some(truncate_chars(text, MAX_AUDIT_BODY_CHARS));
             }
             message
         })
-        .collect::<Vec<_>>();
-    selected.sort_by_key(|message| message.date);
-    selected.dedup_by(|left, right| left.id == right.id);
-    selected
+        .collect()
 }
 
 fn truncate_chars(value: &str, max_chars: usize) -> String {

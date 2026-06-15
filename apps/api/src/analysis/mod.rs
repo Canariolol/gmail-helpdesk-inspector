@@ -288,197 +288,139 @@ pub fn classify_thread(
         .min_by_key(|message| message.date)
         .expect("messages.is_empty was checked above");
 
-    if first_message.is_internal {
-        reasons.push(
-            "El hilo comenzó con un correo interno; se excluye por ser saliente.".to_string(),
-        );
-        return build_thread(
-            analysis_run_id,
-            gmail_thread_id,
-            subject,
-            normalized_subject,
-            Classification::Misc,
-            ClassificationSource::Rules,
-            0.96,
-            false,
-            false,
-            None,
-            None,
-            None,
-            Some(first_message.date),
-            false,
-            reasons,
-            now,
-        );
-    }
-
-    if first_message.is_automated {
-        reasons.push("El hilo comenzó con un remitente externo automático.".to_string());
-        return build_thread(
-            analysis_run_id,
-            gmail_thread_id,
-            subject,
-            normalized_subject,
-            Classification::Automated,
-            ClassificationSource::Rules,
-            0.95,
-            false,
-            false,
-            None,
-            None,
-            None,
-            Some(first_message.date),
-            false,
-            reasons,
-            now,
-        );
-    }
-
-    if config
-        .ignored_keywords
+    // "Request received in the window": the earliest human client (external,
+    // non-automated) message dated INSIDE the analysis window. The report counts these.
+    // process_one_thread already skips threads with no external message in the window, so
+    // reaching this with `request == None` means the in-window external activity is
+    // automated/system mail (or only an internal reply to an older request): not a
+    // received request, so it is classified for visibility but neither counted nor audited.
+    let request = messages
         .iter()
-        .any(|kw| lower_subject.contains(&kw.to_lowercase()))
-    {
-        reasons.push("El asunto coincide con una palabra ignorada.".to_string());
-        return ignored_thread(
-            analysis_run_id,
-            gmail_thread_id,
-            subject,
-            normalized_subject,
-            Some(first_message.date),
-            reasons,
-            now,
-        );
-    }
-
-    if messages.iter().all(|m| m.is_internal) {
-        reasons.push("Todos los participantes son internos.".to_string());
-        return build_thread(
-            analysis_run_id,
-            gmail_thread_id,
-            subject,
-            normalized_subject,
-            Classification::Internal,
-            ClassificationSource::Rules,
-            0.98,
-            false,
-            false,
-            None,
-            None,
-            None,
-            Some(first_message.date),
-            false,
-            reasons,
-            now,
-        );
-    }
-
-    if messages.iter().any(|m| m.is_automated)
-        && messages.iter().all(|m| !m.is_external || m.is_automated)
-    {
-        reasons.push("Los mensajes externos parecen automáticos.".to_string());
-        return build_thread(
-            analysis_run_id,
-            gmail_thread_id,
-            subject,
-            normalized_subject,
-            Classification::Automated,
-            ClassificationSource::Rules,
-            0.95,
-            false,
-            false,
-            None,
-            None,
-            None,
-            Some(first_message.date),
-            false,
-            reasons,
-            now,
-        );
-    }
-
-    if lower_subject.contains("newsletter")
-        || lower_subject.contains("boletin")
-        || lower_subject.contains("boletín")
-    {
-        reasons.push("El asunto parece un boletín o correo promocional.".to_string());
-        return build_thread(
-            analysis_run_id,
-            gmail_thread_id,
-            subject,
-            normalized_subject,
-            Classification::Newsletter,
-            ClassificationSource::Rules,
-            0.92,
-            false,
-            false,
-            None,
-            None,
-            None,
-            Some(first_message.date),
-            false,
-            reasons,
-            now,
-        );
-    }
-
-    if messages.iter().any(|m| {
-        sender_is_ignored(
-            &m.from_email,
-            &config.ignored_senders,
-            &config.ignored_domains,
-        )
-    }) {
-        reasons.push("El remitente o dominio está configurado como ignorado.".to_string());
-        return ignored_thread(
-            analysis_run_id,
-            gmail_thread_id,
-            subject,
-            normalized_subject,
-            Some(first_message.date),
-            reasons,
-            now,
-        );
-    }
-
-    let first_client = messages
-        .iter()
-        .filter(|m| m.is_external && !m.is_automated)
+        .filter(|m| {
+            m.is_external && !m.is_automated && message_is_inside_analysis_window(m, config)
+        })
         .min_by_key(|m| m.date);
 
-    let Some(first_client) = first_client else {
-        reasons.push("No se encontró un remitente externo humano claro.".to_string());
+    let Some(request) = request else {
+        let (classification, reason) = if messages.iter().all(|m| m.is_internal) {
+            (
+                Classification::Internal,
+                "Solo participantes internos dentro de la ventana; no hay solicitud de cliente.",
+            )
+        } else {
+            (
+                Classification::Automated,
+                "Sin mensaje de cliente humano dentro de la ventana (automático/sistema o actividad de otra ventana).",
+            )
+        };
+        reasons.push(reason.to_string());
         return build_thread(
             analysis_run_id,
             gmail_thread_id,
             subject,
             normalized_subject,
-            Classification::Ambiguous,
-            ClassificationSource::Heuristics,
-            0.45,
+            classification,
+            ClassificationSource::Rules,
+            0.9,
             false,
             false,
             None,
             None,
             None,
             Some(first_message.date),
-            true,
+            false,
             reasons,
             now,
         );
     };
 
+    // The in-window client is explicitly configured as ignored → respect it.
+    if sender_is_ignored(
+        &request.from_email,
+        &config.ignored_senders,
+        &config.ignored_domains,
+    ) {
+        reasons.push(
+            "El cliente de la solicitud está en la lista de remitentes/dominios ignorados."
+                .to_string(),
+        );
+        return ignored_thread(
+            analysis_run_id,
+            gmail_thread_id,
+            subject,
+            normalized_subject,
+            Some(first_message.date),
+            reasons,
+            now,
+        );
+    }
+
+    // Boundary detection: the earliest client message of the whole thread may predate the
+    // window. If an earlier cycle existed and was answered before this in-window request →
+    // the client is re-engaging → send to review. If it was never answered → still a valid
+    // pending request the client is chasing.
+    let first_client_overall = messages
+        .iter()
+        .filter(|m| m.is_external && !m.is_automated)
+        .min_by_key(|m| m.date)
+        .unwrap_or(request);
+    let reopened = request.date > first_client_overall.date;
+    let prior_answered = reopened
+        && messages.iter().any(|m| {
+            m.is_internal
+                && !m.is_automated
+                && m.date > first_client_overall.date
+                && m.date < request.date
+        });
+
+    // Response milestones are measured against the in-window request, not the whole-thread
+    // first message, so a boundary-crossing thread does not pollute the window's metrics.
     let first_reply = messages
         .iter()
-        .filter(|m| m.is_internal && !m.is_automated && m.date > first_client.date)
+        .filter(|m| m.is_internal && !m.is_automated && m.date > request.date)
         .min_by_key(|m| m.date);
     let last_internal = messages
         .iter()
-        .filter(|m| m.is_internal && !m.is_automated && m.date > first_client.date)
+        .filter(|m| m.is_internal && !m.is_automated && m.date > request.date)
         .max_by_key(|m| m.date);
-    let response_minutes = first_reply.map(|reply| (reply.date - first_client.date).num_minutes());
+    let response_minutes = first_reply.map(|reply| (reply.date - request.date).num_minutes());
     let resolution_minutes =
-        last_internal.map(|message| (message.date - first_client.date).num_minutes());
+        last_internal.map(|message| (message.date - request.date).num_minutes());
+
+    let mut noise = false;
+    if first_message.is_internal {
+        noise = true;
+        reasons
+            .push("El hilo abre con un mensaje interno; el cliente humano aparece después.".to_string());
+    }
+    if first_message.is_automated {
+        noise = true;
+        reasons.push(
+            "El primer mensaje parece automático, pero el hilo incluye un cliente humano."
+                .to_string(),
+        );
+    }
+    if subject_has_ignored_keyword(&lower_subject, &config.ignored_keywords) {
+        noise = true;
+        reasons.push("El asunto coincide con una palabra ignorada.".to_string());
+    }
+    if subject_looks_like_newsletter(&lower_subject) {
+        noise = true;
+        reasons.push("El asunto parece un boletín o promoción.".to_string());
+    }
+    if reopened && prior_answered {
+        noise = true;
+        reasons.push(
+            "El hilo se reabrió: ya tenía respuesta previa y el cliente volvió a escribir dentro de la ventana; requiere revisión."
+                .to_string(),
+        );
+    } else if reopened {
+        reasons.push(
+            "El cliente retomó dentro de la ventana una solicitud previa que no había sido respondida."
+                .to_string(),
+        );
+    }
+
     let suspicious = messages.len() >= 8 || messages.iter().filter(|m| m.is_external).count() >= 4;
 
     reasons.push("El primer mensaje relevante viene de un remitente externo humano.".to_string());
@@ -488,34 +430,66 @@ pub fn classify_thread(
         reasons.push("No se encontró una respuesta interna posterior.".to_string());
     }
     if suspicious {
-        reasons.push("La forma del hilo es sospechosa y requiere auditoría.".to_string());
+        reasons.push("La forma del hilo es atípica y conviene auditarla.".to_string());
     }
+
+    let (classification, confidence, is_valid) = if noise {
+        (Classification::Ambiguous, 0.5, false)
+    } else if suspicious {
+        (Classification::ValidClientRequest, 0.72, true)
+    } else {
+        (Classification::ValidClientRequest, 0.86, true)
+    };
+    let manual_review_required = noise || suspicious;
 
     build_thread(
         analysis_run_id,
         gmail_thread_id,
         subject,
         normalized_subject,
-        Classification::ValidClientRequest,
+        classification,
         ClassificationSource::Heuristics,
-        if suspicious { 0.72 } else { 0.86 },
-        true,
+        confidence,
+        is_valid,
         first_reply.is_some(),
-        Some(first_client.id.clone()),
+        Some(request.id.clone()),
         first_reply.map(|m| m.id.clone()),
         last_internal.map(|m| m.id.clone()),
         Some(first_message.date),
-        suspicious,
+        manual_review_required,
         reasons,
         now,
     )
     .with_dates(
-        Some(first_client.date),
+        Some(request.date),
         first_reply.map(|m| m.date),
         last_internal.map(|m| m.date),
         response_minutes,
         resolution_minutes,
     )
+}
+
+fn subject_has_ignored_keyword(lower_subject: &str, keywords: &[String]) -> bool {
+    keywords.iter().any(|kw| {
+        let kw = kw.trim().to_lowercase();
+        if kw.is_empty() {
+            false
+        } else if kw.contains(' ') {
+            lower_subject.contains(kw.as_str())
+        } else {
+            lower_subject
+                .split(|c: char| !c.is_alphanumeric())
+                .any(|word| word == kw.as_str())
+        }
+    })
+}
+
+fn subject_looks_like_newsletter(lower_subject: &str) -> bool {
+    ["newsletter", "boletin", "boletín"].iter().any(|kw| {
+        lower_subject
+            .split(|c: char| !c.is_alphanumeric())
+            .any(|word| word == *kw)
+    })
 }
 
 fn ignored_thread(
@@ -636,17 +610,24 @@ pub fn sender_is_ignored(
 }
 
 pub fn is_automated_sender(email: &str, headers: &serde_json::Value) -> bool {
+    // Match on the local-part with anchored patterns instead of an unanchored
+    // `contains`, so real client addresses like `notifications@cliente.cl` are NOT
+    // wrongly flagged. `List-Unsubscribe` presence is intentionally NOT used: legitimate
+    // corporate/ticketing platforms (Workspace, HubSpot, Zendesk) add it to human mail.
     let lower = email.to_lowercase();
-    lower.contains("no-reply")
-        || lower.contains("noreply")
-        || lower.contains("notification")
-        || lower.contains("mailer-daemon")
+    let local_part = lower.split('@').next().unwrap_or(lower.as_str());
+    let automated_local = matches!(
+        local_part,
+        "no-reply" | "noreply" | "no_reply" | "donotreply" | "do-not-reply" | "mailer-daemon"
+    ) || local_part.starts_with("no-reply")
+        || local_part.starts_with("noreply")
+        || local_part.starts_with("donotreply");
+    automated_local
         || headers
             .get("auto-submitted")
             .and_then(|v| v.as_str())
             .map(|value| value.to_lowercase() != "no")
             .unwrap_or(false)
-        || headers.get("list-unsubscribe").is_some()
 }
 
 pub fn is_internal_email(email: &str, domains: &[String]) -> bool {
@@ -806,7 +787,9 @@ mod tests {
             from_name: None,
             to_emails: vec![],
             cc_emails: vec![],
-            date: DateTime::from_timestamp(1_700_000_000 + at_minute * 60, 0).unwrap(),
+            // Anchored inside the 2026-06 test windows so window-aware classification
+            // (classify_thread requires an in-window client message) sees these messages.
+            date: DateTime::from_timestamp(1_780_660_800 + at_minute * 60, 0).unwrap(),
             subject: "Ayuda con pedido".to_string(),
             snippet: "hola".to_string(),
             headers: serde_json::json!({}),
@@ -900,9 +883,39 @@ mod tests {
             },
         );
 
-        assert_eq!(thread.classification, Classification::Misc);
+        assert_eq!(thread.classification, Classification::Internal);
         assert_eq!(thread.first_message_at, Some(expected_at));
         assert_eq!(thread.first_client_message_at, None);
+    }
+
+    #[test]
+    fn internal_first_with_human_client_is_audited_not_dropped() {
+        let thread = classify_thread(
+            "run",
+            "mixed",
+            &[
+                msg("m1", "agent@company.test", true, 0),
+                msg("m2", "client@example.com", false, 10),
+            ],
+            &AnalysisConfig {
+                date_from: "2026-06-01".to_string(),
+                date_to: "2026-06-12".to_string(),
+                time_from: "00:00".to_string(),
+                time_to: "23:59".to_string(),
+                timezone: "America/Santiago".to_string(),
+                internal_domains: vec!["company.test".to_string()],
+                ignored_senders: vec![],
+                ignored_domains: vec![],
+                ignored_keywords: vec![],
+            },
+        );
+
+        // Internal-first no longer hard-drops to Misc: a human client exists, so it is
+        // routed to the AI auditor (ambiguous + manual review) with the client id set.
+        assert_eq!(thread.classification, Classification::Ambiguous);
+        assert!(thread.manual_review_required);
+        assert!(!thread.is_valid_client_request);
+        assert_eq!(thread.first_client_message_id, Some("m2".to_string()));
     }
 
     #[test]

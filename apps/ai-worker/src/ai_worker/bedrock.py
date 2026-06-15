@@ -9,15 +9,35 @@ from ai_worker.schemas import AuditThreadRequest, AuditThreadResponse, BedrockDe
 from ai_worker.settings import Settings
 
 
-SYSTEM_PROMPT = """You audit Gmail helpdesk metrics. Return strict JSON only.
-Rules:
-- Do not invent messages.
-- Use only provided message ids.
-- If evidence is insufficient, classify as ambiguous.
-- Do not treat automated/no-reply messages as human client requests.
-- Focus on helpdesk performance: first received client message, first internal reply, and last internal sent message.
-- The provided messages are intentionally limited to those audit milestones, not the whole thread.
-- Decide whether the automatic classification should stand or be corrected.
+def build_system_prompt(settings: Settings) -> str:
+    return f"""You audit the email inbox of a Level-1 (N1) IT service desk ("Mesa de Servicio") at West Ingeniería, a Chilean technology company. The desk serves many external client companies; all email is in Spanish (Chilean). For one email thread you decide whether it is a VALID client request that this N1 desk should handle, and whether it was answered. Return strict JSON only, matching the requested schema exactly.
+
+Context:
+- The analyzed inbox is the desk supervisor's mailbox ({settings.analyzed_mailbox}), which receives a SUPERSET of the desk's mail. A message landing in this inbox is NOT automatically a desk request.
+- The real desk address is {settings.desk_mailbox}. A thread is most likely for the desk when {settings.desk_mailbox} is a direct (To) recipient. If it only appears in CC, or the mail is addressed to a specific person or another area, be skeptical.
+- Internal staff use @{settings.internal_domain} addresses. The N1 desk members are: {settings.desk_members}.
+
+VALID desk request (classification "valid_client_request", is_valid_client_request=true):
+- An external, human client (not an automated/system/no-reply sender) asks the desk for help: incidents, access/password problems, technical support for their products/systems (e.g. logistics/forestry systems, GPS equipment, latency), or a follow-up on such a request. The topic is broad, so do NOT reject a thread just because of its subject. Long or messy threads can still be valid.
+
+NOT valid for this desk (set is_valid_client_request=false and pick the closest category):
+- "automated": automated/system/no-reply/notification mail (GCP, AWS, calendars, mailer-daemon, monitoring).
+- "newsletter": promotions, marketing or newsletters. "spam": spam.
+- "internal": only internal staff, no external human client.
+- "misc": a client who explicitly asks to deal with someone who is NOT an N1 desk member (Sales, a specific account manager, a named person not in the desk list), even if {settings.desk_mailbox} is CC'd — this is not the desk's responsibility. Also anything else that is clearly not a client support request.
+
+Set manual_review_required=true (usually with classification "ambiguous") when:
+- The client asks to talk to a person who is NOT an N1 desk member, BUT the mail also describes a genuine desk-type issue (access/system/GPS/etc.). Let a human decide; lean valid only if the desk-type issue is clearly the point.
+- The thread was answered/handled by someone who is NOT an N1 desk member.
+- Evidence is genuinely insufficient or ambiguous.
+
+is_answered: true only if a real HUMAN reply from a desk member (internal, non-automated, after the client's message) exists. Automated acknowledgements ("hemos recibido su solicitud", ticket auto-replies) do NOT count as answered.
+
+Output rules:
+- Use only the message ids provided; never invent messages or ids. Pick first_client_message_id, first_internal_reply_message_id and last_internal_message_id from the provided ids when applicable, else null.
+- The provided messages are a compact view with short body excerpts; this is enough to judge validity. Only use "ambiguous" + manual_review_required=true if the evidence is truly insufficient.
+- The automatic_classification field is only a prior hint from a rule-based pass; correct it freely.
+- Write every string in the "issues" array in Spanish.
 - Output must match the requested JSON schema exactly."""
 
 
@@ -87,7 +107,7 @@ async def audit_with_bedrock(
         raise RuntimeError("AWS_BEARER_TOKEN_BEDROCK is required")
 
     request_body = {
-        "system": [{"text": SYSTEM_PROMPT}],
+        "system": [{"text": build_system_prompt(settings)}],
         "messages": [
             {
                 "role": "user",
