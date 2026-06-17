@@ -24,3 +24,4 @@ apps/ai-worker/src/*.egg-info/
 
 # OS/editor
 .DS_Store
+.agent-orchestration/runs/TASK-008/claude-implementation.md

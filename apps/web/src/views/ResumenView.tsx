@@ -29,6 +29,7 @@ type Props = {
   onViewDetails: () => void;
   orgConfig?: OrgConfig | null;
   onGoToSetup?: () => void;
+  analysisError?: string | null;
 };
 
 export function ResumenView(props: Props) {
@@ -64,6 +65,18 @@ export function ResumenView(props: Props) {
         orgConfig={props.orgConfig}
         onGoToSetup={props.onGoToSetup}
       />
+      {props.analysisError && (
+        <div className="action-error-banner" role="alert">
+          <AlertTriangle size={18} />
+          <div>
+            <strong>No se pudo iniciar el análisis</strong>
+            <p>{props.analysisError}</p>
+            {props.analysisError.toLowerCase().includes("demasiadas") && (
+              <span>El límite protege la beta privada y evita ejecuciones duplicadas. Intenta más tarde o usa el scheduler configurado.</span>
+            )}
+          </div>
+        </div>
+      )}
       {!run ? (
         <div className="card">
           <EmptyState message="Crea tu primer análisis con los filtros de arriba." />

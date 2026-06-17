@@ -3,6 +3,9 @@ use std::env;
 use anyhow::{Context, anyhow};
 use serde::Deserialize;
 
+const DEFAULT_ENCRYPTION_KEY: &str = "development-only-change-me-32-bytes";
+const DEFAULT_SESSION_SECRET: &str = "development-only-session-secret";
+
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub api_port: u16,
@@ -18,6 +21,7 @@ pub struct AppConfig {
     pub ai: AiConfig,
     pub scheduler: SchedulerConfig,
     pub report: ReportConfig,
+    pub rate_limit: RateLimitConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -59,8 +63,16 @@ pub struct ReportConfig {
     pub to_emails: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct RateLimitConfig {
+    pub analysis_create_per_hour: usize,
+    pub analysis_start_per_hour: usize,
+}
+
 impl AppConfig {
     pub fn from_env() -> anyhow::Result<Self> {
+        let app_env = env_or("APP_ENV", "development");
+        let production = is_production_env(&app_env);
         let app_storage = env_or("APP_STORAGE", "firestore");
         let google = GoogleConfig {
             client_id: env_or("GOOGLE_CLIENT_ID", ""),
@@ -105,6 +117,15 @@ impl AppConfig {
             }
         }
 
+        let rate_limit = RateLimitConfig {
+            analysis_create_per_hour: env_or("RATE_LIMIT_ANALYSIS_CREATE_PER_HOUR", "12")
+                .parse()
+                .context("invalid RATE_LIMIT_ANALYSIS_CREATE_PER_HOUR")?,
+            analysis_start_per_hour: env_or("RATE_LIMIT_ANALYSIS_START_PER_HOUR", "12")
+                .parse()
+                .context("invalid RATE_LIMIT_ANALYSIS_START_PER_HOUR")?,
+        };
+
         let api_base_url = env_or("API_BASE_URL", "http://localhost:8080");
         let cookie_secure = env::var("APP_COOKIE_SECURE")
             .ok()
@@ -125,10 +146,16 @@ impl AppConfig {
             cookie_secure,
             cookie_same_site,
             app_storage,
-            encryption_key: require("APP_ENCRYPTION_KEY")
-                .unwrap_or_else(|_| "development-only-change-me-32-bytes".to_string()),
-            session_secret: require("APP_SESSION_SECRET")
-                .unwrap_or_else(|_| "development-only-session-secret".to_string()),
+            encryption_key: secret_or_dev_default(
+                "APP_ENCRYPTION_KEY",
+                DEFAULT_ENCRYPTION_KEY,
+                production,
+            )?,
+            session_secret: secret_or_dev_default(
+                "APP_SESSION_SECRET",
+                DEFAULT_SESSION_SECRET,
+                production,
+            )?,
             google,
             firestore: FirestoreConfig {
                 project_id: env_or("GCP_PROJECT_ID", ""),
@@ -147,6 +174,7 @@ impl AppConfig {
             },
             scheduler,
             report,
+            rate_limit,
         })
     }
 }
@@ -170,6 +198,37 @@ fn require(key: &str) -> anyhow::Result<String> {
         return Err(anyhow!("{key} cannot be empty"));
     }
     Ok(value)
+}
+
+fn secret_or_dev_default(key: &str, default: &str, production: bool) -> anyhow::Result<String> {
+    match require(key) {
+        Ok(value) => validate_secret_not_default(key, &value, default, production),
+        Err(error) if production => Err(anyhow!(
+            "{key} is required when APP_ENV=production: {error}"
+        )),
+        Err(_) => Ok(default.to_string()),
+    }
+}
+
+fn validate_secret_not_default(
+    key: &str,
+    value: &str,
+    default: &str,
+    production: bool,
+) -> anyhow::Result<String> {
+    if production && (value == default || value.contains("development-only")) {
+        return Err(anyhow!(
+            "{key} must not use a development default when APP_ENV=production"
+        ));
+    }
+    Ok(value.to_string())
+}
+
+fn is_production_env(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "prod" | "production"
+    )
 }
 
 fn empty_to_none(value: Option<String>) -> Option<String> {
@@ -245,6 +304,10 @@ pub(crate) fn test_app_config() -> AppConfig {
             from_email: Some("Helpdesk <r@x.cl>".to_string()),
             to_emails: vec!["admin@x.cl".to_string()],
         },
+        rate_limit: RateLimitConfig {
+            analysis_create_per_hour: 12,
+            analysis_start_per_hour: 12,
+        },
     }
 }
 
@@ -260,5 +323,51 @@ mod tests {
         );
         assert!(split_list("").is_empty());
         assert!(split_list(" , ").is_empty());
+    }
+
+    #[test]
+    fn production_env_aliases_are_detected() {
+        assert!(is_production_env("production"));
+        assert!(is_production_env("prod"));
+        assert!(is_production_env(" PROD "));
+        assert!(!is_production_env("development"));
+        assert!(!is_production_env("staging"));
+    }
+
+    #[test]
+    fn production_rejects_development_secret_defaults() {
+        let err = validate_secret_not_default(
+            "APP_SESSION_SECRET",
+            DEFAULT_SESSION_SECRET,
+            DEFAULT_SESSION_SECRET,
+            true,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("must not use a development default"));
+
+        let err = validate_secret_not_default(
+            "APP_SESSION_SECRET",
+            "development-only-custom",
+            DEFAULT_SESSION_SECRET,
+            true,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("must not use a development default"));
+    }
+
+    #[test]
+    fn development_allows_defaults_for_local_runs() {
+        assert_eq!(
+            validate_secret_not_default(
+                "APP_SESSION_SECRET",
+                DEFAULT_SESSION_SECRET,
+                DEFAULT_SESSION_SECRET,
+                false,
+            )
+            .unwrap(),
+            DEFAULT_SESSION_SECRET
+        );
     }
 }

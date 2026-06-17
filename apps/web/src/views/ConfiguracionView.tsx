@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  Activity,
   AlertTriangle,
   Bot,
   Building2,
@@ -9,10 +10,11 @@ import {
   Clock,
   FileCheck,
   Loader2,
+  PauseCircle,
   Settings,
   Users,
 } from "lucide-react";
-import type { OrgConfig, PutConfigResponse } from "../api/types";
+import type { OperationsHistory, OperationsStatus, OrgConfig, PutConfigResponse } from "../api/types";
 import { api } from "../api/client";
 
 const TIMEZONES = [
@@ -139,6 +141,107 @@ function buildPutBody(d: WizardDraft) {
   };
 }
 
+function formatDateTime(iso: string | null): string {
+  if (!iso) return "—";
+  return new Date(iso).toLocaleString("es-CL", {
+    day: "2-digit",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function SchedulerStatusPanel({ status }: { status: OperationsStatus | undefined }) {
+  if (!status) {
+    return (
+      <div className="card scheduler-status-panel muted">
+        <Loader2 size={18} className="spin" />
+        <span>Cargando estado operativo…</span>
+      </div>
+    );
+  }
+  const last = status.scheduler.last_state;
+  const failed = last?.status === "failed";
+  return (
+    <div className={`card scheduler-status-panel${failed ? " warning" : ""}`}>
+      <div className="scheduler-status-head">
+        <div>
+          <span className="wizard-step-desc">Operación automática</span>
+          <h3>
+            {status.scheduler.enabled ? <Activity size={18} /> : <PauseCircle size={18} />}
+            {status.scheduler.enabled ? "Scheduler activo" : "Scheduler desactivado"}
+          </h3>
+        </div>
+        <span className={status.scheduler.enabled ? "wizard-ready-badge" : "wizard-not-ready-badge"}>
+          {status.scheduler.enabled ? "weekdays 08:00 local" : "manual"}
+        </span>
+      </div>
+      <div className="scheduler-status-grid">
+        <div><span>Zona horaria</span><strong>{status.scheduler.timezone}</strong></div>
+        <div><span>Próximo intento</span><strong>{formatDateTime(status.scheduler.next_run_estimate)}</strong></div>
+        <div><span>Destinatarios</span><strong>{status.scheduler.recipients_count}</strong></div>
+        <div><span>Policy</span><strong>v{status.policy.policy_version}</strong></div>
+      </div>
+      {last ? (
+        <p className="scheduler-status-copy">
+          Última ventana: <strong>{last.window_date_from} → {last.window_date_to}</strong> · estado <strong>{last.status}</strong>
+          {last.run_id ? <> · run <code>{last.run_id.slice(0, 8)}</code></> : null}
+        </p>
+      ) : (
+        <p className="scheduler-status-copy">Aún no hay ejecuciones automáticas registradas.</p>
+      )}
+      {status.scheduler.last_error_redacted && (
+        <div className="wizard-error">
+          <AlertTriangle size={16} /> {status.scheduler.last_error_redacted}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function OperationsHistoryPanel({ history }: { history: OperationsHistory | undefined }) {
+  if (!history) {
+    return null;
+  }
+  return (
+    <div className="card operations-history-panel">
+      <div className="scheduler-status-head">
+        <div>
+          <span className="wizard-step-desc">Historial operativo</span>
+          <h3>
+            <Activity size={18} /> Últimos eventos
+          </h3>
+        </div>
+        <span className="wizard-ready-badge">{history.total_count} registrados</span>
+      </div>
+      {history.entries.length === 0 ? (
+        <p className="scheduler-status-copy">Aún no hay ejecuciones registradas.</p>
+      ) : (
+        <div className="operations-history-list">
+          {history.entries.map((entry) => (
+            <div key={entry.id} className={`operations-history-item status-${entry.status}`}>
+              <div>
+                <strong>{entry.kind === "scheduler_attempt" ? "Scheduler" : "Análisis"}</strong>
+                <span>
+                  {formatDateTime(entry.started_at)}
+                  {entry.window_date_from && entry.window_date_to
+                    ? ` · ${entry.window_date_from} → ${entry.window_date_to}`
+                    : ""}
+                </span>
+              </div>
+              <div>
+                <span className="operations-history-status">{entry.status}</span>
+                {entry.error_category && <span className="operations-history-error">{entry.error_category}</span>}
+              </div>
+              {entry.error_redacted && <p>{entry.error_redacted}</p>}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
   const queryClient = useQueryClient();
   const [step, setStep] = useState(1);
@@ -146,6 +249,22 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
   const [stepError, setStepError] = useState<string | null>(null);
   const [setupState, setSetupState] = useState(orgConfig?.setup_state ?? null);
   const initialized = useRef(false);
+
+  const operationsStatus = useQuery({
+    queryKey: ["operations-status"],
+    queryFn: () => api<OperationsStatus>("/me/operations/status"),
+    enabled: Boolean(orgConfig),
+    retry: false,
+    staleTime: 30_000,
+  });
+
+  const operationsHistory = useQuery({
+    queryKey: ["operations-history"],
+    queryFn: () => api<OperationsHistory>("/me/operations/history?limit=8"),
+    enabled: Boolean(orgConfig),
+    retry: false,
+    staleTime: 30_000,
+  });
 
   useEffect(() => {
     if (orgConfig && !initialized.current) {
@@ -161,6 +280,7 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
     onSuccess: (res) => {
       setSetupState(res.setup_state);
       queryClient.invalidateQueries({ queryKey: ["org-config"] });
+      queryClient.invalidateQueries({ queryKey: ["operations-status"] });
     },
   });
 
@@ -253,13 +373,17 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
         )}
         {orgConfig && (
           <p style={{ fontSize: "var(--fs-sm)", color: "var(--text-muted)" }}>
-            Casilla: <strong style={{ color: "var(--text)" }}>{orgConfig.mailbox.google_account_email}</strong>
+            Casilla Workspace: <strong style={{ color: "var(--text)" }}>{orgConfig.mailbox.google_account_email}</strong>
             {orgConfig.policy_version && (
               <> · Política v{orgConfig.policy_version.version}</>
             )}
+            <> · Scope Gmail readonly</>
           </p>
         )}
       </div>
+
+      {!operationsStatus.isError && <SchedulerStatusPanel status={operationsStatus.data} />}
+      {!operationsHistory.isError && <OperationsHistoryPanel history={operationsHistory.data} />}
 
       {/* Wizard */}
       <div className="wizard">
@@ -294,7 +418,10 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
             <div className="wizard-fields">
               <div>
                 <h3 className="wizard-step-title">Organización y contexto</h3>
-                <p className="wizard-step-desc">¿Cómo se llama tu equipo y en qué zona horaria operan?</p>
+                <p className="wizard-step-desc">
+                  Esta beta está pensada para Google Workspace. Usamos Gmail solo lectura y la zona horaria de tu equipo
+                  para calcular ventanas y reportes.
+                </p>
               </div>
               <div className="field">
                 <label htmlFor="org-name">Nombre de la organización</label>
@@ -577,15 +704,15 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
               </div>
               <div className="wizard-info-box">
                 <p>
-                  <strong>¿Qué se elimina al vencer el plazo?</strong> Los resultados del análisis, métricas
-                  y clasificaciones almacenadas en esta aplicación.
+                  <strong>¿Qué define este plazo?</strong> La fecha de expiración que se guarda junto a cada análisis
+                  y que usaremos para las políticas de borrado de datos internos de la aplicación.
                 </p>
                 <p>
-                  <strong>¿Qué NO se elimina?</strong> Nada de tu Gmail. Solo datos internos de la aplicación.
+                  <strong>¿Qué NO se modifica?</strong> Nada de tu Gmail. La app solo tiene permiso de lectura.
                 </p>
                 <p style={{ color: "var(--text-muted)" }}>
-                  Puedes cambiar esta configuración en cualquier momento. Los análisis ya realizados conservan
-                  su fecha de expiración original.
+                  Durante la beta, los flujos destructivos se activarán de forma controlada. Puedes cambiar esta
+                  configuración en cualquier momento; los análisis ya realizados conservan su fecha original.
                 </p>
               </div>
             </div>

@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use super::{ApiError, AppState};
 use crate::{
     report::ResendMailer,
-    scheduler::{self, ScheduledOutcome, window},
+    scheduler::{self, ScheduledOutcome},
 };
 
 const CRON_SECRET_HEADER: &str = "x-cron-secret";
@@ -42,14 +42,16 @@ pub async fn scheduled_analysis(
         serde_json::from_slice(&body)
             .map_err(|_| ApiError::bad_request("cuerpo inválido: se espera JSON"))?
     };
-    let as_of_date = match request.as_of_date {
-        Some(raw) => NaiveDate::parse_from_str(&raw, "%Y-%m-%d")
-            .map_err(|_| ApiError::bad_request("as_of_date inválida; usa el formato YYYY-MM-DD"))?,
-        None => Utc::now().with_timezone(&window::SCL).date_naive(),
-    };
-
     let mailer = ResendMailer::from_config(&state.config.report)?;
-    let outcomes = scheduler::run_scheduled_analysis(&state, &mailer, as_of_date).await?;
+    let outcomes = match request.as_of_date {
+        Some(raw) => {
+            let as_of_date = NaiveDate::parse_from_str(&raw, "%Y-%m-%d").map_err(|_| {
+                ApiError::bad_request("as_of_date inválida; usa el formato YYYY-MM-DD")
+            })?;
+            scheduler::run_scheduled_analysis(&state, &mailer, as_of_date).await?
+        }
+        None => scheduler::run_due_scheduled_analysis(&state, &mailer, Utc::now()).await?,
+    };
     Ok(Json(outcomes))
 }
 

@@ -1,6 +1,11 @@
 mod internal;
 
-use std::{convert::Infallible, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, VecDeque},
+    convert::Infallible,
+    sync::Arc,
+    time::Duration,
+};
 
 use axum::{
     Json, Router,
@@ -20,6 +25,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::{
@@ -41,6 +47,10 @@ use crate::{
         normalize_domains, normalize_list, policy_version_from_draft, provision_default_config,
         retention_expires_at, setup_state, validate_timezone,
     },
+    scheduler::{
+        model::{ScheduleConfig, ScheduleState},
+        window::next_fire_time_label,
+    },
     storage::StorageRepository,
 };
 
@@ -56,6 +66,12 @@ pub struct AppState {
     pub storage: Arc<dyn StorageRepository>,
     pub http: Client,
     pub gmail: GmailClient,
+    rate_limiter: RateLimiter,
+}
+
+#[derive(Clone, Default)]
+struct RateLimiter {
+    inner: Arc<Mutex<HashMap<String, VecDeque<chrono::DateTime<Utc>>>>>,
 }
 
 impl AppState {
@@ -69,7 +85,28 @@ impl AppState {
                 .build()
                 .expect("failed to build http client"),
             gmail: GmailClient::default(),
+            rate_limiter: RateLimiter::default(),
         }
+    }
+}
+
+impl RateLimiter {
+    async fn check(&self, key: String, limit: usize) -> bool {
+        if limit == 0 {
+            return true;
+        }
+        let now = Utc::now();
+        let cutoff = now - chrono::Duration::hours(1);
+        let mut inner = self.inner.lock().await;
+        let entries = inner.entry(key).or_default();
+        while entries.front().is_some_and(|value| *value < cutoff) {
+            entries.pop_front();
+        }
+        if entries.len() >= limit {
+            return false;
+        }
+        entries.push_back(now);
+        true
     }
 }
 
@@ -80,6 +117,9 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/google/callback", get(auth_google_callback))
         .route("/auth/logout", post(auth_logout))
         .route("/auth/me", get(auth_me))
+        .route("/me/data-summary", get(get_data_summary))
+        .route("/me/operations/status", get(get_operations_status))
+        .route("/me/operations/history", get(get_operations_history))
         .route("/me/org/config", get(get_org_config).put(update_org_config))
         .route(
             "/analysis-runs",
@@ -254,6 +294,367 @@ async fn auth_me(
     })))
 }
 
+#[derive(Debug, Serialize)]
+struct DataSummaryResponse {
+    account: DataSummaryAccount,
+    org: DataSummaryOrg,
+    privacy: DataSummaryPrivacy,
+    stored_data: StoredDataSummary,
+    actions: DataActionAvailability,
+}
+
+#[derive(Debug, Serialize)]
+struct DataSummaryAccount {
+    google_account_email: String,
+    gmail_scope_snapshot: Vec<String>,
+    mailbox_connected: bool,
+    mailbox_revoked_at: Option<chrono::DateTime<Utc>>,
+}
+
+#[derive(Debug, Serialize)]
+struct DataSummaryOrg {
+    id: String,
+    name: String,
+    role: crate::policies::OrgRole,
+    policy_version: u64,
+    setup_ready: bool,
+    setup_missing: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct DataSummaryPrivacy {
+    data_minimization_mode: String,
+    ai_enabled: bool,
+    ai_consent_granted_at: Option<chrono::DateTime<Utc>>,
+    retention_days: u32,
+    report_mode: crate::policies::ReportMode,
+}
+
+#[derive(Debug, Serialize)]
+struct StoredDataSummary {
+    analysis_runs_count: usize,
+    threads_count: usize,
+    messages_count: usize,
+    ai_audit_records_count: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct DataActionAvailability {
+    disconnect_gmail: DataActionStatus,
+    delete_analysis_data: DataActionStatus,
+    delete_account_data: DataActionStatus,
+}
+
+#[derive(Debug, Serialize)]
+struct DataActionStatus {
+    available: bool,
+    reason: &'static str,
+}
+
+async fn get_data_summary(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<DataSummaryResponse>, ApiError> {
+    let session = require_session(&state, &headers).await?;
+    let bundle = get_or_provision_org_config(&state, &session.google_account_email).await?;
+    let setup = setup_state(&bundle.draft);
+    let runs = state
+        .storage
+        .list_analysis_runs(&session.google_account_email)
+        .await?;
+    let mut threads_count = 0usize;
+    let mut messages_count = 0usize;
+    for run in &runs {
+        let threads = state.storage.list_threads(&run.id).await?;
+        threads_count += threads.len();
+        for thread in &threads {
+            messages_count += state
+                .storage
+                .list_messages(&run.id, &thread.id)
+                .await?
+                .len();
+        }
+    }
+
+    Ok(Json(DataSummaryResponse {
+        account: DataSummaryAccount {
+            google_account_email: session.google_account_email,
+            gmail_scope_snapshot: bundle.mailbox.gmail_scope_snapshot.clone(),
+            mailbox_connected: bundle.mailbox.revoked_at.is_none(),
+            mailbox_revoked_at: bundle.mailbox.revoked_at,
+        },
+        org: DataSummaryOrg {
+            id: bundle.org.id,
+            name: bundle.org.name,
+            role: bundle.membership.role,
+            policy_version: bundle.policy_version.version,
+            setup_ready: setup.ready_for_analysis,
+            setup_missing: setup.missing,
+        },
+        privacy: DataSummaryPrivacy {
+            data_minimization_mode: "metadata_snippets_excerpts_only".to_string(),
+            ai_enabled: bundle.draft.ai_policy.enabled,
+            ai_consent_granted_at: bundle.draft.ai_policy.consent_granted_at,
+            retention_days: bundle.draft.retention_policy.retention_days,
+            report_mode: bundle.draft.schedule_report_policy.report_content.mode,
+        },
+        stored_data: StoredDataSummary {
+            analysis_runs_count: runs.len(),
+            threads_count,
+            messages_count,
+            ai_audit_records_count: None,
+        },
+        actions: DataActionAvailability {
+            disconnect_gmail: DataActionStatus {
+                available: false,
+                reason: "pending_backend_contract",
+            },
+            delete_analysis_data: DataActionStatus {
+                available: false,
+                reason: "pending_backend_contract",
+            },
+            delete_account_data: DataActionStatus {
+                available: false,
+                reason: "pending_backend_contract",
+            },
+        },
+    }))
+}
+
+#[derive(Debug, Serialize)]
+struct OperationsStatusResponse {
+    scheduler: SchedulerStatusSummary,
+    policy: OperationsPolicySummary,
+}
+
+#[derive(Debug, Serialize)]
+struct OperationsHistoryResponse {
+    entries: Vec<OperationsHistoryEntry>,
+    total_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct OperationsHistoryEntry {
+    id: String,
+    kind: String,
+    status: String,
+    started_at: chrono::DateTime<Utc>,
+    finished_at: Option<chrono::DateTime<Utc>>,
+    run_id: Option<String>,
+    trigger_type: Option<String>,
+    window_date_from: Option<String>,
+    window_date_to: Option<String>,
+    processed_threads: Option<u64>,
+    total_candidate_threads: Option<u64>,
+    error_category: Option<String>,
+    error_redacted: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct SchedulerStatusSummary {
+    enabled: bool,
+    timezone: String,
+    preset: String,
+    recipients_count: usize,
+    next_run_estimate: Option<String>,
+    last_state: Option<ScheduleState>,
+    last_error_redacted: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct OperationsPolicySummary {
+    org_id: String,
+    policy_version: u64,
+    policy_hash: String,
+    setup_ready: bool,
+    setup_missing: Vec<String>,
+}
+
+async fn get_operations_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<OperationsStatusResponse>, ApiError> {
+    let session = require_session(&state, &headers).await?;
+    let bundle = get_or_provision_org_config(&state, &session.google_account_email).await?;
+    let setup = setup_state(&bundle.draft);
+    let schedule_config = state
+        .storage
+        .list_schedule_configs()
+        .await?
+        .into_iter()
+        .find(|config| {
+            config
+                .user_email
+                .eq_ignore_ascii_case(&session.google_account_email)
+        });
+    let schedule_policy = &bundle.draft.schedule_report_policy;
+    let timezone = schedule_config
+        .as_ref()
+        .map(|config| config.timezone.clone())
+        .unwrap_or_else(|| schedule_policy.timezone.clone());
+    let enabled = schedule_config
+        .as_ref()
+        .map(|config| config.enabled)
+        .unwrap_or(schedule_policy.scheduler_enabled);
+    let recipients_count = schedule_config
+        .as_ref()
+        .map(|config| config.recipients.len())
+        .unwrap_or(schedule_policy.report_recipients.len());
+    let last_state = state
+        .storage
+        .get_schedule_state(&session.google_account_email)
+        .await?;
+    let last_error_redacted = last_state
+        .as_ref()
+        .and_then(|state| state.error_message.as_deref())
+        .map(redact_public_error);
+
+    Ok(Json(OperationsStatusResponse {
+        scheduler: SchedulerStatusSummary {
+            enabled,
+            timezone: timezone.clone(),
+            preset: "weekdays_08_local".to_string(),
+            recipients_count,
+            next_run_estimate: if enabled {
+                next_fire_time_label(Utc::now(), &timezone)
+            } else {
+                None
+            },
+            last_state,
+            last_error_redacted,
+        },
+        policy: OperationsPolicySummary {
+            org_id: bundle.org.id,
+            policy_version: bundle.policy_version.version,
+            policy_hash: bundle.policy_version.policy_hash,
+            setup_ready: setup.ready_for_analysis,
+            setup_missing: setup.missing,
+        },
+    }))
+}
+
+async fn get_operations_history(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<PaginationQuery>,
+) -> Result<Json<OperationsHistoryResponse>, ApiError> {
+    let session = require_session(&state, &headers).await?;
+    let limit = query.limit.unwrap_or(10).clamp(1, 50);
+    let offset = decode_page_token(query.page_token.as_deref())?;
+    let runs = state
+        .storage
+        .list_analysis_runs(&session.google_account_email)
+        .await?;
+    let mut entries: Vec<OperationsHistoryEntry> = runs
+        .into_iter()
+        .map(|run| {
+            let error_redacted = run.error_message.as_deref().map(redact_public_error);
+            let error_category = run.error_message.as_deref().map(error_category);
+            OperationsHistoryEntry {
+                id: format!("run:{}", run.id),
+                kind: "analysis_run".to_string(),
+                status: serde_json::to_value(&run.status)
+                    .ok()
+                    .and_then(|value| value.as_str().map(str::to_string))
+                    .unwrap_or_else(|| "unknown".to_string()),
+                started_at: run.created_at,
+                finished_at: run.completed_at,
+                run_id: Some(run.id),
+                trigger_type: run
+                    .trigger_type
+                    .and_then(|trigger| serde_json::to_value(trigger).ok())
+                    .and_then(|value| value.as_str().map(str::to_string)),
+                window_date_from: Some(run.config.date_from),
+                window_date_to: Some(run.config.date_to),
+                processed_threads: Some(run.processed_threads),
+                total_candidate_threads: Some(run.total_candidate_threads),
+                error_category,
+                error_redacted,
+            }
+        })
+        .collect();
+
+    if let Some(schedule_state) = state
+        .storage
+        .get_schedule_state(&session.google_account_email)
+        .await?
+        && !entries
+            .iter()
+            .any(|entry| entry.run_id.as_deref() == schedule_state.run_id.as_deref())
+    {
+        let error_redacted = schedule_state
+            .error_message
+            .as_deref()
+            .map(redact_public_error);
+        let error_category = schedule_state.error_message.as_deref().map(error_category);
+        entries.push(OperationsHistoryEntry {
+            id: format!(
+                "scheduler:{}:{}",
+                schedule_state.window_date_from, schedule_state.window_date_to
+            ),
+            kind: "scheduler_attempt".to_string(),
+            status: serde_json::to_value(&schedule_state.status)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_string))
+                .unwrap_or_else(|| "unknown".to_string()),
+            started_at: schedule_state.started_at,
+            finished_at: Some(schedule_state.updated_at),
+            run_id: schedule_state.run_id,
+            trigger_type: Some("scheduled".to_string()),
+            window_date_from: Some(schedule_state.window_date_from),
+            window_date_to: Some(schedule_state.window_date_to),
+            processed_threads: None,
+            total_candidate_threads: None,
+            error_category,
+            error_redacted,
+        });
+    }
+
+    entries.sort_by_key(|entry| entry.started_at);
+    entries.reverse();
+    let total_count = entries.len();
+    let entries = entries.into_iter().skip(offset).take(limit).collect();
+    Ok(Json(OperationsHistoryResponse {
+        entries,
+        total_count,
+    }))
+}
+
+fn error_category(message: &str) -> String {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("oauth") || lower.contains("token") || lower.contains("unauthorized") {
+        "auth".to_string()
+    } else if lower.contains("gmail") || lower.contains("google") {
+        "gmail_api".to_string()
+    } else if lower.contains("ai") || lower.contains("bedrock") || lower.contains("worker") {
+        "ai_worker".to_string()
+    } else if lower.contains("resend") || lower.contains("report") || lower.contains("email") {
+        "report_delivery".to_string()
+    } else if lower.contains("timeout") || lower.contains("timed out") {
+        "timeout".to_string()
+    } else if lower.contains("rate") || lower.contains("429") {
+        "rate_limited".to_string()
+    } else if lower.contains("config") || lower.contains("schedule") {
+        "configuration".to_string()
+    } else {
+        "unknown".to_string()
+    }
+}
+
+fn redact_public_error(message: &str) -> String {
+    let mut redacted = message.replace(&['\n', '\r'][..], " ");
+    for marker in ["Bearer ", "refresh_token", "access_token", "client_secret"] {
+        if redacted
+            .to_ascii_lowercase()
+            .contains(&marker.to_ascii_lowercase())
+        {
+            redacted = "Error operativo redacted; revisa logs internos".to_string();
+            break;
+        }
+    }
+    redacted.chars().take(240).collect()
+}
+
 async fn get_org_config(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -356,10 +757,35 @@ async fn update_org_config(
         bundle.policy_version = new_version;
     }
     state.storage.upsert_org_config(&bundle).await?;
+    sync_schedule_config_from_policy(&state, &bundle).await?;
     Ok(Json(UpdateOrgConfigResponse {
         policy_version: bundle.policy_version,
         setup_state: setup_state(&bundle.draft),
     }))
+}
+
+async fn sync_schedule_config_from_policy(
+    state: &AppState,
+    bundle: &OrgConfigBundle,
+) -> Result<(), ApiError> {
+    let analysis = &bundle.draft.analysis_policy;
+    let schedule = &bundle.draft.schedule_report_policy;
+    state
+        .storage
+        .upsert_schedule_config(&ScheduleConfig {
+            user_email: bundle.membership.user_email.clone(),
+            enabled: schedule.scheduler_enabled,
+            recipients: schedule.report_recipients.clone(),
+            internal_domains: analysis.internal_domains.clone(),
+            ignored_senders: analysis.ignored_senders.clone(),
+            ignored_domains: analysis.ignored_domains.clone(),
+            ignored_keywords: analysis.ignored_keywords.clone(),
+            timezone: schedule.timezone.clone(),
+            gmail_max_threads: Some(analysis.max_threads_per_run),
+            updated_at: Utc::now(),
+        })
+        .await?;
+    Ok(())
 }
 
 fn apply_org_config_update(
@@ -605,6 +1031,13 @@ async fn create_analysis_run(
     Json(request): Json<CreateAnalysisRunRequest>,
 ) -> Result<Json<AnalysisRun>, ApiError> {
     let session = require_session(&state, &headers).await?;
+    enforce_rate_limit(
+        &state,
+        &session.google_account_email,
+        "analysis_create",
+        state.config.rate_limit.analysis_create_per_hour,
+    )
+    .await?;
     let now = Utc::now();
     let uses_legacy_config = request.policy_version_id.is_none()
         && (!request.internal_domains.is_empty()
@@ -727,14 +1160,14 @@ async fn build_policy_run(
 async fn list_analysis_runs(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<Vec<AnalysisRun>>, ApiError> {
+    Query(query): Query<PaginationQuery>,
+) -> Result<impl IntoResponse, ApiError> {
     let session = require_session(&state, &headers).await?;
-    Ok(Json(
-        state
-            .storage
-            .list_analysis_runs(&session.google_account_email)
-            .await?,
-    ))
+    let runs = state
+        .storage
+        .list_analysis_runs(&session.google_account_email)
+        .await?;
+    paginated_or_legacy_response(runs, &query)
 }
 
 async fn get_analysis_run(
@@ -753,6 +1186,18 @@ async fn start_analysis_run(
 ) -> Result<Json<AnalysisRun>, ApiError> {
     let session = require_session(&state, &headers).await?;
     let mut run = require_owned_run(&state, &id, &session).await?;
+    if run.status != AnalysisStatus::Pending {
+        return Err(ApiError::conflict(
+            "el análisis solo puede iniciarse cuando está pendiente",
+        ));
+    }
+    enforce_rate_limit(
+        &state,
+        &session.google_account_email,
+        "analysis_start",
+        state.config.rate_limit.analysis_start_per_hour,
+    )
+    .await?;
     run.status = AnalysisStatus::Running;
     run.progress_message = "Iniciando lectura de Gmail".to_string();
     state.storage.update_analysis_run(&run).await?;
@@ -812,11 +1257,11 @@ async fn list_threads(
     headers: HeaderMap,
     Path(id): Path<String>,
     Query(query): Query<ThreadQuery>,
-) -> Result<Json<Vec<EmailThread>>, ApiError> {
+) -> Result<impl IntoResponse, ApiError> {
     let session = require_session(&state, &headers).await?;
     let run = require_owned_run(&state, &id, &session).await?;
     let mut threads = state.storage.list_threads(&run.id).await?;
-    if let Some(classification) = query.classification {
+    if let Some(classification) = &query.classification {
         threads.retain(|thread| {
             serde_json::to_value(&thread.classification).ok() == Some(json!(classification))
         });
@@ -827,14 +1272,81 @@ async fn list_threads(
     if let Some(manual_review_required) = query.manual_review_required {
         threads.retain(|thread| thread.manual_review_required == manual_review_required);
     }
-    Ok(Json(threads))
+    paginated_or_legacy_response(threads, &query.pagination())
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
+struct PaginationQuery {
+    limit: Option<usize>,
+    page_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
 struct ThreadQuery {
     classification: Option<String>,
     answered: Option<bool>,
     manual_review_required: Option<bool>,
+    limit: Option<usize>,
+    page_token: Option<String>,
+}
+
+impl ThreadQuery {
+    fn pagination(&self) -> PaginationQuery {
+        PaginationQuery {
+            limit: self.limit,
+            page_token: self.page_token.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct PaginatedResponse<T> {
+    items: Vec<T>,
+    next_page_token: Option<String>,
+    total_count: usize,
+}
+
+fn paginated_or_legacy_response<T: Serialize>(
+    items: Vec<T>,
+    query: &PaginationQuery,
+) -> Result<axum::response::Response, ApiError> {
+    if query.limit.is_none() && query.page_token.is_none() {
+        return Ok(Json(items).into_response());
+    }
+    let total_count = items.len();
+    let limit = query.limit.unwrap_or(50).clamp(1, 200);
+    let offset = decode_page_token(query.page_token.as_deref())?;
+    let page_items: Vec<T> = items.into_iter().skip(offset).take(limit).collect();
+    let next_offset = offset + page_items.len();
+    let next_page_token = if next_offset < total_count {
+        Some(encode_page_token(next_offset))
+    } else {
+        None
+    };
+    Ok(Json(PaginatedResponse {
+        items: page_items,
+        next_page_token,
+        total_count,
+    })
+    .into_response())
+}
+
+fn encode_page_token(offset: usize) -> String {
+    URL_SAFE_NO_PAD.encode(offset.to_string())
+}
+
+fn decode_page_token(token: Option<&str>) -> Result<usize, ApiError> {
+    let Some(token) = token else {
+        return Ok(0);
+    };
+    let raw = URL_SAFE_NO_PAD
+        .decode(token)
+        .map_err(|_| ApiError::bad_request("page_token inválido"))?;
+    let decoded =
+        String::from_utf8(raw).map_err(|_| ApiError::bad_request("page_token inválido"))?;
+    decoded
+        .parse::<usize>()
+        .map_err(|_| ApiError::bad_request("page_token inválido"))
 }
 
 async fn get_thread(
@@ -1112,7 +1624,7 @@ async fn process_one_thread(
             .unwrap_or((14, 280, state.config.ai.apply_confidence_threshold));
         let audit_messages =
             audit_messages_for_thread(&thread, &data.messages, max_messages, max_body_chars);
-        match audit_thread(state, &thread, &audit_messages).await {
+        match audit_thread(state, &thread, &audit_messages, processing.policy_snapshot).await {
             Ok(mut audit) => {
                 audit.policy_version_id = processing.policy_version_id.map(ToOwned::to_owned);
                 if let Some(snapshot) = processing.policy_snapshot {
@@ -1269,17 +1781,57 @@ async fn audit_thread(
     state: &AppState,
     thread: &EmailThread,
     messages: &[EmailMessage],
+    policy_snapshot: Option<&crate::policies::PolicySnapshot>,
 ) -> anyhow::Result<AiAuditResult> {
     #[derive(Serialize)]
     struct AuditRequest<'a> {
         thread: &'a EmailThread,
         messages: &'a [EmailMessage],
+        #[serde(skip_serializing_if = "Option::is_none")]
+        policy_context: Option<AiWorkerPolicyContext<'a>>,
     }
+
+    #[derive(Serialize)]
+    struct AiWorkerPolicyContext<'a> {
+        mailbox_email: &'a str,
+        mailbox_display_name: &'a str,
+        workspace_domain: &'a str,
+        internal_domains: &'a [String],
+        responder_emails: &'a [String],
+        mailbox_aliases: &'a [String],
+        valid_request_criteria: &'a [String],
+        non_responsibility_rules: &'a [String],
+        ignored_senders: &'a [String],
+        ignored_domains: &'a [String],
+        ignored_keywords: &'a [String],
+        prompt_version: &'a str,
+        allowed_fields: &'a [String],
+    }
+
+    let policy_context = policy_snapshot.map(|snapshot| AiWorkerPolicyContext {
+        mailbox_email: &snapshot.mailbox.google_account_email,
+        mailbox_display_name: &snapshot.mailbox.display_name,
+        workspace_domain: &snapshot.mailbox.workspace_domain,
+        internal_domains: &snapshot.analysis_policy.internal_domains,
+        responder_emails: &snapshot.analysis_policy.responder_emails,
+        mailbox_aliases: &snapshot.analysis_policy.mailbox_aliases,
+        valid_request_criteria: &snapshot.analysis_policy.valid_request_criteria,
+        non_responsibility_rules: &snapshot.analysis_policy.non_responsibility_rules,
+        ignored_senders: &snapshot.analysis_policy.ignored_senders,
+        ignored_domains: &snapshot.analysis_policy.ignored_domains,
+        ignored_keywords: &snapshot.analysis_policy.ignored_keywords,
+        prompt_version: &snapshot.ai_policy.prompt_version,
+        allowed_fields: &snapshot.ai_policy.allowed_fields,
+    });
 
     let mut request = state
         .http
         .post(format!("{}/audit/thread", state.config.ai.worker_url))
-        .json(&AuditRequest { thread, messages });
+        .json(&AuditRequest {
+            thread,
+            messages,
+            policy_context,
+        });
     if let Some(audience) = &state.config.ai.worker_audience {
         request = request.bearer_auth(fetch_cloud_run_identity_token(&state.http, audience).await?);
     }
@@ -1321,6 +1873,22 @@ fn excluded_sample_ids(ids: &[String]) -> Vec<String> {
         .filter(|(index, _)| index % 10 == 0)
         .map(|(_, id)| id.clone())
         .collect()
+}
+
+async fn enforce_rate_limit(
+    state: &AppState,
+    user_email: &str,
+    action: &str,
+    limit: usize,
+) -> Result<(), ApiError> {
+    let key = format!("{}:{}", action, user_email.trim().to_lowercase());
+    if state.rate_limiter.check(key, limit).await {
+        Ok(())
+    } else {
+        Err(ApiError::too_many_requests(
+            "Demasiados análisis solicitados; intenta nuevamente más tarde",
+        ))
+    }
 }
 
 async fn require_owned_run(
@@ -1427,6 +1995,20 @@ impl ApiError {
             message: message.to_string(),
         }
     }
+
+    fn conflict(message: &str) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            message: message.to_string(),
+        }
+    }
+
+    fn too_many_requests(message: &str) -> Self {
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            message: message.to_string(),
+        }
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -1487,7 +2069,7 @@ mod tests {
     use crate::{
         analysis::{AnalysisConfig, Classification},
         auth::sign_session_id,
-        config::test_app_config,
+        config::{AppConfig, test_app_config},
         policies::OrgConfigResponse,
         storage::MemoryStorage,
     };
@@ -1499,7 +2081,10 @@ mod tests {
     }
 
     async fn seeded_app() -> TestApp {
-        let config = test_app_config();
+        seeded_app_with_config(test_app_config()).await
+    }
+
+    async fn seeded_app_with_config(config: AppConfig) -> TestApp {
         let storage = MemoryStorage::default();
         storage
             .upsert_user_session(&session("alice-session", "alice@example.com"))
@@ -1690,6 +2275,226 @@ mod tests {
         assert!(!body.draft.ai_policy.enabled);
         assert_eq!(body.draft.retention_policy.retention_days, 30);
         assert_eq!(body.setup_state.missing, vec!["valid_request_criteria"]);
+    }
+
+    #[tokio::test]
+    async fn list_analysis_runs_legacy_returns_array_without_pagination_query() {
+        let test = seeded_app().await;
+        let response = test
+            .app
+            .oneshot(request(
+                Method::GET,
+                "/analysis-runs",
+                Some(&test.alice_cookie),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = response_json(response).await;
+        assert!(body.as_array().is_some());
+    }
+
+    #[tokio::test]
+    async fn paginated_analysis_runs_and_threads_return_wrapper() {
+        let test = seeded_app().await;
+        for day in ["2026-06-03", "2026-06-04", "2026-06-05"] {
+            let response = test
+                .app
+                .clone()
+                .oneshot(request(
+                    Method::POST,
+                    "/analysis-runs",
+                    Some(&test.alice_cookie),
+                    Some(json!({
+                        "date_from": day,
+                        "date_to": day,
+                        "internal_domains": ["example.com"]
+                    })),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        let response = test
+            .app
+            .clone()
+            .oneshot(request(
+                Method::GET,
+                "/analysis-runs?limit=2",
+                Some(&test.alice_cookie),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = response_json(response).await;
+        assert_eq!(body["items"].as_array().unwrap().len(), 2);
+        assert_eq!(body["total_count"], 4);
+        let token = body["next_page_token"].as_str().unwrap();
+
+        let response = test
+            .app
+            .clone()
+            .oneshot(request(
+                Method::GET,
+                &format!("/analysis-runs?limit=2&page_token={token}"),
+                Some(&test.alice_cookie),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = response_json(response).await;
+        assert_eq!(body["items"].as_array().unwrap().len(), 2);
+        assert!(body["next_page_token"].is_null());
+
+        let response = test
+            .app
+            .oneshot(request(
+                Method::GET,
+                "/analysis-runs/run-alice/threads?limit=1",
+                Some(&test.alice_cookie),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = response_json(response).await;
+        assert_eq!(body["items"].as_array().unwrap().len(), 1);
+        assert_eq!(body["total_count"], 1);
+        assert!(body["next_page_token"].is_null());
+    }
+
+    #[tokio::test]
+    async fn data_summary_is_read_only_and_counts_owned_data() {
+        let test = seeded_app().await;
+        let response = test
+            .app
+            .oneshot(request(
+                Method::GET,
+                "/me/data-summary",
+                Some(&test.alice_cookie),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = response_json(response).await;
+        assert_eq!(body["account"]["google_account_email"], "alice@example.com");
+        assert_eq!(body["account"]["mailbox_connected"], true);
+        assert_eq!(body["privacy"]["ai_enabled"], false);
+        assert_eq!(body["privacy"]["retention_days"], 30);
+        assert_eq!(body["stored_data"]["analysis_runs_count"], 1);
+        assert_eq!(body["stored_data"]["threads_count"], 1);
+        assert_eq!(body["stored_data"]["messages_count"], 1);
+        assert_eq!(body["actions"]["disconnect_gmail"]["available"], false);
+        assert_eq!(
+            body["actions"]["disconnect_gmail"]["reason"],
+            "pending_backend_contract"
+        );
+    }
+
+    #[tokio::test]
+    async fn operations_history_lists_recent_runs_without_sensitive_details() {
+        let test = seeded_app().await;
+        let response = test
+            .app
+            .oneshot(request(
+                Method::GET,
+                "/me/operations/history?limit=5",
+                Some(&test.alice_cookie),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = response_json(response).await;
+        assert_eq!(body["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(body["entries"][0]["kind"], "analysis_run");
+        assert_eq!(body["entries"][0]["run_id"], "run-alice");
+        assert!(body["entries"][0].get("error_redacted").is_some());
+        assert!(body["entries"][0].get("processed_threads").is_some());
+    }
+
+    #[tokio::test]
+    async fn operations_status_is_read_only_and_redacts_errors() {
+        let test = seeded_app().await;
+        let response = test
+            .app
+            .clone()
+            .oneshot(request(
+                Method::PUT,
+                "/me/org/config",
+                Some(&test.alice_cookie),
+                Some(json!({
+                    "analysis_policy": {
+                        "valid_request_criteria": ["Clientes externos solicitan soporte"]
+                    },
+                    "schedule_report_policy": {
+                        "scheduler_enabled": true,
+                        "report_recipients": ["ops@example.com"]
+                    }
+                })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = test
+            .app
+            .oneshot(request(
+                Method::GET,
+                "/me/operations/status",
+                Some(&test.alice_cookie),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = response_json(response).await;
+        assert_eq!(body["scheduler"]["enabled"], true);
+        assert_eq!(body["scheduler"]["recipients_count"], 1);
+        assert_eq!(body["scheduler"]["preset"], "weekdays_08_local");
+        assert_eq!(body["policy"]["setup_ready"], true);
+    }
+
+    #[tokio::test]
+    async fn create_analysis_run_is_rate_limited_per_user() {
+        let mut config = test_app_config();
+        config.rate_limit.analysis_create_per_hour = 1;
+        let test = seeded_app_with_config(config).await;
+        let payload = json!({
+            "date_from": "2026-06-01",
+            "date_to": "2026-06-02",
+            "internal_domains": ["example.com"]
+        });
+
+        let response = test
+            .app
+            .clone()
+            .oneshot(request(
+                Method::POST,
+                "/analysis-runs",
+                Some(&test.alice_cookie),
+                Some(payload.clone()),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = test
+            .app
+            .oneshot(request(
+                Method::POST,
+                "/analysis-runs",
+                Some(&test.alice_cookie),
+                Some(payload),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 
     #[tokio::test]

@@ -90,3 +90,39 @@ Se implementó validación de sesión/ownership para runs, status, metrics, thre
 Fecha: 2026-06-17
 
 Se aprobó e implementó la opción B: backend policy-first incremental, con avance UI/UX en paralelo por Claude. El sistema ahora tiene organización implícita, mailbox inicial, `PolicyDraft`, `PolicyVersion`, snapshot por `AnalysisRun`, IA opt-in por policy, retención default 30 días y UI inicial de configuración guiada. Se mantiene compatibilidad legacy para análisis con filtros antiguos. Scheduler V2, retention job real y worker IA con contexto operacional completo quedan para tareas posteriores.
+
+## D-015 — Acciones destructivas visibles pero deshabilitadas
+
+Fecha: 2026-06-17
+
+Se implementó un centro de privacidad y datos con resumen read-only (`GET /me/data-summary`). Las acciones de desconectar Gmail, borrar análisis y borrar cuenta/datos quedan visibles pero deshabilitadas hasta aprobar su semántica exacta, confirmaciones requeridas, efectos sobre scheduler y cascadas de borrado. Esto evita prometer capacidades destructivas o ejecutar borrados/revocaciones sin decisión humana explícita.
+
+## D-016 — Scheduler V2 incremental priorizado sobre borrado/desconexión
+
+Fecha: 2026-06-17
+
+El dueño priorizó acercar la app a production-ready funcional y confirmó que borrado/desconexión no son prioridad por ahora. Se implementó scheduler policy-first incremental: `/me/org/config` sincroniza `scheduleConfigs`, los scheduled runs usan `PolicySnapshot` cuando existe org config, y los reportes respetan `report_content` (`metrics_only` o redacción de asuntos/remitentes). Se mantiene compatibilidad legacy/env seed.
+
+## D-017 — Tres frentes production-ready en paralelo
+
+Fecha: 2026-06-17
+
+Se avanzó en paralelo en scheduler timezone por tenant, observabilidad operativa y rate limiting. El scheduler interno ahora evalúa `weekdays_08_local` por timezone IANA de cada config. Se agregó `GET /me/operations/status` y panel UI en Configuración. Se agregó rate limiting in-memory por usuario para creación/inicio manual de análisis y guardia para evitar iniciar dos veces un run no pendiente. Borrado/desconexión sigue explícitamente fuera de prioridad.
+
+## D-018 — Roadmap v2 y estabilización base
+
+Fecha: 2026-06-17
+
+Se aprobó la opción B: crear una base de roadmap production-ready antes de seguir acumulando features sueltas. Se creó `.agent-orchestration/production-roadmap-v2.md`. Como primer sprint de estabilización se implementó: AI worker stateless con `policy_context` desde `PolicySnapshot` y sin hardcodes de empresa original; README/runtime docs actualizadas; y `scripts/check-all.sh` como check local unificado. Landing/waitlist pasa a TASK-020 como siguiente foco product/UX.
+
+## D-019 — Sprint B beta shell en misma app Vite
+
+Fecha: 2026-06-17
+
+Para la beta privada se implementó la landing/waitlist dentro de la misma app Vite, en el estado público no autenticado, en vez de crear una app marketing separada. Alternativas consideradas: app separada/marketing site o ruta pública dentro de la app. Recomendación aplicada: misma app por menor complejidad de despliegue, reutilización del modal OAuth y velocidad de validación. Impacto: suficiente para beta privada; para SaaS público/pricing puede separarse más adelante. El formulario waitlist usa `mailto:` y no introduce un nuevo backend ni almacenamiento de leads.
+
+## D-020 — Sprint C delegado a Claude Code, sin Codex
+
+Fecha: 2026-06-17
+
+Por límite de uso disponible, el dueño pidió no usar Codex y delegar solo a Claude Code. Se intentó planificación read-only con herramientas para TASK-023/024/025; los procesos quedaron sin output y se cerraron. Se relanzó Claude sin herramientas con contexto resumido para TASK-023/024 y generó planes útiles. Claude generó el runbook inicial de TASK-025; Pi lo corrigió con nombres reales verificados en código permitido. Se implementó Sprint C: `/me/operations/history`, panel de historial operativo, paginación opt-in compatible para runs/threads, y `docs/deployment-beta-runbook.md`. No se leyó contenido de `.env` ni `.env.*`; no se usó Codex.

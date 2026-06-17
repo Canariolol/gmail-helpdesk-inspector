@@ -205,3 +205,111 @@ export interface PutConfigResponse {
   policy_version: PolicyVersionInfo;
   setup_state: SetupState;
 }
+
+// ---- Privacy & Data Summary ----
+
+export interface DataSummaryAccount {
+  google_account_email: string;
+  gmail_scope_snapshot: string[];
+  mailbox_connected: boolean;
+  mailbox_revoked_at: string | null;
+}
+
+export interface DataSummaryOrg {
+  id: string;
+  name: string;
+  role: string;
+  policy_version: number;
+  setup_ready: boolean;
+  setup_missing: string[];
+}
+
+export interface DataSummaryPrivacy {
+  data_minimization_mode: string;
+  ai_enabled: boolean;
+  ai_consent_granted_at: string | null;
+  retention_days: number;
+  report_mode: "metrics_only" | "metrics_and_review_items";
+}
+
+export interface DataSummaryStoredData {
+  analysis_runs_count: number;
+  threads_count: number;
+  messages_count: number;
+  ai_audit_records_count: number | null;
+}
+
+export interface DataSummaryAction {
+  available: boolean;
+  reason: string;
+}
+
+export interface DataSummaryActions {
+  disconnect_gmail: DataSummaryAction;
+  delete_analysis_data: DataSummaryAction;
+  delete_account_data: DataSummaryAction;
+}
+
+export interface DataSummary {
+  account: DataSummaryAccount;
+  org: DataSummaryOrg;
+  privacy: DataSummaryPrivacy;
+  stored_data: DataSummaryStoredData;
+  actions: DataSummaryActions;
+}
+
+// ---- Operations / Scheduler Status ----
+
+export type ScheduleRunStatus = "running" | "completed" | "failed";
+
+export interface ScheduleState {
+  user_email: string;
+  window_date_from: string;
+  window_date_to: string;
+  status: ScheduleRunStatus;
+  run_id: string | null;
+  email_sent: boolean;
+  error_message: string | null;
+  started_at: string;
+  updated_at: string;
+}
+
+export interface OperationsHistoryEntry {
+  id: string;
+  kind: "analysis_run" | "scheduler_attempt" | string;
+  status: string;
+  started_at: string;
+  finished_at: string | null;
+  run_id: string | null;
+  trigger_type: string | null;
+  window_date_from: string | null;
+  window_date_to: string | null;
+  processed_threads: number | null;
+  total_candidate_threads: number | null;
+  error_category: string | null;
+  error_redacted: string | null;
+}
+
+export interface OperationsHistory {
+  entries: OperationsHistoryEntry[];
+  total_count: number;
+}
+
+export interface OperationsStatus {
+  scheduler: {
+    enabled: boolean;
+    timezone: string;
+    preset: string;
+    recipients_count: number;
+    next_run_estimate: string | null;
+    last_state: ScheduleState | null;
+    last_error_redacted: string | null;
+  };
+  policy: {
+    org_id: string;
+    policy_version: number;
+    policy_hash: string;
+    setup_ready: boolean;
+    setup_missing: string[];
+  };
+}

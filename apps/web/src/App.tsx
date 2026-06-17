@@ -8,6 +8,7 @@ import { AyudaView } from "./views/AyudaView";
 import { ConfiguracionView } from "./views/ConfiguracionView";
 import { HilosView } from "./views/HilosView";
 import { LoginView } from "./views/LoginView";
+import { PrivacidadDatosView } from "./views/PrivacidadDatosView";
 import { ReportesView } from "./views/ReportesView";
 import { ResumenView } from "./views/ResumenView";
 import { RunsView } from "./views/RunsView";
@@ -102,6 +103,8 @@ export function App() {
   );
 
   const handleAnalyze = (payload: unknown) => {
+    createRun.reset();
+    startRun.reset();
     createRun.mutate(payload, {
       onSuccess: (run) => startRun.mutate(run.id),
     });
@@ -159,6 +162,7 @@ export function App() {
             onViewDetails={() => setView("hilos")}
             orgConfig={currentOrgConfig}
             onGoToSetup={handleGoToSetup}
+            analysisError={createRun.error?.message ?? startRun.error?.message ?? null}
           />
         )}
         {(view === "hilos" || view === "revision") && (
@@ -186,6 +190,7 @@ export function App() {
             isError={orgConfig.isError}
           />
         )}
+        {view === "privacidad" && <PrivacidadDatosView />}
         {view === "ayuda" && <AyudaView />}
       </main>
     </div>

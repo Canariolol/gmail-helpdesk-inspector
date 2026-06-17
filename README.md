@@ -13,8 +13,8 @@ Docker publishes local ports on loopback only.
 Open-source MVP for auditing a Gmail inbox used as a lightweight help desk.
 
 The app reads Gmail with the minimum readonly scope, classifies support-like
-threads, calculates auditable response metrics, and uses Claude Sonnet 4.6 on
-Amazon Bedrock as a mandatory quality auditor.
+threads, calculates auditable response metrics, and can use an opt-in AI auditor
+through Amazon Bedrock when enabled by the organization policy.
 
 ## Stack
 
@@ -82,14 +82,42 @@ It commonly expires after about one hour.
 - Stored data is limited to metadata, snippets, headers, participants,
   classification decisions, reasons, metrics, and token usage.
 
+## SaaS Configuration Model
+
+The current app is no longer configured only through per-run filters. After login,
+`GET /me/org/config` provisions a private-beta organization, an owner membership,
+one connected mailbox, a mutable policy draft and an immutable policy version.
+Analysis runs created from policy store a snapshot with org/mailbox ids, policy
+version/hash, Gmail scope snapshot, retention expiry and data minimization mode.
+Legacy per-run filters are still accepted for local/backward compatibility.
+
+Key defaults for the private beta:
+
+- One Workspace mailbox per organization.
+- AI auditing is off by default and requires explicit consent.
+- Retention defaults to 30 days and is stored per run as `retention_expires_at`.
+- Scheduled reports default to metrics-only content.
+- Gmail remains `gmail.readonly`; reports are sent via Resend, never via Gmail.
+
+Useful authenticated endpoints:
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /me/org/config` | Read/provision organization policy config |
+| `PUT /me/org/config` | Patch policy draft and create a new policy version when it changes |
+| `GET /me/data-summary` | Read-only privacy/data summary |
+| `GET /me/operations/status` | Read-only scheduler/operations status |
+| `GET /me/operations/history` | Read-only recent operational history with redacted errors |
+
+Pagination note: `GET /analysis-runs` and `GET /analysis-runs/:id/threads` remain backward-compatible arrays without query params. With `limit`/`page_token`, they return `{ items, next_page_token, total_count }` for beta-scale pagination.
+
 ## Scheduled Daily Analysis & Email Report
 
-The API can run the analysis automatically Monday to Friday at 08:00
-(America/Santiago) and email a Spanish-language report (metrics, findings, and
-threads that need manual review) via [Resend](https://resend.com). Tuesday to
-Friday cover the previous day (00:00–23:59); Monday covers Friday 00:00 through
-Sunday 23:59. The report is sent with Resend, not Gmail — the Gmail scope stays
-readonly.
+The API can run the analysis automatically using the policy preset
+`weekdays_08_local`: Monday to Friday at 08:00 in each configured tenant timezone.
+Tuesday to Friday cover the previous local day (00:00–23:59); Monday covers Friday
+through Sunday. The report is sent with [Resend](https://resend.com), not Gmail —
+the Gmail scope stays readonly.
 
 It requires a user who has logged in at least once (the stored refresh token is
 used to mint a fresh access token at run time).
@@ -97,11 +125,12 @@ used to mint a fresh access token at run time).
 ### Trigger modes
 
 1. **Internal loop** — set `SCHEDULER_ENABLED=true`. Meant for always-on hosts
-   (Docker Compose, VPS). The API wakes every minute and fires once per
-   weekday from 08:00 local time.
+   (Docker Compose, VPS). The API wakes every minute and evaluates each enabled
+   schedule config in its own IANA timezone.
 2. **External trigger** — `POST /internal/scheduled-analysis` authenticated
-   with the `x-cron-secret` header (`CRON_SECRET` env var). Meant for Cloud
-   Scheduler or a host crontab; also handy for manual testing and backfill:
+   with the `x-cron-secret` header (`CRON_SECRET` env var). Without `as_of_date`,
+   it uses the same due-by-timezone logic as the internal loop. With `as_of_date`,
+   it performs an explicit local-date backfill/testing run:
 
    ```bash
    curl -s -X POST http://localhost:8080/internal/scheduled-analysis \
@@ -119,18 +148,21 @@ combined safely. If `CRON_SECRET` is unset the endpoint answers 404.
 | `SCHEDULER_ENABLED` | Enables the internal loop (`false` by default) |
 | `CRON_SECRET` | Shared secret for the external trigger endpoint |
 | `SCHEDULE_USER_EMAIL` | Seed: Gmail account to analyze |
-| `SCHEDULE_INTERNAL_DOMAINS` | Seed: comma-separated internal domains |
-| `SCHEDULE_GMAIL_MAX_THREADS` | Seed: thread cap override (useful for Monday's 3-day window; global default is `GMAIL_MAX_THREADS=50`) |
+| `SCHEDULE_INTERNAL_DOMAINS` | Legacy seed: comma-separated internal domains |
+| `SCHEDULE_GMAIL_MAX_THREADS` | Legacy seed: thread cap override (global default is `GMAIL_MAX_THREADS=50`) |
 | `RESEND_API_KEY` | Resend API key |
 | `REPORT_FROM_EMAIL` | Verified Resend sender, e.g. `Helpdesk <reportes@domain.cl>` |
-| `REPORT_TO_EMAIL` | Comma-separated default recipients |
+| `REPORT_TO_EMAIL` | Legacy fallback/default recipients |
+| `APP_ENV` | Set `production`/`prod` to reject development secret defaults |
+| `RATE_LIMIT_ANALYSIS_CREATE_PER_HOUR` | Per-user manual run creation limit; default `12` |
+| `RATE_LIMIT_ANALYSIS_START_PER_HOUR` | Per-user manual run start limit; default `12` |
 
 ### Configuration & state in Firestore
 
-- `scheduleConfigs/{email}` — analysis parameters (recipients, internal
-  domains, ignored lists, timezone, thread cap, `enabled`). Seeded once from
-  the `SCHEDULE_*`/`REPORT_TO_EMAIL` env vars when empty; afterwards edit the
-  document directly (all fields have safe defaults).
+- `scheduleConfigs/{email}` — scheduler execution config (recipients, internal
+  domains, ignored lists, timezone, thread cap, `enabled`). It can be seeded from
+  legacy `SCHEDULE_*`/`REPORT_TO_EMAIL`, but in SaaS mode it is synchronized from
+  `/me/org/config` policy updates.
 - `scheduleStates/{email}` — last attempt per user (window, status, run id,
   whether the email went out). A window with status `completed` is never
   re-run; a stale `running` claim (>60 min) is retried. Scheduler retries
@@ -143,14 +175,30 @@ Missed weekdays are not backfilled automatically — use the endpoint with
 
 - While the Google OAuth app is in **Testing** publishing status, refresh
   tokens expire after 7 days; the failure email will ask the user to log in
-  again. Publish the OAuth app to Production to avoid this.
-- Session lookup lists the `users` collection (page size 300). Fine for a
-  single-user deployment; clean old session docs if logins accumulate.
+  again. Publish/verify the OAuth app before broad SaaS launch.
+- The current rate limiter is in-memory per API instance. For private beta, run
+  one API instance or replace it with a distributed limiter before scaling out.
+- The AI worker is stateless: the API sends per-run policy context in each audit
+  request. Do not configure tenant/company prompt defaults in the worker.
+- Retention expiry is stored per run, but destructive retention jobs are still a
+  later production hardening task.
+
+## Deployment Runbook
+
+For private beta deployment guidance, see:
+
+- `docs/deployment-beta-runbook.md`
+
+It covers Cloud Run service order, verified environment variables, OAuth, scheduler modes, smoke tests, rollback, and known beta risks.
 
 ## Development Checks
 
 ```bash
+./scripts/check-all.sh
+
+# or individually:
 cargo test --manifest-path apps/api/Cargo.toml
+cargo clippy --manifest-path apps/api/Cargo.toml --all-targets -- -D warnings
 python3 -m pytest apps/ai-worker/tests
 npm --prefix apps/web run build
 ```

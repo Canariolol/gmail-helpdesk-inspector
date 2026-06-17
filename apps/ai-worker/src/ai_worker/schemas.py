@@ -52,9 +52,26 @@ class EmailMessage(BaseModel):
     body_text: str | None = None
 
 
+class AuditPolicyContext(BaseModel):
+    mailbox_email: str = ""
+    mailbox_display_name: str = ""
+    workspace_domain: str = ""
+    internal_domains: list[str] = Field(default_factory=list)
+    responder_emails: list[str] = Field(default_factory=list)
+    mailbox_aliases: list[str] = Field(default_factory=list)
+    valid_request_criteria: list[str] = Field(default_factory=list)
+    non_responsibility_rules: list[str] = Field(default_factory=list)
+    ignored_senders: list[str] = Field(default_factory=list)
+    ignored_domains: list[str] = Field(default_factory=list)
+    ignored_keywords: list[str] = Field(default_factory=list)
+    prompt_version: str = ""
+    allowed_fields: list[str] = Field(default_factory=list)
+
+
 class AuditThreadRequest(BaseModel):
     thread: EmailThread
     messages: list[EmailMessage]
+    policy_context: AuditPolicyContext | None = None
 
 
 class AuditThreadResponse(BaseModel):

@@ -5,37 +5,84 @@ import re
 
 import httpx
 
-from ai_worker.schemas import AuditThreadRequest, AuditThreadResponse, BedrockDecision
+from ai_worker.schemas import AuditPolicyContext, AuditThreadRequest, AuditThreadResponse, BedrockDecision
 from ai_worker.settings import Settings
 
 
-def build_system_prompt(settings: Settings) -> str:
-    return f"""You audit the email inbox of a Level-1 (N1) IT service desk ("Mesa de Servicio") at West Ingeniería, a Chilean technology company. The desk serves many external client companies; all email is in Spanish (Chilean). For one email thread you decide whether it is a VALID client request that this N1 desk should handle, and whether it was answered. Return strict JSON only, matching the requested schema exactly.
+def _bullet_list(values: list[str], fallback: str) -> str:
+    cleaned = [value.strip() for value in values if value.strip()]
+    if not cleaned:
+        return fallback
+    return "\n".join(f"  - {value}" for value in cleaned)
 
-Context:
-- The analyzed inbox is the desk supervisor's mailbox ({settings.analyzed_mailbox}), which receives a SUPERSET of the desk's mail. A message landing in this inbox is NOT automatically a desk request.
-- The real desk address is {settings.desk_mailbox}. A thread is most likely for the desk when {settings.desk_mailbox} is a direct (To) recipient. If it only appears in CC, or the mail is addressed to a specific person or another area, be skeptical.
-- Internal staff use @{settings.internal_domain} addresses. The N1 desk members are: {settings.desk_members}.
 
-VALID desk request (classification "valid_client_request", is_valid_client_request=true):
-- An external, human client (not an automated/system/no-reply sender) asks the desk for help: incidents, access/password problems, technical support for their products/systems (e.g. logistics/forestry systems, GPS equipment, latency), or a follow-up on such a request. The topic is broad, so do NOT reject a thread just because of its subject. Long or messy threads can still be valid.
+def _fallback_policy_context(settings: Settings) -> AuditPolicyContext:
+    internal_domains = [settings.internal_domain] if settings.internal_domain else []
+    responder_emails = [settings.desk_mailbox] if settings.desk_mailbox else []
+    mailbox_email = settings.analyzed_mailbox or settings.desk_mailbox
+    return AuditPolicyContext(
+        mailbox_email=mailbox_email,
+        mailbox_display_name=mailbox_email,
+        workspace_domain=settings.internal_domain,
+        internal_domains=internal_domains,
+        responder_emails=responder_emails,
+        valid_request_criteria=[
+            "External human clients ask the configured support/helpdesk team for help, service, access, incident handling, or follow-up."
+        ],
+        non_responsibility_rules=[
+            "Messages clearly addressed to another team, person, vendor, newsletter, spam, or automated system are not valid client requests for this helpdesk."
+        ],
+        prompt_version="legacy_fallback_v1",
+    )
 
-NOT valid for this desk (set is_valid_client_request=false and pick the closest category):
-- "automated": automated/system/no-reply/notification mail (GCP, AWS, calendars, mailer-daemon, monitoring).
-- "newsletter": promotions, marketing or newsletters. "spam": spam.
+
+def build_system_prompt(settings: Settings, policy: AuditPolicyContext | None = None) -> str:
+    policy = policy or _fallback_policy_context(settings)
+    mailbox_labels = [policy.mailbox_email, *policy.mailbox_aliases]
+    responder_labels = [*policy.responder_emails]
+    internal_labels = [*policy.internal_domains]
+    return f"""You audit one email thread for a Gmail inbox used as a helpdesk/support mailbox. Your job is to decide whether the thread is a VALID client request for the configured organization policy and whether it was answered. Return strict JSON only, matching the requested schema exactly.
+
+Tenant policy context:
+- Analyzed mailbox: {policy.mailbox_email or "not specified"}
+- Mailbox display name: {policy.mailbox_display_name or "not specified"}
+- Workspace/domain: {policy.workspace_domain or "not specified"}
+- Mailbox aliases / support addresses:
+{_bullet_list(mailbox_labels, "  - not specified")}
+- Internal domains:
+{_bullet_list(internal_labels, "  - infer only from is_internal/is_external flags")}
+- Explicit responder emails:
+{_bullet_list(responder_labels, "  - infer internal human responders from message flags")}
+
+Valid request criteria from the organization policy:
+{_bullet_list(policy.valid_request_criteria, "  - External human clients ask the configured helpdesk/support team for help, service, access, incident handling, or follow-up.")}
+
+Out-of-scope / non-responsibility rules from the organization policy:
+{_bullet_list(policy.non_responsibility_rules, "  - Messages clearly meant for another team/person, automated mail, newsletters, spam, or generic non-support topics are not valid client requests for this helpdesk.")}
+
+Ignored hints from policy (use as supporting evidence, not as the only criterion):
+- Ignored senders:
+{_bullet_list(policy.ignored_senders, "  - none")}
+- Ignored domains:
+{_bullet_list(policy.ignored_domains, "  - none")}
+- Ignored subject keywords:
+{_bullet_list(policy.ignored_keywords, "  - none")}
+
+Classification guidance:
+- "valid_client_request": an external, human client asks for something this configured helpdesk should handle under the valid request criteria.
+- "automated": automated/system/no-reply/notification mail.
+- "newsletter": promotions, marketing or newsletters.
+- "spam": spam.
 - "internal": only internal staff, no external human client.
-- "misc": a client who explicitly asks to deal with someone who is NOT an N1 desk member (Sales, a specific account manager, a named person not in the desk list), even if {settings.desk_mailbox} is CC'd — this is not the desk's responsibility. Also anything else that is clearly not a client support request.
+- "misc": clearly not a request this configured helpdesk owns.
+- "ambiguous": evidence is insufficient or policy ownership is genuinely unclear.
 
-Set manual_review_required=true (usually with classification "ambiguous") when:
-- The client asks to talk to a person who is NOT an N1 desk member, BUT the mail also describes a genuine desk-type issue (access/system/GPS/etc.). Let a human decide; lean valid only if the desk-type issue is clearly the point.
-- The thread was answered/handled by someone who is NOT an N1 desk member.
-- Evidence is genuinely insufficient or ambiguous.
-
-is_answered: true only if a real HUMAN reply from a desk member (internal, non-automated, after the client's message) exists. Automated acknowledgements ("hemos recibido su solicitud", ticket auto-replies) do NOT count as answered.
-
-Output rules:
-- Use only the message ids provided; never invent messages or ids. Pick first_client_message_id, first_internal_reply_message_id and last_internal_message_id from the provided ids when applicable, else null.
-- The provided messages are a compact view with short body excerpts; this is enough to judge validity. Only use "ambiguous" + manual_review_required=true if the evidence is truly insufficient.
+Answer guidance:
+- is_answered=true only if a real HUMAN internal/responder reply after the client's relevant message exists.
+- Automated acknowledgements and ticket auto-replies do NOT count as answered.
+- Use only the message ids provided; never invent messages or ids.
+- Pick first_client_message_id, first_internal_reply_message_id and last_internal_message_id from the provided ids when applicable, else null.
+- The messages are compact excerpts; use "ambiguous" + manual_review_required=true if the evidence is insufficient.
 - The automatic_classification field is only a prior hint from a rule-based pass; correct it freely.
 - Write every string in the "issues" array in Spanish.
 - Output must match the requested JSON schema exactly."""
@@ -107,7 +154,7 @@ async def audit_with_bedrock(
         raise RuntimeError("AWS_BEARER_TOKEN_BEDROCK is required")
 
     request_body = {
-        "system": [{"text": build_system_prompt(settings)}],
+        "system": [{"text": build_system_prompt(settings, payload.policy_context)}],
         "messages": [
             {
                 "role": "user",

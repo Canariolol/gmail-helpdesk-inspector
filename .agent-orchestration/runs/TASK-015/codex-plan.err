@@ -1,0 +1,3281 @@
+Reading prompt from stdin...
+OpenAI Codex v0.140.0
+--------
+workdir: /home/ryagar/Documentos/DevProyects/gmail-helpdesk-inspector
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: workspace-write [workdir, /tmp, $TMPDIR]
+reasoning effort: high
+reasoning summaries: none
+session id: 019ed6c7-fc15-7ab3-8a5e-f2bf6f3fb339
+--------
+user
+Planifica rate limiting incremental para apps/api Rust/axum de este repo.
+No leas .env ni secrets. Modo plan.
+Objetivo: limitar abuso de POST /analysis-runs y /analysis-runs/:id/start por usuario autenticado, sin bloquear scheduler. Respuestas 429. Defaults beta seguros. Tests.
+Entrega riesgos, recomendación, paths.
+
+codex
+Voy a revisar solo estructura y código relevante del API para ubicar rutas, auth, estado compartido y tests. No voy a leer `.env`, archivos de secrets ni hacer cambios; esto queda en modo plan.
+exec
+/bin/bash -lc "rg --files -g '"'!**/.env*'"' -g '"'!**/*secret*'"' -g '"'!**/*secrets*'"' -g '"'!target'"'" in /home/ryagar/Documentos/DevProyects/gmail-helpdesk-inspector
+exec
+/bin/bash -lc "find . -maxdepth 3 -type f \\( -name 'Cargo.toml' -o -name 'AGENTS.md' -o -name 'README*' \\) -not -path './target/*' -not -name '.env*'" in /home/ryagar/Documentos/DevProyects/gmail-helpdesk-inspector
+ succeeded in 945ms:
+README.md
+scripts/agents/dispatch-claude-ui.sh
+scripts/agents/dispatch-codex-planner.sh
+scripts/redeploy-gcp.sh
+scripts/local-up.sh
+docker-compose.yml
+specs_prd.md
+logo.png
+docs/gcp-deploy.md
+docs/bedrock.md
+docs/firestore.md
+docs/google-oauth.md
+docs/privacy.md
+apps/api/Cargo.lock
+apps/api/Dockerfile
+apps/api/Cargo.toml
+apps/web/server.mjs
+apps/web/Dockerfile
+apps/web/index.html
+apps/web/package-lock.json
+apps/api/src/policies.rs
+apps/api/src/main.rs
+apps/web/public/favicon.ico
+apps/web/public/favicon-32.png
+apps/web/public/apple-touch-icon.png
+apps/web/public/logo-192.png
+apps/web/public/logo.png
+apps/web/vite.config.ts
+apps/web/tsconfig.json
+apps/web/package.json
+apps/api/src/report/template.rs
+apps/api/src/report/mod.rs
+apps/web/src/App.tsx
+apps/web/src/main.tsx
+apps/api/src/scheduler/mod.rs
+apps/api/src/scheduler/model.rs
+apps/api/src/scheduler/window.rs
+apps/api/src/storage/mod.rs
+apps/web/src/views/PrivacidadDatosView.tsx
+apps/web/src/views/ResumenView.tsx
+apps/web/src/views/ConfiguracionView.tsx
+apps/web/src/views/ReportesView.tsx
+apps/web/src/views/AyudaView.tsx
+apps/web/src/views/RunsView.tsx
+apps/web/src/views/HilosView.tsx
+apps/web/src/views/LoginView.tsx
+apps/api/src/http/mod.rs
+apps/api/src/http/internal.rs
+apps/web/src/lib/format.ts
+apps/web/src/lib/aggregate.ts
+apps/web/src/lib/ui.ts
+apps/web/src/lib/threads.ts
+apps/web/src/vite-env.d.ts
+apps/api/src/gmail/mod.rs
+apps/web/src/styles/components.css
+apps/web/src/styles/layout.css
+apps/web/src/styles/base.css
+apps/web/src/styles/tokens.css
+apps/api/src/firestore/mod.rs
+apps/api/src/config/mod.rs
+apps/web/src/components/layout/Sidebar.tsx
+apps/api/src/auth/mod.rs
+apps/api/src/auth/refresh.rs
+apps/web/src/components/charts/ReportTrendCharts.tsx
+apps/web/src/components/charts/CompositionDonut.tsx
+apps/web/src/components/charts/ClassificationBarChart.tsx
+apps/web/src/components/threads/ReviewForm.tsx
+apps/web/src/components/threads/ThreadDetailPanel.tsx
+apps/web/src/components/threads/ThreadList.tsx
+apps/web/src/components/threads/ThreadFilterSelect.tsx
+apps/web/src/components/threads/ThreadTable.tsx
+apps/api/src/analysis/mod.rs
+apps/web/src/components/runs/StatusBanner.tsx
+apps/web/src/components/runs/RunCard.tsx
+apps/web/src/components/filters/FilterBar.tsx
+apps/web/src/components/filters/RangeField.tsx
+apps/ai-worker/Dockerfile
+apps/ai-worker/pyproject.toml
+apps/web/src/components/common/PrivacyCallout.tsx
+apps/ai-worker/tests/test_bedrock.py
+apps/web/src/components/common/EmptyState.tsx
+apps/web/src/components/common/RunStatusChip.tsx
+apps/web/src/components/common/StatusBadge.tsx
+apps/web/src/components/common/MetricCard.tsx
+apps/web/src/api/client.ts
+apps/web/src/api/types.ts
+apps/ai-worker/src/ai_worker/settings.py
+apps/ai-worker/src/ai_worker/main.py
+apps/ai-worker/src/ai_worker/bedrock.py
+apps/ai-worker/src/ai_worker/schemas.py
+apps/ai-worker/src/ai_worker/__init__.py
+
+ succeeded in 917ms:
+./apps/api/Cargo.toml
+./README.md
+./.agent-orchestration/README.md
+
+codex
+Ya tengo el mapa básico: el API Rust está bajo `apps/api/src`, con rutas HTTP separadas de scheduler, auth y análisis. Ahora voy a leer esos módulos y el manifiesto para entender cómo se identifica el usuario autenticado y dónde conviene interceptar los POST.
+exec
+/bin/bash -lc "sed -n '1,220p' apps/api/src/http/mod.rs" in /home/ryagar/Documentos/DevProyects/gmail-helpdesk-inspector
+exec
+/bin/bash -lc "sed -n '1,260p' apps/api/src/auth/mod.rs" in /home/ryagar/Documentos/DevProyects/gmail-helpdesk-inspector
+exec
+/bin/bash -lc "sed -n '1,260p' apps/api/src/main.rs" in /home/ryagar/Documentos/DevProyects/gmail-helpdesk-inspector
+exec
+/bin/bash -lc "sed -n '1,260p' apps/api/src/analysis/mod.rs" in /home/ryagar/Documentos/DevProyects/gmail-helpdesk-inspector
+ succeeded in 838ms:
+mod internal;
+
+use std::{convert::Infallible, sync::Arc, time::Duration};
+
+use axum::{
+    Json, Router,
+    extract::{Path, Query, State},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
+    response::{
+        IntoResponse, Redirect, Sse,
+        sse::{Event, KeepAlive},
+    },
+    routing::{get, patch, post},
+};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use chrono::Utc;
+use futures_util::{StreamExt, stream};
+use rand::RngCore;
+use reqwest::Client;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde_json::json;
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
+
+use crate::{
+    analysis::{
+        AiAuditResult, AnalysisConfig, AnalysisMetrics, AnalysisRun, AnalysisStatus,
+        ClassificationSource, EmailMessage, EmailThread, ManualReview, TriggerType,
+        calculate_metrics, classify_thread, message_is_inside_analysis_window,
+        should_auto_apply_ai,
+    },
+    auth::{
+        GoogleTokenResponse, UserSession, clear_oauth_cookie, clear_session_cookie, decrypt_token,
+        encrypt_token, oauth_cookie, session_cookie, sign_session_id, verify_session_cookie,
+    },
+    config::AppConfig,
+    gmail::GmailClient,
+    policies::{
+        AiPolicy, AnalysisPolicy, MailboxPurpose, OrgConfigBundle, OrgConfigResponse,
+        PolicyVersion, ScheduleReportPolicy, email_domain, is_consumer_gmail_domain,
+        normalize_domains, normalize_list, policy_version_from_draft, provision_default_config,
+        retention_expires_at, setup_state, validate_timezone,
+    },
+    scheduler::model::ScheduleConfig,
+    storage::StorageRepository,
+};
+
+#[derive(Debug, Deserialize)]
+struct GmailProfileResponse {
+    #[serde(rename = "emailAddress")]
+    email_address: String,
+}
+
+#[derive(Clone)]
+pub struct AppState {
+    pub config: AppConfig,
+    pub storage: Arc<dyn StorageRepository>,
+    pub http: Client,
+    pub gmail: GmailClient,
+}
+
+impl AppState {
+    pub fn new(config: AppConfig, storage: Arc<dyn StorageRepository>) -> Self {
+        Self {
+            config,
+            storage,
+            http: Client::builder()
+                .timeout(Duration::from_secs(30))
+                .connect_timeout(Duration::from_secs(10))
+                .build()
+                .expect("failed to build http client"),
+            gmail: GmailClient::default(),
+        }
+    }
+}
+
+pub fn router(state: AppState) -> Router {
+    Router::new()
+        .route("/health", get(health))
+        .route("/auth/google/login", get(auth_google_login))
+        .route("/auth/google/callback", get(auth_google_callback))
+        .route("/auth/logout", post(auth_logout))
+        .route("/auth/me", get(auth_me))
+        .route("/me/data-summary", get(get_data_summary))
+        .route("/me/org/config", get(get_org_config).put(update_org_config))
+        .route(
+            "/analysis-runs",
+            post(create_analysis_run).get(list_analysis_runs),
+        )
+        .route("/analysis-runs/{id}", get(get_analysis_run))
+        .route("/analysis-runs/{id}/start", post(start_analysis_run))
+        .route("/analysis-runs/{id}/status", get(get_analysis_run))
+        .route("/analysis-runs/{id}/events", get(analysis_events))
+        .route("/analysis-runs/{id}/metrics", get(get_metrics))
+        .route("/analysis-runs/{id}/threads", get(list_threads))
+        .route("/threads/{thread_id}", get(get_thread))
+        .route("/threads/{thread_id}/manual-review", patch(manual_review))
+        .route(
+            "/internal/scheduled-analysis",
+            post(internal::scheduled_analysis),
+        )
+        .with_state(state)
+}
+
+async fn health() -> Json<serde_json::Value> {
+    Json(json!({ "ok": true }))
+}
+
+async fn auth_google_login(State(state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
+    let scope = "https://www.googleapis.com/auth/gmail.readonly";
+    let oauth_state = random_urlsafe(24);
+    let code_verifier = random_urlsafe(48);
+    let code_challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(code_verifier.as_bytes()));
+    let signed_oauth = sign_session_id(
+        &format!("{oauth_state}:{code_verifier}"),
+        &state.config.session_secret,
+    )?;
+    let url = url::Url::parse_with_params(
+        "https://accounts.google.com/o/oauth2/v2/auth",
+        &[
+            ("client_id", state.config.google.client_id.as_str()),
+            ("redirect_uri", state.config.google.redirect_url.as_str()),
+            ("response_type", "code"),
+            ("scope", scope),
+            ("access_type", "offline"),
+            ("prompt", "consent"),
+            ("state", oauth_state.as_str()),
+            ("code_challenge", code_challenge.as_str()),
+            ("code_challenge_method", "S256"),
+        ],
+    )
+    .expect("valid oauth url");
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&oauth_cookie(
+            &signed_oauth,
+            &state.config.cookie_same_site,
+            state.config.cookie_secure,
+        ))
+        .unwrap(),
+    );
+    Ok((headers, Redirect::temporary(url.as_str())))
+}
+
+#[derive(Debug, Deserialize)]
+struct OAuthCallback {
+    code: String,
+    state: Option<String>,
+}
+
+async fn auth_google_callback(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<OAuthCallback>,
+) -> Result<impl IntoResponse, ApiError> {
+    let verifier_payload = headers
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|cookies| extract_named_cookie(cookies, "ghmi_oauth"))
+        .and_then(|cookie| verify_session_cookie(&cookie, &state.config.session_secret))
+        .ok_or_else(|| ApiError::bad_request("missing or invalid OAuth PKCE cookie"))?;
+    let (expected_state, code_verifier) = verifier_payload
+        .split_once(':')
+        .ok_or_else(|| ApiError::bad_request("invalid OAuth PKCE cookie payload"))?;
+    if query.state.as_deref() != Some(expected_state) {
+        return Err(ApiError::bad_request("OAuth state mismatch"));
+    }
+
+    let token: GoogleTokenResponse = state
+        .http
+        .post("https://oauth2.googleapis.com/token")
+        .form(&[
+            ("code", query.code.as_str()),
+            ("client_id", state.config.google.client_id.as_str()),
+            ("client_secret", state.config.google.client_secret.as_str()),
+            ("redirect_uri", state.config.google.redirect_url.as_str()),
+            ("grant_type", "authorization_code"),
+            ("code_verifier", code_verifier),
+        ])
+        .send()
+        .await?
+        .json_or_google_error("Google OAuth code exchange")
+        .await?;
+
+    let profile: GmailProfileResponse = state
+        .http
+        .get("https://gmail.googleapis.com/gmail/v1/users/me/profile")
+        .bearer_auth(&token.access_token)
+        .send()
+        .await?
+        .json_or_google_error("Gmail profile fetch")
+        .await?;
+
+    let now = Utc::now();
+    let session = UserSession {
+        id: Uuid::new_v4().to_string(),
+        google_account_email: profile.email_address,
+        access_token_encrypted: encrypt_token(&token.access_token, &state.config.encryption_key)?,
+        refresh_token_encrypted: token
+            .refresh_token
+            .as_deref()
+            .map(|refresh| encrypt_token(refresh, &state.config.encryption_key))
+            .transpose()?,
+        created_at: now,
+        updated_at: now,
+    };
+    state.storage.upsert_user_session(&session).await?;
+
+    let signed = sign_session_id(&session.id, &state.config.session_secret)?;
+    let mut headers = HeaderMap::new();
+    headers.append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&session_cookie(
+            &signed,
+            &state.config.cookie_same_site,
+            state.config.cookie_secure,
+        ))
+        .unwrap(),
+    );
+
+ succeeded in 834ms:
+pub mod refresh;
+
+use aes_gcm::{
+    Aes256Gcm, KeyInit, Nonce,
+    aead::{Aead, OsRng, rand_core::RngCore},
+};
+use anyhow::{Context, anyhow};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use hmac::{Hmac, Mac};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+type HmacSha256 = Hmac<Sha256>;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserSession {
+    pub id: String,
+    pub google_account_email: String,
+    pub access_token_encrypted: String,
+    pub refresh_token_encrypted: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GoogleTokenResponse {
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+}
+
+pub fn encrypt_token(plaintext: &str, key_material: &str) -> anyhow::Result<String> {
+    let key = Sha256::digest(key_material.as_bytes());
+    let cipher = Aes256Gcm::new_from_slice(&key).context("invalid encryption key")?;
+    let mut nonce_bytes = [0u8; 12];
+    OsRng.fill_bytes(&mut nonce_bytes);
+    let nonce = Nonce::from_slice(&nonce_bytes);
+    let ciphertext = cipher
+        .encrypt(nonce, plaintext.as_bytes())
+        .map_err(|_| anyhow!("failed to encrypt token"))?;
+    Ok(format!(
+        "{}.{}",
+        URL_SAFE_NO_PAD.encode(nonce_bytes),
+        URL_SAFE_NO_PAD.encode(ciphertext)
+    ))
+}
+
+pub fn decrypt_token(encrypted: &str, key_material: &str) -> anyhow::Result<String> {
+    let (nonce, ciphertext) = encrypted
+        .split_once('.')
+        .ok_or_else(|| anyhow!("invalid encrypted token format"))?;
+    let nonce = URL_SAFE_NO_PAD.decode(nonce).context("invalid nonce")?;
+    let ciphertext = URL_SAFE_NO_PAD
+        .decode(ciphertext)
+        .context("invalid ciphertext")?;
+    let key = Sha256::digest(key_material.as_bytes());
+    let cipher = Aes256Gcm::new_from_slice(&key).context("invalid encryption key")?;
+    let plaintext = cipher
+        .decrypt(Nonce::from_slice(&nonce), ciphertext.as_slice())
+        .map_err(|_| anyhow!("failed to decrypt token"))?;
+    String::from_utf8(plaintext).context("token is not valid utf-8")
+}
+
+pub fn sign_session_id(session_id: &str, secret: &str) -> anyhow::Result<String> {
+    let mut mac =
+        <HmacSha256 as Mac>::new_from_slice(secret.as_bytes()).context("invalid session secret")?;
+    mac.update(session_id.as_bytes());
+    let sig = mac.finalize().into_bytes();
+    Ok(format!("{}.{}", session_id, URL_SAFE_NO_PAD.encode(sig)))
+}
+
+pub fn verify_session_cookie(cookie_value: &str, secret: &str) -> Option<String> {
+    let (session_id, sig) = cookie_value.split_once('.')?;
+    let expected = sign_session_id(session_id, secret).ok()?;
+    if expected == cookie_value {
+        Some(session_id.to_string())
+    } else {
+        let _ = sig;
+        None
+    }
+}
+
+pub fn session_cookie(value: &str, same_site: &str, secure: bool) -> String {
+    cookie("ghmi_session", value, 2_592_000, same_site, secure)
+}
+
+pub fn oauth_cookie(value: &str, same_site: &str, secure: bool) -> String {
+    cookie("ghmi_oauth", value, 600, same_site, secure)
+}
+
+pub fn clear_session_cookie(same_site: &str, secure: bool) -> String {
+    cookie("ghmi_session", "", 0, same_site, secure)
+}
+
+pub fn clear_oauth_cookie(same_site: &str, secure: bool) -> String {
+    cookie("ghmi_oauth", "", 0, same_site, secure)
+}
+
+fn cookie(name: &str, value: &str, max_age: i64, same_site: &str, secure: bool) -> String {
+    let secure_attr = if secure { "; Secure" } else { "" };
+    format!(
+        "{name}={value}; Path=/; HttpOnly; SameSite={same_site}; Max-Age={max_age}{secure_attr}"
+    )
+}
+
+ succeeded in 830ms:
+mod analysis;
+mod auth;
+mod config;
+mod firestore;
+mod gmail;
+mod http;
+mod policies;
+mod report;
+mod scheduler;
+mod storage;
+
+use std::sync::Arc;
+
+use anyhow::Context;
+use axum::{
+    Router,
+    http::{HeaderName, HeaderValue, Method, header},
+};
+use config::AppConfig;
+use firestore::FirestoreStorage;
+use http::AppState;
+use storage::{MemoryStorage, StorageRepository};
+use tower_http::{
+    cors::{AllowOrigin, CorsLayer},
+    trace::TraceLayer,
+};
+use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::registry()
+        .with(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info,tower_http=info,html5ever::tree_builder=error".into()),
+        )
+        .with(tracing_subscriber::fmt::layer())
+        .init();
+
+    let config = AppConfig::from_env()?;
+    let storage: Arc<dyn StorageRepository> = if config.app_storage == "memory" {
+        Arc::new(MemoryStorage::default())
+    } else {
+        Arc::new(FirestoreStorage::new(config.firestore.clone())?)
+    };
+
+    let state = AppState::new(config.clone(), storage);
+    if config.scheduler.enabled {
+        scheduler::spawn(state.clone());
+    }
+    let app = build_app_from_state(state);
+    let addr = format!("0.0.0.0:{}", config.api_port);
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .with_context(|| format!("failed to bind API on {addr}"))?;
+
+    tracing::info!("API listening on {addr}");
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+pub fn build_app(config: AppConfig, storage: Arc<dyn StorageRepository>) -> Router {
+    build_app_from_state(AppState::new(config, storage))
+}
+
+pub fn build_app_from_state(state: AppState) -> Router {
+    let cors = CorsLayer::new()
+        .allow_origin(AllowOrigin::exact(
+            HeaderValue::from_str(&state.config.web_base_url).expect("valid WEB_BASE_URL"),
+        ))
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::OPTIONS,
+        ])
+        .allow_headers([
+            header::ACCEPT,
+            header::AUTHORIZATION,
+            header::CONTENT_TYPE,
+            HeaderName::from_static("x-requested-with"),
+        ])
+        .allow_credentials(true);
+
+    http::router(state)
+        .layer(cors)
+        .layer(TraceLayer::new_for_http())
+}
+
+exec
+/bin/bash -lc "sed -n '1,220p' apps/api/Cargo.toml" in /home/ryagar/Documentos/DevProyects/gmail-helpdesk-inspector
+ succeeded in 849ms:
+use chrono::{DateTime, NaiveTime, Utc};
+use chrono_tz::Tz;
+use serde::{Deserialize, Serialize};
+
+use crate::policies::PolicySnapshot;
+
+pub const AI_AUTO_APPLY_THRESHOLD: f64 = 0.92;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AnalysisStatus {
+    Pending,
+    Running,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Classification {
+    ValidClientRequest,
+    Internal,
+    Automated,
+    Newsletter,
+    Spam,
+    Misc,
+    Ambiguous,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ClassificationSource {
+    Rules,
+    Heuristics,
+    Ai,
+    Manual,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnalysisConfig {
+    pub date_from: String,
+    pub date_to: String,
+    #[serde(default = "default_time_from")]
+    pub time_from: String,
+    #[serde(default = "default_time_to")]
+    pub time_to: String,
+    #[serde(default = "default_timezone")]
+    pub timezone: String,
+    pub internal_domains: Vec<String>,
+    pub ignored_senders: Vec<String>,
+    pub ignored_domains: Vec<String>,
+    pub ignored_keywords: Vec<String>,
+}
+
+fn default_time_from() -> String {
+    "00:00".to_string()
+}
+
+fn default_time_to() -> String {
+    "23:59".to_string()
+}
+
+fn default_timezone() -> String {
+    "America/Santiago".to_string()
+}
+
+/// Count of threads per final classification, so wrongly-suppressed threads
+/// (which fold into `ignored`) are visible instead of vanishing silently.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ClassificationBreakdown {
+    #[serde(default)]
+    pub valid_client_request: u64,
+    #[serde(default)]
+    pub internal: u64,
+    #[serde(default)]
+    pub automated: u64,
+    #[serde(default)]
+    pub newsletter: u64,
+    #[serde(default)]
+    pub spam: u64,
+    #[serde(default)]
+    pub misc: u64,
+    #[serde(default)]
+    pub ambiguous: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnalysisMetrics {
+    pub total_threads: u64,
+    pub valid_requests: u64,
+    pub answered: u64,
+    pub unanswered: u64,
+    pub ignored: u64,
+    pub ambiguous: u64,
+    pub manual_overrides: u64,
+    pub avg_first_response_minutes: Option<f64>,
+    pub median_first_response_minutes: Option<f64>,
+    pub p90_first_response_minutes: Option<f64>,
+    #[serde(default)]
+    pub avg_resolution_minutes: Option<f64>,
+    #[serde(default)]
+    pub median_resolution_minutes: Option<f64>,
+    pub report_confidence: f64,
+    pub ai_input_tokens: u64,
+    pub ai_output_tokens: u64,
+    #[serde(default)]
+    pub classification_breakdown: ClassificationBreakdown,
+}
+
+impl Default for AnalysisMetrics {
+    fn default() -> Self {
+        Self {
+            total_threads: 0,
+            valid_requests: 0,
+            answered: 0,
+            unanswered: 0,
+            ignored: 0,
+            ambiguous: 0,
+            manual_overrides: 0,
+            avg_first_response_minutes: None,
+            median_first_response_minutes: None,
+            p90_first_response_minutes: None,
+            avg_resolution_minutes: None,
+            median_resolution_minutes: None,
+            report_confidence: 1.0,
+            ai_input_tokens: 0,
+            ai_output_tokens: 0,
+            classification_breakdown: ClassificationBreakdown::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TriggerType {
+    Manual,
+    Scheduled,
+    Backfill,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnalysisRun {
+    pub id: String,
+    pub user_email: String,
+    #[serde(default)]
+    pub org_id: Option<String>,
+    #[serde(default)]
+    pub mailbox_id: Option<String>,
+    #[serde(default)]
+    pub trigger_type: Option<TriggerType>,
+    #[serde(default)]
+    pub policy_version_id: Option<String>,
+    #[serde(default)]
+    pub policy_hash: Option<String>,
+    #[serde(default)]
+    pub policy_snapshot: Option<PolicySnapshot>,
+    #[serde(default)]
+    pub gmail_scope_snapshot: Vec<String>,
+    #[serde(default)]
+    pub retention_expires_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub data_minimization_mode: Option<String>,
+    pub config: AnalysisConfig,
+    pub status: AnalysisStatus,
+    pub progress_message: String,
+    pub processed_threads: u64,
+    pub total_candidate_threads: u64,
+    pub metrics: AnalysisMetrics,
+    pub created_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmailMessage {
+    pub id: String,
+    pub gmail_message_id: String,
+    pub from_email: String,
+    pub from_name: Option<String>,
+    pub to_emails: Vec<String>,
+    pub cc_emails: Vec<String>,
+    pub date: DateTime<Utc>,
+    pub subject: String,
+    pub snippet: String,
+    pub headers: serde_json::Value,
+    pub is_internal: bool,
+    pub is_external: bool,
+    pub is_automated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_text: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmailThread {
+    pub id: String,
+    pub analysis_run_id: String,
+    pub gmail_thread_id: String,
+    pub subject: String,
+    pub normalized_subject: String,
+    pub classification: Classification,
+    pub classification_source: ClassificationSource,
+    pub classification_confidence: f64,
+    pub is_valid_client_request: bool,
+    pub is_answered: bool,
+    #[serde(default)]
+    pub first_message_at: Option<DateTime<Utc>>,
+    pub first_client_message_id: Option<String>,
+    pub first_internal_reply_message_id: Option<String>,
+    #[serde(default)]
+    pub last_internal_message_id: Option<String>,
+    pub first_client_message_at: Option<DateTime<Utc>>,
+    pub first_internal_reply_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub last_internal_message_at: Option<DateTime<Utc>>,
+    pub response_time_minutes: Option<i64>,
+    #[serde(default)]
+    pub resolution_time_minutes: Option<i64>,
+    pub manual_review_required: bool,
+    pub manual_override_applied: bool,
+    pub reasons: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiAuditResult {
+    #[serde(default)]
+    pub policy_version_id: Option<String>,
+    #[serde(default)]
+    pub prompt_version: Option<String>,
+    #[serde(default)]
+    pub model_id: Option<String>,
+    #[serde(default)]
+    pub auto_apply_threshold: Option<f64>,
+    #[serde(default)]
+    pub max_audit_messages: Option<u32>,
+    #[serde(default)]
+    pub max_body_chars_per_message: Option<u32>,
+    pub classification: Classification,
+    pub is_valid_client_request: bool,
+    pub is_answered: bool,
+    pub first_client_message_id: Option<String>,
+    pub first_internal_reply_message_id: Option<String>,
+    #[serde(default)]
+    pub last_internal_message_id: Option<String>,
+    pub confidence: f64,
+    pub manual_review_required: bool,
+    pub issues: Vec<String>,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManualReview {
+    pub id: String,
+    pub email_thread_id: String,
+    pub reviewer_label: String,
+    pub new_classification: Classification,
+    pub is_valid_client_request: bool,
+    pub is_answered: bool,
+
+ succeeded in 920ms:
+[package]
+name = "gmail-helpdesk-api"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+aes-gcm = "0.10"
+anyhow = "1"
+async-trait = "0.1"
+axum = { version = "0.8", features = ["macros"] }
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+futures-util = "0.3"
+hmac = "0.12"
+jsonwebtoken = { version = "10", features = ["rust_crypto"] }
+once_cell = "1"
+percent-encoding = "2"
+rand = "0.9"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+scraper = "0.24"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+tokio-stream = "0.1"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+http-body-util = "0.1"
+tower = "0.5"
+
+codex
+El router expone exactamente los dos POST manuales que quieres limitar y el scheduler entra por `/internal/scheduled-analysis`, así que hay una separación natural para no afectarlo. Falta ver cómo se resuelve sesión en handlers y qué tests existen para proponer el menor cambio viable.
+exec
+/bin/bash -lc "rg -n \"require_|session|create_analysis_run|start_analysis_run|scheduled_analysis|ApiError|StatusCode::TOO_MANY|429\" apps/api/src apps/api/tests -g '"'!**/.env*'"' -g '"'!**/*secret*'"' -g '"'!**/*secrets*'"'" in /home/ryagar/Documentos/DevProyects/gmail-helpdesk-inspector
+exec
+/bin/bash -lc "find apps/api -maxdepth 3 -type f \\( -path '*/tests/*' -o -name '*test*' \\) -not -path '*/target/*' -not -name '.env*'" in /home/ryagar/Documentos/DevProyects/gmail-helpdesk-inspector
+exec
+/bin/bash -lc "sed -n '1,260p' apps/api/src/http/internal.rs" in /home/ryagar/Documentos/DevProyects/gmail-helpdesk-inspector
+exec
+/bin/bash -lc "sed -n '1,260p' apps/api/src/scheduler/mod.rs" in /home/ryagar/Documentos/DevProyects/gmail-helpdesk-inspector
+ succeeded in 844ms:
+ exited 2 in 848ms:
+rg: apps/api/tests: No such file or directory (os error 2)
+apps/api/src/storage/mod.rs:17:    async fn upsert_user_session(&self, session: &UserSession) -> anyhow::Result<()>;
+apps/api/src/storage/mod.rs:18:    async fn get_user_session(&self, id: &str) -> anyhow::Result<Option<UserSession>>;
+apps/api/src/storage/mod.rs:21:    async fn find_latest_session_with_refresh_token(
+apps/api/src/storage/mod.rs:40:    async fn create_analysis_run(&self, run: &AnalysisRun) -> anyhow::Result<()>;
+apps/api/src/storage/mod.rs:72:    sessions: HashMap<String, UserSession>,
+apps/api/src/storage/mod.rs:86:    async fn upsert_user_session(&self, session: &UserSession) -> anyhow::Result<()> {
+apps/api/src/storage/mod.rs:90:            .sessions
+apps/api/src/storage/mod.rs:91:            .insert(session.id.clone(), session.clone());
+apps/api/src/storage/mod.rs:95:    async fn get_user_session(&self, id: &str) -> anyhow::Result<Option<UserSession>> {
+apps/api/src/storage/mod.rs:96:        Ok(self.inner.read().await.sessions.get(id).cloned())
+apps/api/src/storage/mod.rs:99:    async fn find_latest_session_with_refresh_token(
+apps/api/src/storage/mod.rs:107:            .sessions
+apps/api/src/storage/mod.rs:109:            .filter(|session| {
+apps/api/src/storage/mod.rs:110:                session.google_account_email == email && session.refresh_token_encrypted.is_some()
+apps/api/src/storage/mod.rs:112:            .max_by_key(|session| session.updated_at)
+apps/api/src/storage/mod.rs:209:    async fn create_analysis_run(&self, run: &AnalysisRun) -> anyhow::Result<()> {
+apps/api/src/storage/mod.rs:376:    fn session(id: &str, email: &str, refresh: Option<&str>, age_minutes: i64) -> UserSession {
+apps/api/src/storage/mod.rs:389:    async fn finds_latest_session_with_refresh_token_for_email() {
+apps/api/src/storage/mod.rs:392:            .upsert_user_session(&session("old", "a@x.cl", Some("r1"), 120))
+apps/api/src/storage/mod.rs:396:            .upsert_user_session(&session("newest-no-refresh", "a@x.cl", None, 1))
+apps/api/src/storage/mod.rs:400:            .upsert_user_session(&session("newer", "a@x.cl", Some("r2"), 30))
+apps/api/src/storage/mod.rs:404:            .upsert_user_session(&session("other-user", "b@x.cl", Some("r3"), 0))
+apps/api/src/storage/mod.rs:409:            .find_latest_session_with_refresh_token("a@x.cl")
+apps/api/src/storage/mod.rs:412:            .expect("session expected");
+apps/api/src/storage/mod.rs:417:    async fn returns_none_when_no_session_has_refresh_token() {
+apps/api/src/storage/mod.rs:420:            .upsert_user_session(&session("s1", "a@x.cl", None, 5))
+apps/api/src/storage/mod.rs:425:            .find_latest_session_with_refresh_token("a@x.cl")
+apps/api/src/auth/mod.rs:63:pub fn sign_session_id(session_id: &str, secret: &str) -> anyhow::Result<String> {
+apps/api/src/auth/mod.rs:65:        <HmacSha256 as Mac>::new_from_slice(secret.as_bytes()).context("invalid session secret")?;
+apps/api/src/auth/mod.rs:66:    mac.update(session_id.as_bytes());
+apps/api/src/auth/mod.rs:68:    Ok(format!("{}.{}", session_id, URL_SAFE_NO_PAD.encode(sig)))
+apps/api/src/auth/mod.rs:71:pub fn verify_session_cookie(cookie_value: &str, secret: &str) -> Option<String> {
+apps/api/src/auth/mod.rs:72:    let (session_id, sig) = cookie_value.split_once('.')?;
+apps/api/src/auth/mod.rs:73:    let expected = sign_session_id(session_id, secret).ok()?;
+apps/api/src/auth/mod.rs:75:        Some(session_id.to_string())
+apps/api/src/auth/mod.rs:82:pub fn session_cookie(value: &str, same_site: &str, secure: bool) -> String {
+apps/api/src/auth/mod.rs:83:    cookie("ghmi_session", value, 2_592_000, same_site, secure)
+apps/api/src/auth/mod.rs:90:pub fn clear_session_cookie(same_site: &str, secure: bool) -> String {
+apps/api/src/auth/mod.rs:91:    cookie("ghmi_session", "", 0, same_site, secure)
+apps/api/src/firestore/mod.rs:223:    async fn upsert_user_session(&self, session: &UserSession) -> anyhow::Result<()> {
+apps/api/src/firestore/mod.rs:224:        self.put(&format!("users/{}", session.id), session).await
+apps/api/src/firestore/mod.rs:227:    async fn get_user_session(&self, id: &str) -> anyhow::Result<Option<UserSession>> {
+apps/api/src/firestore/mod.rs:231:    async fn find_latest_session_with_refresh_token(
+apps/api/src/firestore/mod.rs:239:        let sessions: Vec<UserSession> = self.list("", "users").await?;
+apps/api/src/firestore/mod.rs:240:        Ok(sessions
+apps/api/src/firestore/mod.rs:242:            .filter(|session| {
+apps/api/src/firestore/mod.rs:243:                session.google_account_email == email && session.refresh_token_encrypted.is_some()
+apps/api/src/firestore/mod.rs:245:            .max_by_key(|session| session.updated_at))
+apps/api/src/firestore/mod.rs:334:    async fn create_analysis_run(&self, run: &AnalysisRun) -> anyhow::Result<()> {
+apps/api/src/http/internal.rs:6:use super::{ApiError, AppState};
+apps/api/src/http/internal.rs:22:pub async fn scheduled_analysis(
+apps/api/src/http/internal.rs:26:) -> Result<Json<Vec<ScheduledOutcome>>, ApiError> {
+apps/api/src/http/internal.rs:29:        return Err(ApiError::not_found("recurso no encontrado"));
+apps/api/src/http/internal.rs:36:        return Err(ApiError::unauthorized());
+apps/api/src/http/internal.rs:43:            .map_err(|_| ApiError::bad_request("cuerpo inválido: se espera JSON"))?
+apps/api/src/http/internal.rs:47:            .map_err(|_| ApiError::bad_request("as_of_date inválida; usa el formato YYYY-MM-DD"))?,
+apps/api/src/http/internal.rs:52:    let outcomes = scheduler::run_scheduled_analysis(&state, &mailer, as_of_date).await?;
+apps/api/src/config/mod.rs:7:const DEFAULT_SESSION_SECRET: &str = "development-only-session-secret";
+apps/api/src/config/mod.rs:18:    pub session_secret: String,
+apps/api/src/config/mod.rs:138:            session_secret: secret_or_dev_default(
+apps/api/src/config/mod.rs:260:        session_secret: "test-session-secret".to_string(),
+apps/api/src/scheduler/mod.rs:55:pub async fn run_scheduled_analysis(
+apps/api/src/scheduler/mod.rs:116:            match run_scheduled_analysis(&state, &mailer, today).await {
+apps/api/src/scheduler/mod.rs:312:    let session = state
+apps/api/src/scheduler/mod.rs:314:        .find_latest_session_with_refresh_token(&config.user_email)
+apps/api/src/scheduler/mod.rs:322:    let encrypted_refresh = session
+apps/api/src/scheduler/mod.rs:325:        .expect("session filtered by refresh token presence");
+apps/api/src/scheduler/mod.rs:336:    let mut updated = session;
+apps/api/src/scheduler/mod.rs:344:    state.storage.upsert_user_session(&updated).await?;
+apps/api/src/scheduler/mod.rs:405:        state.storage.create_analysis_run(&run).await?;
+apps/api/src/scheduler/mod.rs:441:    state.storage.create_analysis_run(&run).await?;
+apps/api/src/scheduler/mod.rs:723:        let outcomes = run_scheduled_analysis(&state, &mailer, date("2026-06-13"))
+apps/api/src/scheduler/mod.rs:733:        let outcomes = run_scheduled_analysis(&state, &mailer, date("2026-06-12"))
+apps/api/src/scheduler/mod.rs:740:    async fn seed_env_creates_config_and_missing_session_fails_with_notice() {
+apps/api/src/scheduler/mod.rs:743:        let outcomes = run_scheduled_analysis(&state, &mailer, date("2026-06-12"))
+apps/api/src/scheduler/mod.rs:795:        let outcomes = run_scheduled_analysis(&state, &mailer, date("2026-06-12"))
+apps/api/src/scheduler/mod.rs:820:        let outcomes = run_scheduled_analysis(&state, &mailer, date("2026-06-12"))
+apps/api/src/scheduler/mod.rs:835:        let outcomes = run_scheduled_analysis(&state, &mailer, date("2026-06-12"))
+apps/api/src/scheduler/mod.rs:913:        storage.create_analysis_run(&run).await.unwrap();
+apps/api/src/scheduler/mod.rs:975:        storage.create_analysis_run(&run).await.unwrap();
+apps/api/src/scheduler/mod.rs:1001:        let outcomes = run_scheduled_analysis(&state, &mailer, date("2026-06-12"))
+apps/api/src/scheduler/mod.rs:1015:            .upsert_user_session(&UserSession {
+apps/api/src/scheduler/mod.rs:1027:        let outcomes = run_scheduled_analysis(&state, &mailer, date("2026-06-12"))
+apps/api/src/http/mod.rs:33:        GoogleTokenResponse, UserSession, clear_oauth_cookie, clear_session_cookie, decrypt_token,
+apps/api/src/http/mod.rs:34:        encrypt_token, oauth_cookie, session_cookie, sign_session_id, verify_session_cookie,
+apps/api/src/http/mod.rs:88:            post(create_analysis_run).get(list_analysis_runs),
+apps/api/src/http/mod.rs:91:        .route("/analysis-runs/{id}/start", post(start_analysis_run))
+apps/api/src/http/mod.rs:100:            post(internal::scheduled_analysis),
+apps/api/src/http/mod.rs:109:async fn auth_google_login(State(state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
+apps/api/src/http/mod.rs:114:    let signed_oauth = sign_session_id(
+apps/api/src/http/mod.rs:116:        &state.config.session_secret,
+apps/api/src/http/mod.rs:156:) -> Result<impl IntoResponse, ApiError> {
+apps/api/src/http/mod.rs:161:        .and_then(|cookie| verify_session_cookie(&cookie, &state.config.session_secret))
+apps/api/src/http/mod.rs:162:        .ok_or_else(|| ApiError::bad_request("missing or invalid OAuth PKCE cookie"))?;
+apps/api/src/http/mod.rs:165:        .ok_or_else(|| ApiError::bad_request("invalid OAuth PKCE cookie payload"))?;
+apps/api/src/http/mod.rs:167:        return Err(ApiError::bad_request("OAuth state mismatch"));
+apps/api/src/http/mod.rs:196:    let session = UserSession {
+apps/api/src/http/mod.rs:208:    state.storage.upsert_user_session(&session).await?;
+apps/api/src/http/mod.rs:210:    let signed = sign_session_id(&session.id, &state.config.session_secret)?;
+apps/api/src/http/mod.rs:214:        HeaderValue::from_str(&session_cookie(
+apps/api/src/http/mod.rs:240:        HeaderValue::from_str(&clear_session_cookie(
+apps/api/src/http/mod.rs:252:) -> Result<Json<serde_json::Value>, ApiError> {
+apps/api/src/http/mod.rs:253:    let session = require_session(&state, &headers).await?;
+apps/api/src/http/mod.rs:255:        "email": session.google_account_email,
+apps/api/src/http/mod.rs:319:) -> Result<Json<DataSummaryResponse>, ApiError> {
+apps/api/src/http/mod.rs:320:    let session = require_session(&state, &headers).await?;
+apps/api/src/http/mod.rs:321:    let bundle = get_or_provision_org_config(&state, &session.google_account_email).await?;
+apps/api/src/http/mod.rs:325:        .list_analysis_runs(&session.google_account_email)
+apps/api/src/http/mod.rs:343:            google_account_email: session.google_account_email,
+apps/api/src/http/mod.rs:389:) -> Result<Json<OrgConfigResponse>, ApiError> {
+apps/api/src/http/mod.rs:390:    let session = require_session(&state, &headers).await?;
+apps/api/src/http/mod.rs:391:    let bundle = get_or_provision_org_config(&state, &session.google_account_email).await?;
+apps/api/src/http/mod.rs:468:) -> Result<Json<UpdateOrgConfigResponse>, ApiError> {
+apps/api/src/http/mod.rs:469:    let session = require_session(&state, &headers).await?;
+apps/api/src/http/mod.rs:470:    let mut bundle = get_or_provision_org_config(&state, &session.google_account_email).await?;
+apps/api/src/http/mod.rs:471:    apply_org_config_update(&mut bundle, request, &session.google_account_email)?;
+apps/api/src/http/mod.rs:475:    bundle.draft.updated_by_user_email = session.google_account_email.clone();
+apps/api/src/http/mod.rs:481:        &session.google_account_email,
+apps/api/src/http/mod.rs:498:) -> Result<(), ApiError> {
+apps/api/src/http/mod.rs:523:) -> Result<(), ApiError> {
+apps/api/src/http/mod.rs:565:            return Err(ApiError::bad_request(
+apps/api/src/http/mod.rs:572:        return Err(ApiError::bad_request("email de cuenta Google inválido"));
+apps/api/src/http/mod.rs:575:        return Err(ApiError::bad_request(
+apps/api/src/http/mod.rs:585:) -> Result<(), ApiError> {
+apps/api/src/http/mod.rs:629:) -> Result<(), ApiError> {
+apps/api/src/http/mod.rs:646:            return Err(ApiError::bad_request(
+apps/api/src/http/mod.rs:663:) -> Result<(), ApiError> {
+apps/api/src/http/mod.rs:679:            return Err(ApiError::bad_request(
+apps/api/src/http/mod.rs:699:fn validate_policy_timezone(timezone: &str) -> Result<(), ApiError> {
+apps/api/src/http/mod.rs:703:        Err(ApiError::bad_request(
+apps/api/src/http/mod.rs:709:fn validate_time(value: &str) -> Result<String, ApiError> {
+apps/api/src/http/mod.rs:712:        .map_err(|_| ApiError::bad_request("hora inválida; usa formato HH:MM"))
+apps/api/src/http/mod.rs:715:fn validate_threshold(value: f64, label: &str) -> Result<(), ApiError> {
+apps/api/src/http/mod.rs:719:        Err(ApiError::bad_request(&format!(
+apps/api/src/http/mod.rs:728:) -> Result<OrgConfigBundle, ApiError> {
+apps/api/src/http/mod.rs:756:async fn create_analysis_run(
+apps/api/src/http/mod.rs:760:) -> Result<Json<AnalysisRun>, ApiError> {
+apps/api/src/http/mod.rs:761:    let session = require_session(&state, &headers).await?;
+apps/api/src/http/mod.rs:770:        build_legacy_run(session.google_account_email, request, now)
+apps/api/src/http/mod.rs:772:        build_policy_run(&state, &session.google_account_email, request, now).await?
+apps/api/src/http/mod.rs:774:    state.storage.create_analysis_run(&run).await?;
+apps/api/src/http/mod.rs:824:) -> Result<AnalysisRun, ApiError> {
+apps/api/src/http/mod.rs:831:            .ok_or(ApiError::not_found("policy version not found"))?
+apps/api/src/http/mod.rs:837:        return Err(ApiError::bad_request(
+apps/api/src/http/mod.rs:884:) -> Result<Json<Vec<AnalysisRun>>, ApiError> {
+apps/api/src/http/mod.rs:885:    let session = require_session(&state, &headers).await?;
+apps/api/src/http/mod.rs:889:            .list_analysis_runs(&session.google_account_email)
+apps/api/src/http/mod.rs:898:) -> Result<Json<AnalysisRun>, ApiError> {
+apps/api/src/http/mod.rs:899:    let session = require_session(&state, &headers).await?;
+apps/api/src/http/mod.rs:900:    Ok(Json(require_owned_run(&state, &id, &session).await?))
+apps/api/src/http/mod.rs:903:async fn start_analysis_run(
+apps/api/src/http/mod.rs:907:) -> Result<Json<AnalysisRun>, ApiError> {
+apps/api/src/http/mod.rs:908:    let session = require_session(&state, &headers).await?;
+apps/api/src/http/mod.rs:909:    let mut run = require_owned_run(&state, &id, &session).await?;
+apps/api/src/http/mod.rs:915:        &session.access_token_encrypted,
+apps/api/src/http/mod.rs:935:) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>, ApiError> {
+apps/api/src/http/mod.rs:936:    let session = require_session(&state, &headers).await?;
+apps/api/src/http/mod.rs:937:    require_owned_run(&state, &id, &session).await?;
+apps/api/src/http/mod.rs:958:) -> Result<Json<AnalysisMetrics>, ApiError> {
+apps/api/src/http/mod.rs:959:    let session = require_session(&state, &headers).await?;
+apps/api/src/http/mod.rs:960:    let run = require_owned_run(&state, &id, &session).await?;
+apps/api/src/http/mod.rs:969:) -> Result<Json<Vec<EmailThread>>, ApiError> {
+apps/api/src/http/mod.rs:970:    let session = require_session(&state, &headers).await?;
+apps/api/src/http/mod.rs:971:    let run = require_owned_run(&state, &id, &session).await?;
+apps/api/src/http/mod.rs:998:) -> Result<Json<ThreadDetailResponse>, ApiError> {
+apps/api/src/http/mod.rs:999:    let session = require_session(&state, &headers).await?;
+apps/api/src/http/mod.rs:1000:    let mut thread = require_owned_thread(&state, &thread_id, &session).await?;
+apps/api/src/http/mod.rs:1033:) -> Result<Json<AnalysisRun>, ApiError> {
+apps/api/src/http/mod.rs:1034:    let session = require_session(&state, &headers).await?;
+apps/api/src/http/mod.rs:1035:    let thread = require_owned_thread(&state, &thread_id, &session).await?;
+apps/api/src/http/mod.rs:1064:        reviewer_label: session.google_account_email,
+apps/api/src/http/mod.rs:1088:        .ok_or(ApiError::not_found("analysis run not found"))?;
+apps/api/src/http/mod.rs:1480:async fn require_owned_run(
+apps/api/src/http/mod.rs:1483:    session: &UserSession,
+apps/api/src/http/mod.rs:1484:) -> Result<AnalysisRun, ApiError> {
+apps/api/src/http/mod.rs:1489:        .ok_or(ApiError::not_found("analysis run not found"))?;
+apps/api/src/http/mod.rs:1493:            .user_is_org_member(org_id, &session.google_account_email)
+apps/api/src/http/mod.rs:1496:            return Err(ApiError::not_found("analysis run not found"));
+apps/api/src/http/mod.rs:1500:    if run.user_email != session.google_account_email {
+apps/api/src/http/mod.rs:1501:        return Err(ApiError::not_found("analysis run not found"));
+apps/api/src/http/mod.rs:1506:async fn require_owned_thread(
+apps/api/src/http/mod.rs:1509:    session: &UserSession,
+apps/api/src/http/mod.rs:1510:) -> Result<EmailThread, ApiError> {
+apps/api/src/http/mod.rs:1515:        .ok_or(ApiError::not_found("thread not found"))?;
+apps/api/src/http/mod.rs:1516:    require_owned_run(state, &thread.analysis_run_id, session)
+apps/api/src/http/mod.rs:1518:        .map_err(|_| ApiError::not_found("thread not found"))?;
+apps/api/src/http/mod.rs:1522:async fn require_session(state: &AppState, headers: &HeaderMap) -> Result<UserSession, ApiError> {
+apps/api/src/http/mod.rs:1526:        .and_then(|cookies| extract_named_cookie(cookies, "ghmi_session"))
+apps/api/src/http/mod.rs:1528:        tracing::warn!("auth rejected: ghmi_session cookie missing");
+apps/api/src/http/mod.rs:1529:        return Err(ApiError::unauthorized());
+apps/api/src/http/mod.rs:1532:    let Some(session_id) = verify_session_cookie(&cookie, &state.config.session_secret) else {
+apps/api/src/http/mod.rs:1533:        tracing::warn!("auth rejected: ghmi_session cookie signature invalid");
+apps/api/src/http/mod.rs:1534:        return Err(ApiError::unauthorized());
+apps/api/src/http/mod.rs:1537:    let session = state.storage.get_user_session(&session_id).await?;
+apps/api/src/http/mod.rs:1538:    if session.is_none() {
+apps/api/src/http/mod.rs:1539:        tracing::warn!(session_id, "auth rejected: session not found in storage");
+apps/api/src/http/mod.rs:1541:    session.ok_or(ApiError::unauthorized())
+apps/api/src/http/mod.rs:1558:pub struct ApiError {
+apps/api/src/http/mod.rs:1563:impl ApiError {
+apps/api/src/http/mod.rs:1586:impl IntoResponse for ApiError {
+apps/api/src/http/mod.rs:1592:impl From<anyhow::Error> for ApiError {
+apps/api/src/http/mod.rs:1601:impl From<reqwest::Error> for ApiError {
+apps/api/src/http/mod.rs:1643:        auth::sign_session_id,
+apps/api/src/http/mod.rs:1659:            .upsert_user_session(&session("alice-session", "alice@example.com"))
+apps/api/src/http/mod.rs:1663:            .upsert_user_session(&session("bob-session", "bob@example.com"))
+apps/api/src/http/mod.rs:1668:        storage.create_analysis_run(&alice_run).await.unwrap();
+apps/api/src/http/mod.rs:1669:        storage.create_analysis_run(&bob_run).await.unwrap();
+apps/api/src/http/mod.rs:1685:        let alice_cookie = signed_cookie("alice-session", &config.session_secret);
+apps/api/src/http/mod.rs:1686:        let bob_cookie = signed_cookie("bob-session", &config.session_secret);
+apps/api/src/http/mod.rs:1694:    fn signed_cookie(session_id: &str, secret: &str) -> String {
+apps/api/src/http/mod.rs:1696:            "ghmi_session={}",
+apps/api/src/http/mod.rs:1697:            sign_session_id(session_id, secret).unwrap()
+apps/api/src/http/mod.rs:1701:    fn session(id: &str, email: &str) -> UserSession {
+apps/api/src/http/mod.rs:1985:    async fn owned_run_endpoints_require_session() {
+
+ succeeded in 829ms:
+pub mod model;
+pub mod window;
+
+use std::time::Duration;
+
+use chrono::{NaiveDate, Utc};
+use serde::Serialize;
+use uuid::Uuid;
+
+use crate::{
+    analysis::{AnalysisConfig, AnalysisMetrics, AnalysisRun, AnalysisStatus},
+    auth::{
+        decrypt_token, encrypt_token,
+        refresh::{RefreshError, refresh_google_access_token},
+    },
+    http::{AppState, execute_analysis, mark_run_failed},
+    policies::{ReportMode, retention_expires_at, setup_state},
+    report::{
+        ReportMailer, ResendMailer,
+        template::{ReviewItem, build_failure_email, build_report_email},
+    },
+    scheduler::{
+        model::{ScheduleConfig, ScheduleRunStatus, ScheduleState},
+        window::AnalysisWindow,
+    },
+};
+
+/// Si un claim `Running` quedó colgado (reinicio a mitad de análisis), se
+/// considera obsoleto después de este tiempo y un nuevo tick puede reintentar.
+const CLAIM_TTL_MINUTES: i64 = 60;
+const POLL_INTERVAL: Duration = Duration::from_secs(60);
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case", tag = "outcome")]
+pub enum ScheduledOutcome {
+    Skipped {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        user_email: Option<String>,
+        reason: String,
+    },
+    Completed {
+        user_email: String,
+        run_id: String,
+        email_sent: bool,
+    },
+    Failed {
+        user_email: String,
+        error: String,
+        notice_sent: bool,
+    },
+}
+
+/// Núcleo compartido por el loop interno y el endpoint /internal/scheduled-analysis.
+/// `as_of_date` es la fecha local (America/Santiago) en la que ocurre el tick.
+pub async fn run_scheduled_analysis(
+    state: &AppState,
+    mailer: &dyn ReportMailer,
+    as_of_date: NaiveDate,
+) -> anyhow::Result<Vec<ScheduledOutcome>> {
+    let Some(window) = window::analysis_window_for(as_of_date) else {
+        return Ok(vec![ScheduledOutcome::Skipped {
+            user_email: None,
+            reason: "fin de semana: sin ventana de análisis".to_string(),
+        }]);
+    };
+    let configs = load_or_seed_configs(state).await?;
+    if configs.is_empty() {
+        return Ok(vec![ScheduledOutcome::Skipped {
+            user_email: None,
+            reason:
+                "sin configuración programada (scheduleConfigs vacío y sin SCHEDULE_USER_EMAIL)"
+                    .to_string(),
+        }]);
+    }
+    let mut outcomes = Vec::new();
+    for config in configs {
+        if !config.enabled {
+            outcomes.push(ScheduledOutcome::Skipped {
+                user_email: Some(config.user_email),
+                reason: "configuración deshabilitada".to_string(),
+            });
+            continue;
+        }
+        outcomes.push(run_for_user(state, mailer, &config, &window).await);
+    }
+    Ok(outcomes)
+}
+
+/// Loop interno: despierta cada minuto y dispara una vez por día hábil desde
+/// las 08:00 de America/Santiago. La idempotencia real vive en ScheduleState,
+/// el memo en memoria solo evita relecturas de Firestore durante el día.
+pub fn spawn(state: AppState) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mailer = match ResendMailer::from_config(&state.config.report) {
+            Ok(mailer) => mailer,
+            Err(error) => {
+                tracing::error!(
+                    ?error,
+                    "scheduler interno desactivado: mailer mal configurado"
+                );
+                return;
+            }
+        };
+        tracing::info!("scheduler interno activo (lunes a viernes 08:00 America/Santiago)");
+        let mut last_attempt_date: Option<NaiveDate> = None;
+        loop {
+            tokio::time::sleep(POLL_INTERVAL).await;
+            let now_scl = Utc::now().with_timezone(&window::SCL);
+            if !window::is_fire_time(now_scl) {
+                continue;
+            }
+            let today = now_scl.date_naive();
+            if last_attempt_date == Some(today) {
+                continue;
+            }
+            match run_scheduled_analysis(&state, &mailer, today).await {
+                Ok(outcomes) => {
+                    let summary = serde_json::to_string(&outcomes).unwrap_or_default();
+                    tracing::info!(%summary, "tick del análisis programado completado");
+                    last_attempt_date = Some(today);
+                }
+                Err(error) => {
+                    // Error duro antes de tocar correo/estado (p. ej. Firestore
+                    // caído): no memorizar el día para reintentar al minuto.
+                    tracing::error!(?error, "tick del análisis programado falló");
+                }
+            }
+        }
+    })
+}
+
+async fn load_or_seed_configs(state: &AppState) -> anyhow::Result<Vec<ScheduleConfig>> {
+    let configs = state.storage.list_schedule_configs().await?;
+    if !configs.is_empty() {
+        return Ok(configs);
+    }
+    let Some(email) = &state.config.scheduler.seed_user_email else {
+        return Ok(Vec::new());
+    };
+    let seeded = ScheduleConfig {
+        user_email: email.clone(),
+        enabled: true,
+        recipients: state.config.report.to_emails.clone(),
+        internal_domains: state.config.scheduler.seed_internal_domains.clone(),
+        ignored_senders: Vec::new(),
+        ignored_domains: Vec::new(),
+        ignored_keywords: Vec::new(),
+        timezone: "America/Santiago".to_string(),
+        gmail_max_threads: state.config.scheduler.seed_gmail_max_threads,
+        updated_at: Utc::now(),
+    };
+    state.storage.upsert_schedule_config(&seeded).await?;
+    tracing::info!(user_email = %seeded.user_email, "scheduleConfig sembrado desde variables de entorno");
+    Ok(vec![seeded])
+}
+
+async fn run_for_user(
+    state: &AppState,
+    mailer: &dyn ReportMailer,
+    config: &ScheduleConfig,
+    window: &AnalysisWindow,
+) -> ScheduledOutcome {
+    match check_idempotency(state, config, window).await {
+        Ok(Some(reason)) => {
+            return ScheduledOutcome::Skipped {
+                user_email: Some(config.user_email.clone()),
+                reason,
+            };
+        }
+        Ok(None) => {}
+        Err(error) => {
+            return ScheduledOutcome::Failed {
+                user_email: config.user_email.clone(),
+                error: format!("no se pudo registrar el estado del análisis: {error}"),
+                notice_sent: false,
+            };
+        }
+    }
+    match analyze_and_report(state, mailer, config, window).await {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            let message = error.to_string();
+            store_state(
+                state,
+                config,
+                window,
+                ScheduleRunStatus::Failed,
+                None,
+                false,
+                Some(message.clone()),
+            )
+            .await;
+            let notice_sent = send_failure_notice(state, mailer, config, window, &message).await;
+            ScheduledOutcome::Failed {
+                user_email: config.user_email.clone(),
+                error: message,
+                notice_sent,
+            }
+        }
+    }
+}
+
+/// Devuelve Some(motivo) si la ventana ya está cubierta; si no, escribe el
+/// claim `Running`. Lectura-verificación-escritura sin transacción: suficiente
+/// para una instancia única; con múltiples instancias el hardening sería la
+/// precondición `currentDocument` de Firestore.
+async fn check_idempotency(
+    state: &AppState,
+    config: &ScheduleConfig,
+    window: &AnalysisWindow,
+) -> anyhow::Result<Option<String>> {
+    if let Some(existing) = state.storage.get_schedule_state(&config.user_email).await? {
+        let same_window = existing.window_date_from == window.date_from
+            && existing.window_date_to == window.date_to;
+        if same_window {
+            match existing.status {
+                ScheduleRunStatus::Completed => {
+                    return Ok(Some("ventana ya analizada".to_string()));
+                }
+                ScheduleRunStatus::Running
+                    if Utc::now() - existing.started_at
+                        < chrono::Duration::minutes(CLAIM_TTL_MINUTES) =>
+                {
+                    return Ok(Some("análisis en curso".to_string()));
+                }
+                _ => {}
+            }
+        }
+    }
+    let now = Utc::now();
+    state
+        .storage
+        .upsert_schedule_state(&ScheduleState {
+            user_email: config.user_email.clone(),
+            window_date_from: window.date_from.clone(),
+            window_date_to: window.date_to.clone(),
+            status: ScheduleRunStatus::Running,
+            run_id: None,
+            email_sent: false,
+            error_message: None,
+            started_at: now,
+            updated_at: now,
+        })
+        .await?;
+    Ok(None)
+}
+
+async fn analyze_and_report(
+    state: &AppState,
+    mailer: &dyn ReportMailer,
+    config: &ScheduleConfig,
+    window: &AnalysisWindow,
+) -> anyhow::Result<ScheduledOutcome> {
+    let access_token = fresh_access_token(state, config).await?;
+    let run = create_scheduled_run(state, config, window).await?;
+
+    let mut exec_state = state.clone();
+    if let Some(max_threads) = config.gmail_max_threads {
+        exec_state.config.google.gmail_max_threads = max_threads;
+    }
+
+ succeeded in 842ms:
+use axum::{Json, body::Bytes, extract::State, http::HeaderMap};
+use chrono::{NaiveDate, Utc};
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
+
+use super::{ApiError, AppState};
+use crate::{
+    report::ResendMailer,
+    scheduler::{self, ScheduledOutcome, window},
+};
+
+const CRON_SECRET_HEADER: &str = "x-cron-secret";
+
+#[derive(Debug, Default, Deserialize)]
+pub struct ScheduledAnalysisRequest {
+    /// Fecha local (America/Santiago) del tick; permite backfill manual.
+    pub as_of_date: Option<String>,
+}
+
+/// Disparo externo del análisis programado (Cloud Scheduler, crontab, curl).
+/// No usa cookie de sesión: se autentica solo con el secreto compartido.
+pub async fn scheduled_analysis(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<Vec<ScheduledOutcome>>, ApiError> {
+    let Some(expected_secret) = &state.config.scheduler.cron_secret else {
+        // Sin CRON_SECRET el disparo externo está apagado; no revelar la ruta.
+        return Err(ApiError::not_found("recurso no encontrado"));
+    };
+    let provided_secret = headers
+        .get(CRON_SECRET_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    if !cron_secret_matches(provided_secret, expected_secret) {
+        return Err(ApiError::unauthorized());
+    }
+
+    let request: ScheduledAnalysisRequest = if body.is_empty() {
+        ScheduledAnalysisRequest::default()
+    } else {
+        serde_json::from_slice(&body)
+            .map_err(|_| ApiError::bad_request("cuerpo inválido: se espera JSON"))?
+    };
+    let as_of_date = match request.as_of_date {
+        Some(raw) => NaiveDate::parse_from_str(&raw, "%Y-%m-%d")
+            .map_err(|_| ApiError::bad_request("as_of_date inválida; usa el formato YYYY-MM-DD"))?,
+        None => Utc::now().with_timezone(&window::SCL).date_naive(),
+    };
+
+    let mailer = ResendMailer::from_config(&state.config.report)?;
+    let outcomes = scheduler::run_scheduled_analysis(&state, &mailer, as_of_date).await?;
+    Ok(Json(outcomes))
+}
+
+/// Comparar digests hace que el tiempo no dependa del punto donde difieren
+/// los secretos (comparación timing-safe sin dependencias nuevas).
+fn cron_secret_matches(provided: &str, expected: &str) -> bool {
+    Sha256::digest(provided.as_bytes()) == Sha256::digest(expected.as_bytes())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    use super::*;
+    use crate::{config::test_app_config, storage::MemoryStorage};
+
+    fn app(cron_secret: Option<&str>) -> axum::Router {
+        let mut config = test_app_config();
+        config.scheduler.cron_secret = cron_secret.map(ToOwned::to_owned);
+        crate::build_app(config, Arc::new(MemoryStorage::default()))
+    }
+
+    fn request(secret: Option<&str>, body: &str) -> Request<Body> {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/internal/scheduled-analysis")
+            .header("content-type", "application/json");
+        if let Some(secret) = secret {
+            builder = builder.header(CRON_SECRET_HEADER, secret);
+        }
+        builder.body(Body::from(body.to_string())).unwrap()
+    }
+
+    async fn body_text(response: axum::response::Response) -> String {
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn endpoint_is_hidden_without_configured_secret() {
+        let response = app(None)
+            .oneshot(request(Some("dev-secret"), ""))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn missing_or_wrong_secret_is_unauthorized() {
+        let response = app(Some("dev-secret"))
+            .oneshot(request(None, ""))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let response = app(Some("dev-secret"))
+            .oneshot(request(Some("otro"), ""))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn saturday_returns_weekend_skip() {
+        let response = app(Some("dev-secret"))
+            .oneshot(request(
+                Some("dev-secret"),
+                r#"{"as_of_date":"2026-06-13"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_text(response).await;
+        assert!(body.contains("fin de semana"));
+    }
+
+    #[tokio::test]
+    async fn weekday_without_config_returns_skip() {
+        let response = app(Some("dev-secret"))
+            .oneshot(request(
+                Some("dev-secret"),
+                r#"{"as_of_date":"2026-06-12"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_text(response).await;
+        assert!(body.contains("sin configuración"));
+    }
+
+    #[tokio::test]
+    async fn malformed_date_is_bad_request() {
+        let response = app(Some("dev-secret"))
+            .oneshot(request(
+                Some("dev-secret"),
+                r#"{"as_of_date":"12-06-2026"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn secret_comparison_accepts_exact_match_only() {
+        assert!(cron_secret_matches("abc", "abc"));
+        assert!(!cron_secret_matches("abc", "abd"));
+        assert!(!cron_secret_matches("", "abc"));
+    }
+}
+
+exec
+/bin/bash -lc "sed -n '1,260p' apps/api/src/config/mod.rs" in /home/ryagar/Documentos/DevProyects/gmail-helpdesk-inspector
+ succeeded in 928ms:
+use std::env;
+
+use anyhow::{Context, anyhow};
+use serde::Deserialize;
+
+const DEFAULT_ENCRYPTION_KEY: &str = "development-only-change-me-32-bytes";
+const DEFAULT_SESSION_SECRET: &str = "development-only-session-secret";
+
+#[derive(Debug, Clone)]
+pub struct AppConfig {
+    pub api_port: u16,
+    pub web_base_url: String,
+    pub api_base_url: String,
+    pub cookie_secure: bool,
+    pub cookie_same_site: String,
+    pub app_storage: String,
+    pub encryption_key: String,
+    pub session_secret: String,
+    pub google: GoogleConfig,
+    pub firestore: FirestoreConfig,
+    pub ai: AiConfig,
+    pub scheduler: SchedulerConfig,
+    pub report: ReportConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct GoogleConfig {
+    pub client_id: String,
+    pub client_secret: String,
+    pub redirect_url: String,
+    pub gmail_max_threads: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct FirestoreConfig {
+    pub project_id: String,
+    pub database_id: String,
+    pub bearer_token: Option<String>,
+    pub service_account_path: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AiConfig {
+    pub worker_url: String,
+    pub worker_audience: Option<String>,
+    pub apply_confidence_threshold: f64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SchedulerConfig {
+    pub enabled: bool,
+    pub cron_secret: Option<String>,
+    pub seed_user_email: Option<String>,
+    pub seed_internal_domains: Vec<String>,
+    pub seed_gmail_max_threads: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ReportConfig {
+    pub resend_api_key: Option<String>,
+    pub from_email: Option<String>,
+    pub to_emails: Vec<String>,
+}
+
+impl AppConfig {
+    pub fn from_env() -> anyhow::Result<Self> {
+        let app_env = env_or("APP_ENV", "development");
+        let production = is_production_env(&app_env);
+        let app_storage = env_or("APP_STORAGE", "firestore");
+        let google = GoogleConfig {
+            client_id: env_or("GOOGLE_CLIENT_ID", ""),
+            client_secret: env_or("GOOGLE_CLIENT_SECRET", ""),
+            redirect_url: env_or(
+                "GOOGLE_REDIRECT_URL",
+                "http://localhost:8080/auth/google/callback",
+            ),
+            gmail_max_threads: env_or("GMAIL_MAX_THREADS", "50")
+                .parse()
+                .context("invalid GMAIL_MAX_THREADS")?,
+        };
+
+        if app_storage != "memory" {
+            require("GCP_PROJECT_ID")?;
+        }
+
+        let scheduler = SchedulerConfig {
+            enabled: env_flag("SCHEDULER_ENABLED"),
+            cron_secret: empty_to_none(env::var("CRON_SECRET").ok()),
+            seed_user_email: empty_to_none(env::var("SCHEDULE_USER_EMAIL").ok()),
+            seed_internal_domains: env_list("SCHEDULE_INTERNAL_DOMAINS"),
+            seed_gmail_max_threads: empty_to_none(env::var("SCHEDULE_GMAIL_MAX_THREADS").ok())
+                .map(|value| value.parse().context("invalid SCHEDULE_GMAIL_MAX_THREADS"))
+                .transpose()?,
+        };
+        let report = ReportConfig {
+            resend_api_key: empty_to_none(env::var("RESEND_API_KEY").ok()),
+            from_email: empty_to_none(env::var("REPORT_FROM_EMAIL").ok()),
+            to_emails: env_list("REPORT_TO_EMAIL"),
+        };
+        if scheduler.enabled {
+            if report.resend_api_key.is_none() {
+                return Err(anyhow!(
+                    "RESEND_API_KEY is required when SCHEDULER_ENABLED=true"
+                ));
+            }
+            if report.from_email.is_none() {
+                return Err(anyhow!(
+                    "REPORT_FROM_EMAIL is required when SCHEDULER_ENABLED=true"
+                ));
+            }
+        }
+
+        let api_base_url = env_or("API_BASE_URL", "http://localhost:8080");
+        let cookie_secure = env::var("APP_COOKIE_SECURE")
+            .ok()
+            .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+            .unwrap_or_else(|| api_base_url.starts_with("https://"));
+        let cookie_same_site = env_or(
+            "APP_COOKIE_SAMESITE",
+            if cookie_secure { "None" } else { "Lax" },
+        );
+
+        Ok(Self {
+            api_port: env::var("PORT")
+                .unwrap_or_else(|_| env_or("API_PORT", "8080"))
+                .parse()
+                .context("invalid API_PORT")?,
+            web_base_url: env_or("WEB_BASE_URL", "http://localhost:5173"),
+            api_base_url,
+            cookie_secure,
+            cookie_same_site,
+            app_storage,
+            encryption_key: secret_or_dev_default(
+                "APP_ENCRYPTION_KEY",
+                DEFAULT_ENCRYPTION_KEY,
+                production,
+            )?,
+            session_secret: secret_or_dev_default(
+                "APP_SESSION_SECRET",
+                DEFAULT_SESSION_SECRET,
+                production,
+            )?,
+            google,
+            firestore: FirestoreConfig {
+                project_id: env_or("GCP_PROJECT_ID", ""),
+                database_id: env_or("FIRESTORE_DATABASE_ID", "(default)"),
+                bearer_token: empty_to_none(env::var("FIRESTORE_BEARER_TOKEN").ok()),
+                service_account_path: empty_to_none(
+                    env::var("GOOGLE_APPLICATION_CREDENTIALS").ok(),
+                ),
+            },
+            ai: AiConfig {
+                worker_url: env_or("AI_WORKER_URL", "http://localhost:8090"),
+                worker_audience: empty_to_none(env::var("AI_WORKER_AUDIENCE").ok()),
+                apply_confidence_threshold: env_or("AI_APPLY_CONFIDENCE_THRESHOLD", "0.92")
+                    .parse()
+                    .context("invalid AI_APPLY_CONFIDENCE_THRESHOLD")?,
+            },
+            scheduler,
+            report,
+        })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ServiceAccountKey {
+    #[allow(dead_code)]
+    pub project_id: Option<String>,
+    pub private_key: String,
+    pub client_email: String,
+    pub token_uri: Option<String>,
+}
+
+fn env_or(key: &str, default: &str) -> String {
+    env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+fn require(key: &str) -> anyhow::Result<String> {
+    let value = env::var(key).map_err(|_| anyhow!("{key} is required"))?;
+    if value.trim().is_empty() {
+        return Err(anyhow!("{key} cannot be empty"));
+    }
+    Ok(value)
+}
+
+fn secret_or_dev_default(key: &str, default: &str, production: bool) -> anyhow::Result<String> {
+    match require(key) {
+        Ok(value) => validate_secret_not_default(key, &value, default, production),
+        Err(error) if production => Err(anyhow!(
+            "{key} is required when APP_ENV=production: {error}"
+        )),
+        Err(_) => Ok(default.to_string()),
+    }
+}
+
+fn validate_secret_not_default(
+    key: &str,
+    value: &str,
+    default: &str,
+    production: bool,
+) -> anyhow::Result<String> {
+    if production && (value == default || value.contains("development-only")) {
+        return Err(anyhow!(
+            "{key} must not use a development default when APP_ENV=production"
+        ));
+    }
+    Ok(value.to_string())
+}
+
+fn is_production_env(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "prod" | "production"
+    )
+}
+
+fn empty_to_none(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn env_flag(key: &str) -> bool {
+    env::var(key)
+        .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false)
+}
+
+fn env_list(key: &str) -> Vec<String> {
+    env::var(key)
+        .map(|value| split_list(&value))
+        .unwrap_or_default()
+}
+
+fn split_list(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+/// Config base para tests unitarios; cada test ajusta los campos que necesita.
+#[cfg(test)]
+pub(crate) fn test_app_config() -> AppConfig {
+    AppConfig {
+        api_port: 0,
+        web_base_url: "http://localhost:5173".to_string(),
+        api_base_url: "http://localhost:8080".to_string(),
+        cookie_secure: false,
+        cookie_same_site: "Lax".to_string(),
+        app_storage: "memory".to_string(),
+        encryption_key: "test-encryption-key-32-bytes-long!!".to_string(),
+        session_secret: "test-session-secret".to_string(),
+
+exec
+/bin/bash -lc "sed -n '220,340p' apps/api/src/config/mod.rs && sed -n '740,940p' apps/api/src/http/mod.rs && sed -n '1520,1610p' apps/api/src/http/mod.rs && sed -n '1620,1730p' apps/api/src/http/mod.rs && sed -n '1960,2025p' apps/api/src/http/mod.rs" in /home/ryagar/Documentos/DevProyects/gmail-helpdesk-inspector
+ succeeded in 939ms:
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn env_flag(key: &str) -> bool {
+    env::var(key)
+        .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false)
+}
+
+fn env_list(key: &str) -> Vec<String> {
+    env::var(key)
+        .map(|value| split_list(&value))
+        .unwrap_or_default()
+}
+
+fn split_list(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+/// Config base para tests unitarios; cada test ajusta los campos que necesita.
+#[cfg(test)]
+pub(crate) fn test_app_config() -> AppConfig {
+    AppConfig {
+        api_port: 0,
+        web_base_url: "http://localhost:5173".to_string(),
+        api_base_url: "http://localhost:8080".to_string(),
+        cookie_secure: false,
+        cookie_same_site: "Lax".to_string(),
+        app_storage: "memory".to_string(),
+        encryption_key: "test-encryption-key-32-bytes-long!!".to_string(),
+        session_secret: "test-session-secret".to_string(),
+        google: GoogleConfig {
+            client_id: String::new(),
+            client_secret: String::new(),
+            redirect_url: String::new(),
+            gmail_max_threads: 50,
+        },
+        firestore: FirestoreConfig {
+            project_id: String::new(),
+            database_id: String::new(),
+            bearer_token: None,
+            service_account_path: None,
+        },
+        ai: AiConfig {
+            worker_url: String::new(),
+            worker_audience: None,
+            apply_confidence_threshold: 0.92,
+        },
+        scheduler: SchedulerConfig {
+            enabled: false,
+            cron_secret: Some("dev-secret".to_string()),
+            seed_user_email: None,
+            seed_internal_domains: vec!["x.cl".to_string()],
+            seed_gmail_max_threads: None,
+        },
+        report: ReportConfig {
+            resend_api_key: Some("re_test".to_string()),
+            from_email: Some("Helpdesk <r@x.cl>".to_string()),
+            to_emails: vec!["admin@x.cl".to_string()],
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_list_trims_and_skips_empty_items() {
+        assert_eq!(
+            split_list(" a@b.cl, ,c.cl ,, d "),
+            vec!["a@b.cl", "c.cl", "d"]
+        );
+        assert!(split_list("").is_empty());
+        assert!(split_list(" , ").is_empty());
+    }
+
+    #[test]
+    fn production_env_aliases_are_detected() {
+        assert!(is_production_env("production"));
+        assert!(is_production_env("prod"));
+        assert!(is_production_env(" PROD "));
+        assert!(!is_production_env("development"));
+        assert!(!is_production_env("staging"));
+    }
+
+    #[test]
+    fn production_rejects_development_secret_defaults() {
+        let err = validate_secret_not_default(
+            "APP_SESSION_SECRET",
+            DEFAULT_SESSION_SECRET,
+            DEFAULT_SESSION_SECRET,
+            true,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("must not use a development default"));
+
+        let err = validate_secret_not_default(
+            "APP_SESSION_SECRET",
+            "development-only-custom",
+            DEFAULT_SESSION_SECRET,
+            true,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("must not use a development default"));
+    }
+
+    #[test]
+    fn development_allows_defaults_for_local_runs() {
+    date_to: String,
+    time_from: Option<String>,
+    time_to: Option<String>,
+    timezone: Option<String>,
+    #[serde(default)]
+    internal_domains: Vec<String>,
+    #[serde(default)]
+    ignored_senders: Vec<String>,
+    #[serde(default)]
+    ignored_domains: Vec<String>,
+    #[serde(default)]
+    ignored_keywords: Vec<String>,
+    #[serde(default)]
+    policy_version_id: Option<String>,
+}
+
+async fn create_analysis_run(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<CreateAnalysisRunRequest>,
+) -> Result<Json<AnalysisRun>, ApiError> {
+    let session = require_session(&state, &headers).await?;
+    let now = Utc::now();
+    let uses_legacy_config = request.policy_version_id.is_none()
+        && (!request.internal_domains.is_empty()
+            || !request.ignored_senders.is_empty()
+            || !request.ignored_domains.is_empty()
+            || !request.ignored_keywords.is_empty()
+            || request.timezone.is_some());
+    let run = if uses_legacy_config {
+        build_legacy_run(session.google_account_email, request, now)
+    } else {
+        build_policy_run(&state, &session.google_account_email, request, now).await?
+    };
+    state.storage.create_analysis_run(&run).await?;
+    Ok(Json(run))
+}
+
+fn build_legacy_run(
+    user_email: String,
+    request: CreateAnalysisRunRequest,
+    now: chrono::DateTime<Utc>,
+) -> AnalysisRun {
+    AnalysisRun {
+        id: Uuid::new_v4().to_string(),
+        user_email,
+        org_id: None,
+        mailbox_id: None,
+        trigger_type: Some(TriggerType::Manual),
+        policy_version_id: None,
+        policy_hash: None,
+        policy_snapshot: None,
+        gmail_scope_snapshot: vec![],
+        retention_expires_at: None,
+        data_minimization_mode: Some("metadata_snippets_excerpts_only".to_string()),
+        config: AnalysisConfig {
+            date_from: request.date_from,
+            date_to: request.date_to,
+            time_from: request.time_from.unwrap_or_else(|| "00:00".to_string()),
+            time_to: request.time_to.unwrap_or_else(|| "23:59".to_string()),
+            timezone: request
+                .timezone
+                .unwrap_or_else(|| "America/Santiago".to_string()),
+            internal_domains: request.internal_domains,
+            ignored_senders: request.ignored_senders,
+            ignored_domains: request.ignored_domains,
+            ignored_keywords: request.ignored_keywords,
+        },
+        status: AnalysisStatus::Pending,
+        progress_message: "Listo para analizar".to_string(),
+        processed_threads: 0,
+        total_candidate_threads: 0,
+        metrics: AnalysisMetrics::default(),
+        created_at: now,
+        completed_at: None,
+        error_message: None,
+    }
+}
+
+async fn build_policy_run(
+    state: &AppState,
+    user_email: &str,
+    request: CreateAnalysisRunRequest,
+    now: chrono::DateTime<Utc>,
+) -> Result<AnalysisRun, ApiError> {
+    let bundle = get_or_provision_org_config(state, user_email).await?;
+    let policy_version = if let Some(policy_version_id) = request.policy_version_id.as_deref() {
+        state
+            .storage
+            .get_policy_version(&bundle.org.id, policy_version_id)
+            .await?
+            .ok_or(ApiError::not_found("policy version not found"))?
+    } else {
+        bundle.policy_version.clone()
+    };
+    let current_setup = setup_state(&bundle.draft);
+    if !current_setup.ready_for_analysis {
+        return Err(ApiError::bad_request(
+            "completa la configuración antes de crear análisis desde policy",
+        ));
+    }
+    let snapshot = policy_version.snapshot.clone();
+    let analysis = &snapshot.analysis_policy;
+    Ok(AnalysisRun {
+        id: Uuid::new_v4().to_string(),
+        user_email: user_email.to_string(),
+        org_id: Some(bundle.org.id),
+        mailbox_id: Some(snapshot.mailbox.id.clone()),
+        trigger_type: Some(TriggerType::Manual),
+        policy_version_id: Some(policy_version.id),
+        policy_hash: Some(policy_version.policy_hash),
+        policy_snapshot: Some(snapshot.clone()),
+        gmail_scope_snapshot: snapshot.mailbox.gmail_scope_snapshot.clone(),
+        retention_expires_at: Some(retention_expires_at(now, &snapshot)),
+        data_minimization_mode: Some("metadata_snippets_excerpts_only".to_string()),
+        config: AnalysisConfig {
+            date_from: request.date_from,
+            date_to: request.date_to,
+            time_from: request
+                .time_from
+                .unwrap_or_else(|| analysis.default_time_from.clone()),
+            time_to: request
+                .time_to
+                .unwrap_or_else(|| analysis.default_time_to.clone()),
+            timezone: analysis.timezone.clone(),
+            internal_domains: analysis.internal_domains.clone(),
+            ignored_senders: analysis.ignored_senders.clone(),
+            ignored_domains: analysis.ignored_domains.clone(),
+            ignored_keywords: analysis.ignored_keywords.clone(),
+        },
+        status: AnalysisStatus::Pending,
+        progress_message: "Listo para analizar".to_string(),
+        processed_threads: 0,
+        total_candidate_threads: 0,
+        metrics: AnalysisMetrics::default(),
+        created_at: now,
+        completed_at: None,
+        error_message: None,
+    })
+}
+
+async fn list_analysis_runs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<AnalysisRun>>, ApiError> {
+    let session = require_session(&state, &headers).await?;
+    Ok(Json(
+        state
+            .storage
+            .list_analysis_runs(&session.google_account_email)
+            .await?,
+    ))
+}
+
+async fn get_analysis_run(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<AnalysisRun>, ApiError> {
+    let session = require_session(&state, &headers).await?;
+    Ok(Json(require_owned_run(&state, &id, &session).await?))
+}
+
+async fn start_analysis_run(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<AnalysisRun>, ApiError> {
+    let session = require_session(&state, &headers).await?;
+    let mut run = require_owned_run(&state, &id, &session).await?;
+    run.status = AnalysisStatus::Running;
+    run.progress_message = "Iniciando lectura de Gmail".to_string();
+    state.storage.update_analysis_run(&run).await?;
+
+    let access_token = decrypt_token(
+        &session.access_token_encrypted,
+        &state.config.encryption_key,
+    )?;
+    let worker_state = state.clone();
+    let run_id = run.id.clone();
+    tokio::spawn(async move {
+        if let Err(error) =
+            execute_analysis(worker_state.clone(), run_id.clone(), access_token).await
+        {
+            mark_run_failed(&worker_state, &run_id, &error).await;
+        }
+    });
+
+    Ok(Json(run))
+}
+
+async fn analysis_events(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    let session = require_session(&state, &headers).await?;
+    require_owned_run(&state, &id, &session).await?;
+    let stream = stream::unfold((), move |_| {
+        let state = state.clone();
+        let id = id.clone();
+}
+
+async fn require_session(state: &AppState, headers: &HeaderMap) -> Result<UserSession, ApiError> {
+    let Some(cookie) = headers
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|cookies| extract_named_cookie(cookies, "ghmi_session"))
+    else {
+        tracing::warn!("auth rejected: ghmi_session cookie missing");
+        return Err(ApiError::unauthorized());
+    };
+
+    let Some(session_id) = verify_session_cookie(&cookie, &state.config.session_secret) else {
+        tracing::warn!("auth rejected: ghmi_session cookie signature invalid");
+        return Err(ApiError::unauthorized());
+    };
+
+    let session = state.storage.get_user_session(&session_id).await?;
+    if session.is_none() {
+        tracing::warn!(session_id, "auth rejected: session not found in storage");
+    }
+    session.ok_or(ApiError::unauthorized())
+}
+
+fn extract_named_cookie(cookies: &str, expected_name: &str) -> Option<String> {
+    cookies.split(';').find_map(|part| {
+        let (name, value) = part.trim().split_once('=')?;
+        (name == expected_name).then(|| value.to_string())
+    })
+}
+
+fn random_urlsafe(bytes: usize) -> String {
+    let mut raw = vec![0u8; bytes];
+    rand::rng().fill_bytes(&mut raw);
+    URL_SAFE_NO_PAD.encode(raw)
+}
+
+#[derive(Debug)]
+pub struct ApiError {
+    status: StatusCode,
+    message: String,
+}
+
+impl ApiError {
+    fn not_found(message: &str) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            message: message.to_string(),
+        }
+    }
+
+    fn unauthorized() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            message: "Autenticación requerida".to_string(),
+        }
+    }
+
+    fn bad_request(message: &str) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            message: message.to_string(),
+        }
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> axum::response::Response {
+        (self.status, Json(json!({ "error": self.message }))).into_response()
+    }
+}
+
+impl From<anyhow::Error> for ApiError {
+    fn from(error: anyhow::Error) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: error.to_string(),
+        }
+    }
+}
+
+impl From<reqwest::Error> for ApiError {
+    fn from(error: reqwest::Error) -> Self {
+        Self {
+            status: StatusCode::BAD_GATEWAY,
+            message: error.to_string(),
+        }
+    }
+}
+
+trait GoogleResponseExt {
+        }
+        serde_json::from_str(&text).map_err(|error| {
+            anyhow::anyhow!("{label} returned invalid JSON: {error}; body: {text}")
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use axum::{
+        body::Body,
+        http::{Method, Request, StatusCode, header},
+    };
+    use chrono::Utc;
+    use http_body_util::BodyExt;
+    use serde_json::json;
+    use tower::ServiceExt;
+
+    use super::*;
+    use crate::{
+        analysis::{AnalysisConfig, Classification},
+        auth::sign_session_id,
+        config::test_app_config,
+        policies::OrgConfigResponse,
+        storage::MemoryStorage,
+    };
+
+    struct TestApp {
+        app: axum::Router,
+        alice_cookie: String,
+        bob_cookie: String,
+    }
+
+    async fn seeded_app() -> TestApp {
+        let config = test_app_config();
+        let storage = MemoryStorage::default();
+        storage
+            .upsert_user_session(&session("alice-session", "alice@example.com"))
+            .await
+            .unwrap();
+        storage
+            .upsert_user_session(&session("bob-session", "bob@example.com"))
+            .await
+            .unwrap();
+        let alice_run = run("run-alice", "alice@example.com");
+        let bob_run = run("run-bob", "bob@example.com");
+        storage.create_analysis_run(&alice_run).await.unwrap();
+        storage.create_analysis_run(&bob_run).await.unwrap();
+        storage
+            .upsert_thread(
+                &thread("thread-alice", "run-alice"),
+                &[message("msg-a", "cliente@example.com")],
+            )
+            .await
+            .unwrap();
+        storage
+            .upsert_thread(
+                &thread("thread-bob", "run-bob"),
+                &[message("msg-b", "cliente@example.com")],
+            )
+            .await
+            .unwrap();
+
+        let alice_cookie = signed_cookie("alice-session", &config.session_secret);
+        let bob_cookie = signed_cookie("bob-session", &config.session_secret);
+        TestApp {
+            app: crate::build_app(config, Arc::new(storage)),
+            alice_cookie,
+            bob_cookie,
+        }
+    }
+
+    fn signed_cookie(session_id: &str, secret: &str) -> String {
+        format!(
+            "ghmi_session={}",
+            sign_session_id(session_id, secret).unwrap()
+        )
+    }
+
+    fn session(id: &str, email: &str) -> UserSession {
+        let now = Utc::now();
+        UserSession {
+            id: id.to_string(),
+            google_account_email: email.to_string(),
+            access_token_encrypted: "access".to_string(),
+            refresh_token_encrypted: Some("refresh".to_string()),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn run(id: &str, user_email: &str) -> AnalysisRun {
+        AnalysisRun {
+            id: id.to_string(),
+            user_email: user_email.to_string(),
+            org_id: None,
+            mailbox_id: None,
+            trigger_type: None,
+            policy_version_id: None,
+            policy_hash: None,
+            policy_snapshot: None,
+            gmail_scope_snapshot: vec![],
+            retention_expires_at: None,
+            data_minimization_mode: None,
+            config: AnalysisConfig {
+                date_from: "2026-06-01".to_string(),
+                date_to: "2026-06-02".to_string(),
+                time_from: "00:00".to_string(),
+                time_to: "23:59".to_string(),
+            run.created_at.checked_add_days(chrono::Days::new(30))
+        );
+
+        let response = test
+            .app
+            .oneshot(request(
+                Method::POST,
+                "/analysis-runs",
+                Some(&test.alice_cookie),
+                Some(json!({
+                    "date_from": "2026-06-01",
+                    "date_to": "2026-06-02",
+                    "internal_domains": ["legacy.test"]
+                })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let legacy: AnalysisRun = response_json(response).await;
+        assert!(legacy.org_id.is_none());
+        assert!(legacy.policy_snapshot.is_none());
+        assert_eq!(legacy.config.internal_domains, vec!["legacy.test"]);
+    }
+
+    #[tokio::test]
+    async fn owned_run_endpoints_require_session() {
+        let test = seeded_app().await;
+        let response = test
+            .app
+            .oneshot(request(Method::GET, "/analysis-runs/run-alice", None, None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn foreign_run_endpoints_return_not_found() {
+        let test = seeded_app().await;
+        for uri in [
+            "/analysis-runs/run-alice",
+            "/analysis-runs/run-alice/status",
+            "/analysis-runs/run-alice/metrics",
+            "/analysis-runs/run-alice/threads",
+            "/analysis-runs/run-alice/events",
+        ] {
+            let response = test
+                .app
+                .clone()
+                .oneshot(request(Method::GET, uri, Some(&test.bob_cookie), None))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn foreign_thread_read_and_manual_review_return_not_found() {
+        let test = seeded_app().await;
+        let response = test
+            .app
+            .clone()
+            .oneshot(request(
+                Method::GET,
+                "/threads/thread-alice",
+                Some(&test.bob_cookie),
+                None,
+
+codex
+Veo que la sesión se deriva de `ghmi_session` y `UserSession.google_account_email`; ese es el identificador correcto para el límite por usuario. También veo que el scheduler crea ejecuciones por código interno (`scheduler::create_scheduled_run`) y no pasa por los handlers manuales, por lo que podemos limitar solo el borde HTTP manual.
+exec
+/bin/bash -lc "sed -n '1,260p' apps/api/src/storage/mod.rs" in /home/ryagar/Documentos/DevProyects/gmail-helpdesk-inspector
+exec
+/bin/bash -lc "sed -n '380,455p' apps/api/src/scheduler/mod.rs" in /home/ryagar/Documentos/DevProyects/gmail-helpdesk-inspector
+exec
+/bin/bash -lc "rg -n \"analysis-runs|startAnalysis|createAnalysis|start\" apps/web/src -g '"'!**/.env*'"' -g '"'!**/*secret*'"'" in /home/ryagar/Documentos/DevProyects/gmail-helpdesk-inspector
+exec
+/bin/bash -lc "sed -n '1,220p' apps/web/src/api/client.ts" in /home/ryagar/Documentos/DevProyects/gmail-helpdesk-inspector
+ succeeded in 826ms:
+            policy_hash: Some(bundle.policy_version.policy_hash),
+            policy_snapshot: Some(snapshot.clone()),
+            gmail_scope_snapshot: snapshot.mailbox.gmail_scope_snapshot.clone(),
+            retention_expires_at: Some(retention_expires_at(now, &snapshot)),
+            data_minimization_mode: Some("metadata_snippets_excerpts_only".to_string()),
+            config: AnalysisConfig {
+                date_from: window.date_from.clone(),
+                date_to: window.date_to.clone(),
+                time_from: analysis.default_time_from.clone(),
+                time_to: analysis.default_time_to.clone(),
+                timezone: analysis.timezone.clone(),
+                internal_domains: analysis.internal_domains.clone(),
+                ignored_senders: analysis.ignored_senders.clone(),
+                ignored_domains: analysis.ignored_domains.clone(),
+                ignored_keywords: analysis.ignored_keywords.clone(),
+            },
+            status: AnalysisStatus::Running,
+            progress_message: "Análisis programado iniciando".to_string(),
+            processed_threads: 0,
+            total_candidate_threads: 0,
+            metrics: AnalysisMetrics::default(),
+            created_at: now,
+            completed_at: None,
+            error_message: None,
+        };
+        state.storage.create_analysis_run(&run).await?;
+        return Ok(run);
+    }
+
+    let run = AnalysisRun {
+        id: Uuid::new_v4().to_string(),
+        user_email: config.user_email.clone(),
+        org_id: None,
+        mailbox_id: None,
+        trigger_type: Some(crate::analysis::TriggerType::Scheduled),
+        policy_version_id: None,
+        policy_hash: None,
+        policy_snapshot: None,
+        gmail_scope_snapshot: vec![],
+        retention_expires_at: None,
+        data_minimization_mode: Some("metadata_snippets_excerpts_only".to_string()),
+        config: AnalysisConfig {
+            date_from: window.date_from.clone(),
+            date_to: window.date_to.clone(),
+            time_from: "00:00".to_string(),
+            time_to: "23:59".to_string(),
+            timezone: config.timezone.clone(),
+            internal_domains: config.internal_domains.clone(),
+            ignored_senders: config.ignored_senders.clone(),
+            ignored_domains: config.ignored_domains.clone(),
+            ignored_keywords: config.ignored_keywords.clone(),
+        },
+        status: AnalysisStatus::Running,
+        progress_message: "Análisis programado iniciando".to_string(),
+        processed_threads: 0,
+        total_candidate_threads: 0,
+        metrics: AnalysisMetrics::default(),
+        created_at: Utc::now(),
+        completed_at: None,
+        error_message: None,
+    };
+    state.storage.create_analysis_run(&run).await?;
+    Ok(run)
+}
+
+async fn collect_review_items_for_report(
+    state: &AppState,
+    run: &AnalysisRun,
+) -> anyhow::Result<Vec<ReviewItem>> {
+    let Some(snapshot) = &run.policy_snapshot else {
+        return collect_review_items(state, &run.id, true, true).await;
+    };
+    let content = &snapshot.schedule_report_policy.report_content;
+    if content.mode == ReportMode::MetricsOnly {
+        return Ok(Vec::new());
+    }
+
+ succeeded in 827ms:
+use std::{collections::HashMap, sync::Arc};
+
+use anyhow::anyhow;
+use async_trait::async_trait;
+use chrono::Utc;
+use tokio::sync::RwLock;
+
+use crate::{
+    analysis::{AiAuditResult, AnalysisRun, EmailMessage, EmailThread, ManualReview},
+    auth::UserSession,
+    policies::{OrgConfigBundle, PolicyVersion},
+    scheduler::model::{ScheduleConfig, ScheduleState},
+};
+
+#[async_trait]
+pub trait StorageRepository: Send + Sync {
+    async fn upsert_user_session(&self, session: &UserSession) -> anyhow::Result<()>;
+    async fn get_user_session(&self, id: &str) -> anyhow::Result<Option<UserSession>>;
+    /// Sesión más reciente del usuario que tenga refresh token; la usa el
+    /// análisis programado para operar sin cookie de sesión.
+    async fn find_latest_session_with_refresh_token(
+        &self,
+        email: &str,
+    ) -> anyhow::Result<Option<UserSession>>;
+    async fn list_schedule_configs(&self) -> anyhow::Result<Vec<ScheduleConfig>>;
+    async fn upsert_schedule_config(&self, config: &ScheduleConfig) -> anyhow::Result<()>;
+    async fn get_schedule_state(&self, user_email: &str) -> anyhow::Result<Option<ScheduleState>>;
+    async fn upsert_schedule_state(&self, state: &ScheduleState) -> anyhow::Result<()>;
+    async fn get_org_config_for_user(
+        &self,
+        user_email: &str,
+    ) -> anyhow::Result<Option<OrgConfigBundle>>;
+    async fn upsert_org_config(&self, bundle: &OrgConfigBundle) -> anyhow::Result<()>;
+    async fn get_policy_version(
+        &self,
+        org_id: &str,
+        policy_version_id: &str,
+    ) -> anyhow::Result<Option<PolicyVersion>>;
+    async fn user_is_org_member(&self, org_id: &str, user_email: &str) -> anyhow::Result<bool>;
+    async fn create_analysis_run(&self, run: &AnalysisRun) -> anyhow::Result<()>;
+    async fn update_analysis_run(&self, run: &AnalysisRun) -> anyhow::Result<()>;
+    async fn get_analysis_run(&self, id: &str) -> anyhow::Result<Option<AnalysisRun>>;
+    async fn list_analysis_runs(&self, user_email: &str) -> anyhow::Result<Vec<AnalysisRun>>;
+    async fn upsert_thread(
+        &self,
+        thread: &EmailThread,
+        messages: &[EmailMessage],
+    ) -> anyhow::Result<()>;
+    async fn list_threads(&self, run_id: &str) -> anyhow::Result<Vec<EmailThread>>;
+    async fn get_thread(&self, thread_id: &str) -> anyhow::Result<Option<EmailThread>>;
+    async fn list_messages(
+        &self,
+        run_id: &str,
+        thread_id: &str,
+    ) -> anyhow::Result<Vec<EmailMessage>>;
+    async fn add_ai_audit(
+        &self,
+        run_id: &str,
+        thread_id: &str,
+        audit: &AiAuditResult,
+    ) -> anyhow::Result<()>;
+    async fn add_manual_review(&self, run_id: &str, review: &ManualReview) -> anyhow::Result<()>;
+}
+
+#[derive(Default, Clone)]
+pub struct MemoryStorage {
+    inner: Arc<RwLock<MemoryInner>>,
+}
+
+#[derive(Default)]
+struct MemoryInner {
+    sessions: HashMap<String, UserSession>,
+    runs: HashMap<String, AnalysisRun>,
+    threads: HashMap<String, EmailThread>,
+    messages: HashMap<String, Vec<EmailMessage>>,
+    audits: HashMap<String, Vec<AiAuditResult>>,
+    reviews: Vec<ManualReview>,
+    schedule_configs: HashMap<String, ScheduleConfig>,
+    schedule_states: HashMap<String, ScheduleState>,
+    org_configs: HashMap<String, OrgConfigBundle>,
+    policy_versions: HashMap<String, PolicyVersion>,
+}
+
+#[async_trait]
+impl StorageRepository for MemoryStorage {
+    async fn upsert_user_session(&self, session: &UserSession) -> anyhow::Result<()> {
+        self.inner
+            .write()
+            .await
+            .sessions
+            .insert(session.id.clone(), session.clone());
+        Ok(())
+    }
+
+    async fn get_user_session(&self, id: &str) -> anyhow::Result<Option<UserSession>> {
+        Ok(self.inner.read().await.sessions.get(id).cloned())
+    }
+
+    async fn find_latest_session_with_refresh_token(
+        &self,
+        email: &str,
+    ) -> anyhow::Result<Option<UserSession>> {
+        Ok(self
+            .inner
+            .read()
+            .await
+            .sessions
+            .values()
+            .filter(|session| {
+                session.google_account_email == email && session.refresh_token_encrypted.is_some()
+            })
+            .max_by_key(|session| session.updated_at)
+            .cloned())
+    }
+
+    async fn list_schedule_configs(&self) -> anyhow::Result<Vec<ScheduleConfig>> {
+        Ok(self
+            .inner
+            .read()
+            .await
+            .schedule_configs
+            .values()
+            .cloned()
+            .collect())
+    }
+
+    async fn upsert_schedule_config(&self, config: &ScheduleConfig) -> anyhow::Result<()> {
+        self.inner
+            .write()
+            .await
+            .schedule_configs
+            .insert(config.user_email.clone(), config.clone());
+        Ok(())
+    }
+
+    async fn get_schedule_state(&self, user_email: &str) -> anyhow::Result<Option<ScheduleState>> {
+        Ok(self
+            .inner
+            .read()
+            .await
+            .schedule_states
+            .get(user_email)
+            .cloned())
+    }
+
+    async fn upsert_schedule_state(&self, state: &ScheduleState) -> anyhow::Result<()> {
+        self.inner
+            .write()
+            .await
+            .schedule_states
+            .insert(state.user_email.clone(), state.clone());
+        Ok(())
+    }
+
+    async fn get_org_config_for_user(
+        &self,
+        user_email: &str,
+    ) -> anyhow::Result<Option<OrgConfigBundle>> {
+        Ok(self
+            .inner
+            .read()
+            .await
+            .org_configs
+            .get(&user_email.trim().to_lowercase())
+            .cloned())
+    }
+
+    async fn upsert_org_config(&self, bundle: &OrgConfigBundle) -> anyhow::Result<()> {
+        let mut inner = self.inner.write().await;
+        inner.org_configs.insert(
+            bundle.membership.user_email.trim().to_lowercase(),
+            bundle.clone(),
+        );
+        inner.policy_versions.insert(
+            format!(
+                "{}:{}",
+                bundle.policy_version.org_id, bundle.policy_version.id
+            ),
+            bundle.policy_version.clone(),
+        );
+        Ok(())
+    }
+
+    async fn get_policy_version(
+        &self,
+        org_id: &str,
+        policy_version_id: &str,
+    ) -> anyhow::Result<Option<PolicyVersion>> {
+        Ok(self
+            .inner
+            .read()
+            .await
+            .policy_versions
+            .get(&format!("{org_id}:{policy_version_id}"))
+            .cloned())
+    }
+
+    async fn user_is_org_member(&self, org_id: &str, user_email: &str) -> anyhow::Result<bool> {
+        Ok(self.inner.read().await.org_configs.values().any(|bundle| {
+            bundle.org.id == org_id
+                && bundle
+                    .membership
+                    .user_email
+                    .eq_ignore_ascii_case(user_email)
+                && bundle.membership.status == crate::policies::MembershipStatus::Active
+        }))
+    }
+
+    async fn create_analysis_run(&self, run: &AnalysisRun) -> anyhow::Result<()> {
+        self.inner
+            .write()
+            .await
+            .runs
+            .insert(run.id.clone(), run.clone());
+        Ok(())
+    }
+
+    async fn update_analysis_run(&self, run: &AnalysisRun) -> anyhow::Result<()> {
+        self.inner
+            .write()
+            .await
+            .runs
+            .insert(run.id.clone(), run.clone());
+        Ok(())
+    }
+
+    async fn get_analysis_run(&self, id: &str) -> anyhow::Result<Option<AnalysisRun>> {
+        Ok(self.inner.read().await.runs.get(id).cloned())
+    }
+
+    async fn list_analysis_runs(&self, user_email: &str) -> anyhow::Result<Vec<AnalysisRun>> {
+        let mut runs: Vec<_> = self
+            .inner
+            .read()
+            .await
+            .runs
+            .values()
+            .filter(|run| run.user_email == user_email)
+            .cloned()
+            .collect();
+        runs.sort_by_key(|run| run.created_at);
+        runs.reverse();
+        Ok(runs)
+    }
+
+    async fn upsert_thread(
+        &self,
+        thread: &EmailThread,
+        messages: &[EmailMessage],
+    ) -> anyhow::Result<()> {
+        let mut inner = self.inner.write().await;
+        inner.threads.insert(thread.id.clone(), thread.clone());
+        inner.messages.insert(
+            format!("{}:{}", thread.analysis_run_id, thread.id),
+            messages.to_vec(),
+        );
+        Ok(())
+    }
+
+    async fn list_threads(&self, run_id: &str) -> anyhow::Result<Vec<EmailThread>> {
+
+ succeeded in 827ms:
+export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8080";
+
+const statusMessages: Record<number, string> = {
+  400: "La solicitud no es válida.",
+  401: "Necesitas iniciar sesión nuevamente.",
+  403: "No tienes permiso para realizar esta acción.",
+  404: "No se encontró el recurso solicitado.",
+  409: "La solicitud entra en conflicto con el estado actual.",
+  500: "Ocurrió un error interno.",
+  502: "El servicio de auditoría IA no respondió correctamente.",
+  503: "El servicio no está disponible temporalmente.",
+};
+
+export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    credentials: "include",
+    headers: {
+      "Content-Type": "application/json",
+      ...(options.headers ?? {}),
+    },
+    ...options,
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new Error(body.error ?? statusMessages[response.status] ?? "No se pudo completar la solicitud.");
+  }
+  if (response.status === 204) {
+    return undefined as T;
+  }
+  return response.json() as Promise<T>;
+}
+
+ succeeded in 831ms:
+apps/web/src/App.tsx:38:    queryKey: ["analysis-runs"],
+apps/web/src/App.tsx:39:    queryFn: () => api<AnalysisRun[]>("/analysis-runs"),
+apps/web/src/App.tsx:54:    queryFn: () => api<EmailThread[]>(`/analysis-runs/${selectedRunId}/threads`),
+apps/web/src/App.tsx:67:      api<AnalysisRun>("/analysis-runs", {
+apps/web/src/App.tsx:74:      queryClient.invalidateQueries({ queryKey: ["analysis-runs"] });
+apps/web/src/App.tsx:78:  const startRun = useMutation({
+apps/web/src/App.tsx:80:      api<AnalysisRun>(`/analysis-runs/${runId}/start`, {
+apps/web/src/App.tsx:83:    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["analysis-runs"] }),
+apps/web/src/App.tsx:93:      queryClient.invalidateQueries({ queryKey: ["analysis-runs"] });
+apps/web/src/App.tsx:107:      onSuccess: (run) => startRun.mutate(run.id),
+apps/web/src/App.tsx:157:            analyzing={createRun.isPending || startRun.isPending}
+apps/web/src/App.tsx:158:            onStartRun={() => selectedRun && startRun.mutate(selectedRun.id)}
+apps/web/src/App.tsx:159:            startingRun={startRun.isPending}
+apps/web/src/views/ResumenView.tsx:28:  startingRun: boolean;
+apps/web/src/views/ResumenView.tsx:74:            <StatusBanner run={run} onStart={props.onStartRun} starting={props.startingRun} onViewDetails={props.onViewDetails} />
+apps/web/src/views/ConfiguracionView.tsx:454:                <label className="checkline" style={{ cursor: "pointer", alignItems: "flex-start" }}>
+apps/web/src/views/ConfiguracionView.tsx:528:                  <label className="checkline" style={{ cursor: "pointer", fontWeight: 400, alignItems: "flex-start" }}>
+apps/web/src/styles/components.css:124:  justify-items: start;
+apps/web/src/styles/components.css:204:  justify-items: start;
+apps/web/src/styles/components.css:246:  align-content: start;
+apps/web/src/styles/components.css:438:  align-content: start;
+apps/web/src/styles/components.css:902:  align-items: flex-start;
+apps/web/src/styles/components.css:1266:  align-items: flex-start;
+apps/web/src/styles/components.css:1419:  align-items: flex-start;
+apps/web/src/styles/layout.css:154:  align-content: start;
+apps/web/src/styles/layout.css:161:  align-content: start;
+apps/web/src/styles/layout.css:168:  align-items: start;
+apps/web/src/lib/format.ts:29:  "thread starts with an internal sender; outbound-origin threads are excluded": "El hilo comenzó con un correo interno; se excluye por ser saliente.",
+apps/web/src/lib/format.ts:30:  "thread starts with an automated external sender": "El hilo comenzó con un remitente externo automático.",
+apps/web/src/lib/format.ts:92:  if (value.startsWith("AI audit failed:")) {
+apps/web/src/components/runs/StatusBanner.tsx:8:  starting: boolean;
+apps/web/src/components/runs/StatusBanner.tsx:19:export function StatusBanner({ run, onStart, starting, onViewDetails }: Props) {
+apps/web/src/components/runs/StatusBanner.tsx:49:          <button type="button" className="btn-ghost" disabled={starting} onClick={onStart}>
+
+codex
+Punto importante: el límite por sí solo no evita que dos `start` permitidos disparen dos workers sobre el mismo run, porque el handler actual marca `Running` y hace `tokio::spawn` sin comprobar estado previo. Lo incluiría como hardening cercano, aunque el 429 siga reservado solo para cuota excedida.
+exec
+/bin/bash -lc "nl -ba apps/api/src/http/mod.rs | sed -n '70,105p;756,782p;903,929p;1522,1542p;1558,1585p'" in /home/ryagar/Documentos/DevProyects/gmail-helpdesk-inspector
+exec
+/bin/bash -lc "nl -ba apps/api/src/http/internal.rs | sed -n '18,56p'" in /home/ryagar/Documentos/DevProyects/gmail-helpdesk-inspector
+exec
+/bin/bash -lc "nl -ba apps/api/src/scheduler/mod.rs | sed -n '55,86p;395,444p'" in /home/ryagar/Documentos/DevProyects/gmail-helpdesk-inspector
+exec
+/bin/bash -lc "nl -ba apps/api/src/config/mod.rs | sed -n '1,48p;236,278p'" in /home/ryagar/Documentos/DevProyects/gmail-helpdesk-inspector
+exec
+/bin/bash -lc "nl -ba apps/web/src/api/client.ts | sed -n '1,32p'" in /home/ryagar/Documentos/DevProyects/gmail-helpdesk-inspector
+ succeeded in 855ms:
+    18	}
+    19	
+    20	/// Disparo externo del análisis programado (Cloud Scheduler, crontab, curl).
+    21	/// No usa cookie de sesión: se autentica solo con el secreto compartido.
+    22	pub async fn scheduled_analysis(
+    23	    State(state): State<AppState>,
+    24	    headers: HeaderMap,
+    25	    body: Bytes,
+    26	) -> Result<Json<Vec<ScheduledOutcome>>, ApiError> {
+    27	    let Some(expected_secret) = &state.config.scheduler.cron_secret else {
+    28	        // Sin CRON_SECRET el disparo externo está apagado; no revelar la ruta.
+    29	        return Err(ApiError::not_found("recurso no encontrado"));
+    30	    };
+    31	    let provided_secret = headers
+    32	        .get(CRON_SECRET_HEADER)
+    33	        .and_then(|value| value.to_str().ok())
+    34	        .unwrap_or_default();
+    35	    if !cron_secret_matches(provided_secret, expected_secret) {
+    36	        return Err(ApiError::unauthorized());
+    37	    }
+    38	
+    39	    let request: ScheduledAnalysisRequest = if body.is_empty() {
+    40	        ScheduledAnalysisRequest::default()
+    41	    } else {
+    42	        serde_json::from_slice(&body)
+    43	            .map_err(|_| ApiError::bad_request("cuerpo inválido: se espera JSON"))?
+    44	    };
+    45	    let as_of_date = match request.as_of_date {
+    46	        Some(raw) => NaiveDate::parse_from_str(&raw, "%Y-%m-%d")
+    47	            .map_err(|_| ApiError::bad_request("as_of_date inválida; usa el formato YYYY-MM-DD"))?,
+    48	        None => Utc::now().with_timezone(&window::SCL).date_naive(),
+    49	    };
+    50	
+    51	    let mailer = ResendMailer::from_config(&state.config.report)?;
+    52	    let outcomes = scheduler::run_scheduled_analysis(&state, &mailer, as_of_date).await?;
+    53	    Ok(Json(outcomes))
+    54	}
+    55	
+    56	/// Comparar digests hace que el tiempo no dependa del punto donde difieren
+
+ succeeded in 857ms:
+    70	                .build()
+    71	                .expect("failed to build http client"),
+    72	            gmail: GmailClient::default(),
+    73	        }
+    74	    }
+    75	}
+    76	
+    77	pub fn router(state: AppState) -> Router {
+    78	    Router::new()
+    79	        .route("/health", get(health))
+    80	        .route("/auth/google/login", get(auth_google_login))
+    81	        .route("/auth/google/callback", get(auth_google_callback))
+    82	        .route("/auth/logout", post(auth_logout))
+    83	        .route("/auth/me", get(auth_me))
+    84	        .route("/me/data-summary", get(get_data_summary))
+    85	        .route("/me/org/config", get(get_org_config).put(update_org_config))
+    86	        .route(
+    87	            "/analysis-runs",
+    88	            post(create_analysis_run).get(list_analysis_runs),
+    89	        )
+    90	        .route("/analysis-runs/{id}", get(get_analysis_run))
+    91	        .route("/analysis-runs/{id}/start", post(start_analysis_run))
+    92	        .route("/analysis-runs/{id}/status", get(get_analysis_run))
+    93	        .route("/analysis-runs/{id}/events", get(analysis_events))
+    94	        .route("/analysis-runs/{id}/metrics", get(get_metrics))
+    95	        .route("/analysis-runs/{id}/threads", get(list_threads))
+    96	        .route("/threads/{thread_id}", get(get_thread))
+    97	        .route("/threads/{thread_id}/manual-review", patch(manual_review))
+    98	        .route(
+    99	            "/internal/scheduled-analysis",
+   100	            post(internal::scheduled_analysis),
+   101	        )
+   102	        .with_state(state)
+   103	}
+   104	
+   105	async fn health() -> Json<serde_json::Value> {
+   756	async fn create_analysis_run(
+   757	    State(state): State<AppState>,
+   758	    headers: HeaderMap,
+   759	    Json(request): Json<CreateAnalysisRunRequest>,
+   760	) -> Result<Json<AnalysisRun>, ApiError> {
+   761	    let session = require_session(&state, &headers).await?;
+   762	    let now = Utc::now();
+   763	    let uses_legacy_config = request.policy_version_id.is_none()
+   764	        && (!request.internal_domains.is_empty()
+   765	            || !request.ignored_senders.is_empty()
+   766	            || !request.ignored_domains.is_empty()
+   767	            || !request.ignored_keywords.is_empty()
+   768	            || request.timezone.is_some());
+   769	    let run = if uses_legacy_config {
+   770	        build_legacy_run(session.google_account_email, request, now)
+   771	    } else {
+   772	        build_policy_run(&state, &session.google_account_email, request, now).await?
+   773	    };
+   774	    state.storage.create_analysis_run(&run).await?;
+   775	    Ok(Json(run))
+   776	}
+   777	
+   778	fn build_legacy_run(
+   779	    user_email: String,
+   780	    request: CreateAnalysisRunRequest,
+   781	    now: chrono::DateTime<Utc>,
+   782	) -> AnalysisRun {
+   903	async fn start_analysis_run(
+   904	    State(state): State<AppState>,
+   905	    headers: HeaderMap,
+   906	    Path(id): Path<String>,
+   907	) -> Result<Json<AnalysisRun>, ApiError> {
+   908	    let session = require_session(&state, &headers).await?;
+   909	    let mut run = require_owned_run(&state, &id, &session).await?;
+   910	    run.status = AnalysisStatus::Running;
+   911	    run.progress_message = "Iniciando lectura de Gmail".to_string();
+   912	    state.storage.update_analysis_run(&run).await?;
+   913	
+   914	    let access_token = decrypt_token(
+   915	        &session.access_token_encrypted,
+   916	        &state.config.encryption_key,
+   917	    )?;
+   918	    let worker_state = state.clone();
+   919	    let run_id = run.id.clone();
+   920	    tokio::spawn(async move {
+   921	        if let Err(error) =
+   922	            execute_analysis(worker_state.clone(), run_id.clone(), access_token).await
+   923	        {
+   924	            mark_run_failed(&worker_state, &run_id, &error).await;
+   925	        }
+   926	    });
+   927	
+   928	    Ok(Json(run))
+   929	}
+  1522	async fn require_session(state: &AppState, headers: &HeaderMap) -> Result<UserSession, ApiError> {
+  1523	    let Some(cookie) = headers
+  1524	        .get(header::COOKIE)
+  1525	        .and_then(|v| v.to_str().ok())
+  1526	        .and_then(|cookies| extract_named_cookie(cookies, "ghmi_session"))
+  1527	    else {
+  1528	        tracing::warn!("auth rejected: ghmi_session cookie missing");
+  1529	        return Err(ApiError::unauthorized());
+  1530	    };
+  1531	
+  1532	    let Some(session_id) = verify_session_cookie(&cookie, &state.config.session_secret) else {
+  1533	        tracing::warn!("auth rejected: ghmi_session cookie signature invalid");
+  1534	        return Err(ApiError::unauthorized());
+  1535	    };
+  1536	
+  1537	    let session = state.storage.get_user_session(&session_id).await?;
+  1538	    if session.is_none() {
+  1539	        tracing::warn!(session_id, "auth rejected: session not found in storage");
+  1540	    }
+  1541	    session.ok_or(ApiError::unauthorized())
+  1542	}
+  1558	pub struct ApiError {
+  1559	    status: StatusCode,
+  1560	    message: String,
+  1561	}
+  1562	
+  1563	impl ApiError {
+  1564	    fn not_found(message: &str) -> Self {
+  1565	        Self {
+  1566	            status: StatusCode::NOT_FOUND,
+  1567	            message: message.to_string(),
+  1568	        }
+  1569	    }
+  1570	
+  1571	    fn unauthorized() -> Self {
+  1572	        Self {
+  1573	            status: StatusCode::UNAUTHORIZED,
+  1574	            message: "Autenticación requerida".to_string(),
+  1575	        }
+  1576	    }
+  1577	
+  1578	    fn bad_request(message: &str) -> Self {
+  1579	        Self {
+  1580	            status: StatusCode::BAD_REQUEST,
+  1581	            message: message.to_string(),
+  1582	        }
+  1583	    }
+  1584	}
+  1585	
+
+ succeeded in 841ms:
+    55	pub async fn run_scheduled_analysis(
+    56	    state: &AppState,
+    57	    mailer: &dyn ReportMailer,
+    58	    as_of_date: NaiveDate,
+    59	) -> anyhow::Result<Vec<ScheduledOutcome>> {
+    60	    let Some(window) = window::analysis_window_for(as_of_date) else {
+    61	        return Ok(vec![ScheduledOutcome::Skipped {
+    62	            user_email: None,
+    63	            reason: "fin de semana: sin ventana de análisis".to_string(),
+    64	        }]);
+    65	    };
+    66	    let configs = load_or_seed_configs(state).await?;
+    67	    run_configs_for_window(state, mailer, configs, &window).await
+    68	}
+    69	
+    70	pub async fn run_due_scheduled_analysis(
+    71	    state: &AppState,
+    72	    mailer: &dyn ReportMailer,
+    73	    now_utc: DateTime<Utc>,
+    74	) -> anyhow::Result<Vec<ScheduledOutcome>> {
+    75	    let configs = load_or_seed_configs(state).await?;
+    76	    if configs.is_empty() {
+    77	        return Ok(vec![ScheduledOutcome::Skipped {
+    78	            user_email: None,
+    79	            reason:
+    80	                "sin configuración programada (scheduleConfigs vacío y sin SCHEDULE_USER_EMAIL)"
+    81	                    .to_string(),
+    82	        }]);
+    83	    }
+    84	    let mut outcomes = Vec::new();
+    85	    for config in configs {
+    86	        if !config.enabled {
+   395	        .get_org_config_for_user(&config.user_email)
+   396	        .await?
+   397	    {
+   398	        if !bundle.draft.schedule_report_policy.scheduler_enabled {
+   399	            return Err(anyhow::anyhow!(
+   400	                "scheduler deshabilitado en la política de organización"
+   401	            ));
+   402	        }
+   403	        let current_setup = setup_state(&bundle.draft);
+   404	        if !current_setup.ready_for_analysis {
+   405	            return Err(anyhow::anyhow!(
+   406	                "configuración incompleta para análisis programado: {}",
+   407	                current_setup.missing.join(", ")
+   408	            ));
+   409	        }
+   410	        let snapshot = bundle.policy_version.snapshot.clone();
+   411	        let analysis = &snapshot.analysis_policy;
+   412	        let now = Utc::now();
+   413	        let run = AnalysisRun {
+   414	            id: Uuid::new_v4().to_string(),
+   415	            user_email: config.user_email.clone(),
+   416	            org_id: Some(bundle.org.id),
+   417	            mailbox_id: Some(snapshot.mailbox.id.clone()),
+   418	            trigger_type: Some(crate::analysis::TriggerType::Scheduled),
+   419	            policy_version_id: Some(bundle.policy_version.id),
+   420	            policy_hash: Some(bundle.policy_version.policy_hash),
+   421	            policy_snapshot: Some(snapshot.clone()),
+   422	            gmail_scope_snapshot: snapshot.mailbox.gmail_scope_snapshot.clone(),
+   423	            retention_expires_at: Some(retention_expires_at(now, &snapshot)),
+   424	            data_minimization_mode: Some("metadata_snippets_excerpts_only".to_string()),
+   425	            config: AnalysisConfig {
+   426	                date_from: window.date_from.clone(),
+   427	                date_to: window.date_to.clone(),
+   428	                time_from: analysis.default_time_from.clone(),
+   429	                time_to: analysis.default_time_to.clone(),
+   430	                timezone: analysis.timezone.clone(),
+   431	                internal_domains: analysis.internal_domains.clone(),
+   432	                ignored_senders: analysis.ignored_senders.clone(),
+   433	                ignored_domains: analysis.ignored_domains.clone(),
+   434	                ignored_keywords: analysis.ignored_keywords.clone(),
+   435	            },
+   436	            status: AnalysisStatus::Running,
+   437	            progress_message: "Análisis programado iniciando".to_string(),
+   438	            processed_threads: 0,
+   439	            total_candidate_threads: 0,
+   440	            metrics: AnalysisMetrics::default(),
+   441	            created_at: now,
+   442	            completed_at: None,
+   443	            error_message: None,
+   444	        };
+
+ succeeded in 851ms:
+     1	export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8080";
+     2	
+     3	const statusMessages: Record<number, string> = {
+     4	  400: "La solicitud no es válida.",
+     5	  401: "Necesitas iniciar sesión nuevamente.",
+     6	  403: "No tienes permiso para realizar esta acción.",
+     7	  404: "No se encontró el recurso solicitado.",
+     8	  409: "La solicitud entra en conflicto con el estado actual.",
+     9	  500: "Ocurrió un error interno.",
+    10	  502: "El servicio de auditoría IA no respondió correctamente.",
+    11	  503: "El servicio no está disponible temporalmente.",
+    12	};
+    13	
+    14	export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
+    15	  const response = await fetch(`${API_BASE_URL}${path}`, {
+    16	    credentials: "include",
+    17	    headers: {
+    18	      "Content-Type": "application/json",
+    19	      ...(options.headers ?? {}),
+    20	    },
+    21	    ...options,
+    22	  });
+    23	  if (!response.ok) {
+    24	    const body = await response.json().catch(() => ({}));
+    25	    throw new Error(body.error ?? statusMessages[response.status] ?? "No se pudo completar la solicitud.");
+    26	  }
+    27	  if (response.status === 204) {
+    28	    return undefined as T;
+    29	  }
+    30	  return response.json() as Promise<T>;
+    31	}
+
+ succeeded in 851ms:
+     1	use std::env;
+     2	
+     3	use anyhow::{Context, anyhow};
+     4	use serde::Deserialize;
+     5	
+     6	const DEFAULT_ENCRYPTION_KEY: &str = "development-only-change-me-32-bytes";
+     7	const DEFAULT_SESSION_SECRET: &str = "development-only-session-secret";
+     8	
+     9	#[derive(Debug, Clone)]
+    10	pub struct AppConfig {
+    11	    pub api_port: u16,
+    12	    pub web_base_url: String,
+    13	    pub api_base_url: String,
+    14	    pub cookie_secure: bool,
+    15	    pub cookie_same_site: String,
+    16	    pub app_storage: String,
+    17	    pub encryption_key: String,
+    18	    pub session_secret: String,
+    19	    pub google: GoogleConfig,
+    20	    pub firestore: FirestoreConfig,
+    21	    pub ai: AiConfig,
+    22	    pub scheduler: SchedulerConfig,
+    23	    pub report: ReportConfig,
+    24	}
+    25	
+    26	#[derive(Debug, Clone)]
+    27	pub struct GoogleConfig {
+    28	    pub client_id: String,
+    29	    pub client_secret: String,
+    30	    pub redirect_url: String,
+    31	    pub gmail_max_threads: u32,
+    32	}
+    33	
+    34	#[derive(Debug, Clone)]
+    35	pub struct FirestoreConfig {
+    36	    pub project_id: String,
+    37	    pub database_id: String,
+    38	    pub bearer_token: Option<String>,
+    39	    pub service_account_path: Option<String>,
+    40	}
+    41	
+    42	#[derive(Debug, Clone)]
+    43	pub struct AiConfig {
+    44	    pub worker_url: String,
+    45	    pub worker_audience: Option<String>,
+    46	    pub apply_confidence_threshold: f64,
+    47	}
+    48	
+   236	        .map(|value| split_list(&value))
+   237	        .unwrap_or_default()
+   238	}
+   239	
+   240	fn split_list(value: &str) -> Vec<String> {
+   241	    value
+   242	        .split(',')
+   243	        .map(str::trim)
+   244	        .filter(|item| !item.is_empty())
+   245	        .map(ToOwned::to_owned)
+   246	        .collect()
+   247	}
+   248	
+   249	/// Config base para tests unitarios; cada test ajusta los campos que necesita.
+   250	#[cfg(test)]
+   251	pub(crate) fn test_app_config() -> AppConfig {
+   252	    AppConfig {
+   253	        api_port: 0,
+   254	        web_base_url: "http://localhost:5173".to_string(),
+   255	        api_base_url: "http://localhost:8080".to_string(),
+   256	        cookie_secure: false,
+   257	        cookie_same_site: "Lax".to_string(),
+   258	        app_storage: "memory".to_string(),
+   259	        encryption_key: "test-encryption-key-32-bytes-long!!".to_string(),
+   260	        session_secret: "test-session-secret".to_string(),
+   261	        google: GoogleConfig {
+   262	            client_id: String::new(),
+   263	            client_secret: String::new(),
+   264	            redirect_url: String::new(),
+   265	            gmail_max_threads: 50,
+   266	        },
+   267	        firestore: FirestoreConfig {
+   268	            project_id: String::new(),
+   269	            database_id: String::new(),
+   270	            bearer_token: None,
+   271	            service_account_path: None,
+   272	        },
+   273	        ai: AiConfig {
+   274	            worker_url: String::new(),
+   275	            worker_audience: None,
+   276	            apply_confidence_threshold: 0.92,
+   277	        },
+   278	        scheduler: SchedulerConfig {
+
+codex
+Modo plan, sin cambios. No leí `.env` ni archivos de secrets.
+
+**Recomendación**
+Implementar rate limiting explícito en los handlers manuales, no como middleware global. El scheduler entra por `/internal/scheduled-analysis` y por `scheduler::run_scheduled_analysis`, así que limitar solo `POST /analysis-runs` y `POST /analysis-runs/{id}/start` evita bloquearlo.
+
+Usaría un token bucket in-memory por instancia como fase 1, con llave:
+
+```text
+lowercase(user_session.google_account_email) + action
+```
+
+Acciones:
+
+```text
+manual_create_analysis_run
+manual_start_analysis_run
+```
+
+Defaults beta seguros:
+
+```text
+RATE_LIMIT_ENABLED=true
+RATE_LIMIT_MANUAL_CREATE_BURST=3
+RATE_LIMIT_MANUAL_CREATE_REFILL_SECONDS=1200
+RATE_LIMIT_MANUAL_START_BURST=3
+RATE_LIMIT_MANUAL_START_REFILL_SECONDS=1200
+```
+
+Eso permite 3 intentos rápidos por usuario y luego 1 cada 20 min por acción. Scheduler no consume cuota.
+
+**Plan Incremental**
+1. Crear `apps/api/src/rate_limit.rs`
+   - `RateLimiter`
+   - `RateLimitAction`
+   - `RateLimitDecision`
+   - token bucket con `Instant`
+   - pruning de usuarios inactivos para evitar crecimiento infinito
+   - sin dependencias nuevas
+
+2. Extender config en [apps/api/src/config/mod.rs](/home/ryagar/Documentos/DevProyects/gmail-helpdesk-inspector/apps/api/src/config/mod.rs:9)
+   - `AppConfig.rate_limit: RateLimitConfig`
+   - env vars arriba
+   - validación: burst > 0, refill_seconds > 0
+   - `test_app_config()` configurable para tests
+
+3. Extender `AppState` en [apps/api/src/http/mod.rs](/home/ryagar/Documentos/DevProyects/gmail-helpdesk-inspector/apps/api/src/http/mod.rs:50)
+   - agregar `rate_limiter: Arc<RateLimiter>`
+   - inicializar desde config
+
+4. Agregar `ApiError::too_many_requests(retry_after)` en [apps/api/src/http/mod.rs](/home/ryagar/Documentos/DevProyects/gmail-helpdesk-inspector/apps/api/src/http/mod.rs:1558)
+   - status `429`
+   - body: `{ "error": "Demasiadas solicitudes. Intenta nuevamente más tarde." }`
+   - header `Retry-After`
+
+5. Aplicar límite en:
+   - [create_analysis_run](/home/ryagar/Documentos/DevProyects/gmail-helpdesk-inspector/apps/api/src/http/mod.rs:756): justo después de `require_session`, antes de crear/storage.
+   - [start_analysis_run](/home/ryagar/Documentos/DevProyects/gmail-helpdesk-inspector/apps/api/src/http/mod.rs:903): justo después de `require_session`, antes de mutar el run o hacer `tokio::spawn`.
+
+6. Hardening recomendado para `start`
+   - Hoy `start_analysis_run` puede disparar workers repetidos sobre el mismo run si entra dos veces dentro del burst.
+   - Agregaría guardia: solo `Pending` puede pasar a `Running`; `Running`/`Completed`/`Failed` deberían devolver `409` o el estado actual. El `429` queda exclusivamente para cuota.
+
+7. Web opcional
+   - Agregar mensaje `429` en [apps/web/src/api/client.ts](/home/ryagar/Documentos/DevProyects/gmail-helpdesk-inspector/apps/web/src/api/client.ts:3).
+
+**Tests**
+Agregar tests unitarios del limiter:
+- permite hasta burst.
+- siguiente request devuelve `429` con `Retry-After`.
+- refill vuelve a permitir.
+- usuarios distintos no comparten cuota.
+- acciones distintas no comparten cuota.
+- pruning elimina buckets viejos.
+
+Agregar tests HTTP en [apps/api/src/http/mod.rs](/home/ryagar/Documentos/DevProyects/gmail-helpdesk-inspector/apps/api/src/http/mod.rs:1620):
+- `POST /analysis-runs` excedido devuelve `429`.
+- `POST /analysis-runs/{id}/start` excedido devuelve `429`.
+- `alice` limitada no limita a `bob`.
+- requests sin sesión siguen devolviendo `401`, no `429`.
+- scheduler en [apps/api/src/http/internal.rs](/home/ryagar/Documentos/DevProyects/gmail-helpdesk-inspector/apps/api/src/http/internal.rs:22) no queda afectado aunque la cuota manual esté agotada.
+
+**Riesgos**
+El mayor riesgo es despliegue multi-instancia: un limiter in-memory es por proceso, se resetea al reiniciar y se puede esquivar si Cloud Run balancea entre instancias. Para beta con bajo tráfico o `max_instances=1`, sirve. Si esto ya protege costo real en producción multi-instancia, iría directo a fase 2 con Firestore/Redis distribuido.
+
+Otro riesgo: limitar dentro del handler ocurre después de parsear JSON, así que no protege abuso de bodies enormes. Si eso preocupa, se debe sumar `DefaultBodyLimit`/límite de payload separado.
+
+Paths principales: `apps/api/src/rate_limit.rs` nuevo, `apps/api/src/config/mod.rs`, `apps/api/src/http/mod.rs`, opcional `apps/web/src/api/client.ts`.
+tokens used
+73.900

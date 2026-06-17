@@ -6,6 +6,7 @@ const statusMessages: Record<number, string> = {
   403: "No tienes permiso para realizar esta acción.",
   404: "No se encontró el recurso solicitado.",
   409: "La solicitud entra en conflicto con el estado actual.",
+  429: "Demasiadas solicitudes de análisis. Intenta nuevamente más tarde o deja que el análisis automático programado continúe sin consumir tu cuota manual.",
   500: "Ocurrió un error interno.",
   502: "El servicio de auditoría IA no respondió correctamente.",
   503: "El servicio no está disponible temporalmente.",

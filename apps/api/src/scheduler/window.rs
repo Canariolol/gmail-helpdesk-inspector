@@ -1,9 +1,9 @@
-use chrono::{DateTime, Datelike, Days, NaiveDate, NaiveTime, Weekday};
+use chrono::{DateTime, Datelike, Days, NaiveDate, NaiveTime, Utc, Weekday};
 use chrono_tz::Tz;
 
+#[cfg(test)]
 pub const SCL: Tz = chrono_tz::America::Santiago;
-
-const FIRE_HOUR: u32 = 8;
+pub const FIRE_HOUR: u32 = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnalysisWindow {
@@ -29,9 +29,45 @@ pub fn analysis_window_for(today: NaiveDate) -> Option<AnalysisWindow> {
 }
 
 /// True si el loop interno debe intentar correr: día hábil y hora local >= 08:00.
+#[cfg(test)]
 pub fn is_fire_time(now_scl: DateTime<Tz>) -> bool {
+    is_fire_time_local(now_scl)
+}
+
+pub fn due_window_for(now_utc: DateTime<Utc>, timezone: &str) -> Option<AnalysisWindow> {
+    let tz = parse_timezone(timezone)?;
+    let local_now = now_utc.with_timezone(&tz);
+    if !is_fire_time_local(local_now) {
+        return None;
+    }
+    analysis_window_for(local_now.date_naive())
+}
+
+pub fn next_fire_time_label(now_utc: DateTime<Utc>, timezone: &str) -> Option<String> {
+    let tz = parse_timezone(timezone)?;
+    let mut day = now_utc.with_timezone(&tz).date_naive();
     let fire_at = NaiveTime::from_hms_opt(FIRE_HOUR, 0, 0).expect("valid fire time");
-    !matches!(now_scl.weekday(), Weekday::Sat | Weekday::Sun) && now_scl.time() >= fire_at
+    for _ in 0..10 {
+        if !matches!(day.weekday(), Weekday::Sat | Weekday::Sun) {
+            let local_fire = day.and_time(fire_at).and_local_timezone(tz).single();
+            if let Some(local_fire) = local_fire
+                && local_fire.with_timezone(&Utc) > now_utc
+            {
+                return Some(local_fire.to_rfc3339());
+            }
+        }
+        day = day.checked_add_days(Days::new(1))?;
+    }
+    None
+}
+
+fn is_fire_time_local(now_local: DateTime<Tz>) -> bool {
+    let fire_at = NaiveTime::from_hms_opt(FIRE_HOUR, 0, 0).expect("valid fire time");
+    !matches!(now_local.weekday(), Weekday::Sat | Weekday::Sun) && now_local.time() >= fire_at
+}
+
+fn parse_timezone(timezone: &str) -> Option<Tz> {
+    timezone.parse::<Tz>().ok()
 }
 
 #[cfg(test)]
@@ -106,6 +142,25 @@ mod tests {
         // Sábado 2026-06-13 a mediodía local.
         let saturday = Utc.with_ymd_and_hms(2026, 6, 13, 16, 0, 0).unwrap();
         assert!(!is_fire_time(saturday.with_timezone(&SCL)));
+    }
+
+    #[test]
+    fn due_window_uses_configured_timezone() {
+        // 08:00 Europe/Madrid on Monday 2026-06-15 is 06:00 UTC.
+        let madrid_fire = Utc.with_ymd_and_hms(2026, 6, 15, 6, 0, 0).unwrap();
+        assert_eq!(
+            due_window_for(madrid_fire, "Europe/Madrid"),
+            Some(window("2026-06-12", "2026-06-14"))
+        );
+        // At that same instant it is not yet 08:00 in New York.
+        assert_eq!(due_window_for(madrid_fire, "America/New_York"), None);
+    }
+
+    #[test]
+    fn next_fire_time_label_skips_weekends() {
+        let friday_after_fire = Utc.with_ymd_and_hms(2026, 6, 12, 14, 0, 0).unwrap();
+        let next = next_fire_time_label(friday_after_fire, "America/Santiago").unwrap();
+        assert!(next.starts_with("2026-06-15T08:00:00"));
     }
 
     #[test]

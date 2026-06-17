@@ -3,7 +3,7 @@ pub mod window;
 
 use std::time::Duration;
 
-use chrono::{NaiveDate, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -14,6 +14,7 @@ use crate::{
         refresh::{RefreshError, refresh_google_access_token},
     },
     http::{AppState, execute_analysis, mark_run_failed},
+    policies::{ReportMode, retention_expires_at, setup_state},
     report::{
         ReportMailer, ResendMailer,
         template::{ReviewItem, build_failure_email, build_report_email},
@@ -63,6 +64,15 @@ pub async fn run_scheduled_analysis(
         }]);
     };
     let configs = load_or_seed_configs(state).await?;
+    run_configs_for_window(state, mailer, configs, &window).await
+}
+
+pub async fn run_due_scheduled_analysis(
+    state: &AppState,
+    mailer: &dyn ReportMailer,
+    now_utc: DateTime<Utc>,
+) -> anyhow::Result<Vec<ScheduledOutcome>> {
+    let configs = load_or_seed_configs(state).await?;
     if configs.is_empty() {
         return Ok(vec![ScheduledOutcome::Skipped {
             user_email: None,
@@ -80,7 +90,42 @@ pub async fn run_scheduled_analysis(
             });
             continue;
         }
+        let Some(window) = window::due_window_for(now_utc, &config.timezone) else {
+            outcomes.push(ScheduledOutcome::Skipped {
+                user_email: Some(config.user_email),
+                reason: "fuera de horario programado".to_string(),
+            });
+            continue;
+        };
         outcomes.push(run_for_user(state, mailer, &config, &window).await);
+    }
+    Ok(outcomes)
+}
+
+async fn run_configs_for_window(
+    state: &AppState,
+    mailer: &dyn ReportMailer,
+    configs: Vec<ScheduleConfig>,
+    window: &AnalysisWindow,
+) -> anyhow::Result<Vec<ScheduledOutcome>> {
+    if configs.is_empty() {
+        return Ok(vec![ScheduledOutcome::Skipped {
+            user_email: None,
+            reason:
+                "sin configuración programada (scheduleConfigs vacío y sin SCHEDULE_USER_EMAIL)"
+                    .to_string(),
+        }]);
+    }
+    let mut outcomes = Vec::new();
+    for config in configs {
+        if !config.enabled {
+            outcomes.push(ScheduledOutcome::Skipped {
+                user_email: Some(config.user_email),
+                reason: "configuración deshabilitada".to_string(),
+            });
+            continue;
+        }
+        outcomes.push(run_for_user(state, mailer, &config, window).await);
     }
     Ok(outcomes)
 }
@@ -100,27 +145,23 @@ pub fn spawn(state: AppState) -> tokio::task::JoinHandle<()> {
                 return;
             }
         };
-        tracing::info!("scheduler interno activo (lunes a viernes 08:00 America/Santiago)");
-        let mut last_attempt_date: Option<NaiveDate> = None;
+        tracing::info!("scheduler interno activo (preset weekdays_08_local por timezone)");
         loop {
             tokio::time::sleep(POLL_INTERVAL).await;
-            let now_scl = Utc::now().with_timezone(&window::SCL);
-            if !window::is_fire_time(now_scl) {
-                continue;
-            }
-            let today = now_scl.date_naive();
-            if last_attempt_date == Some(today) {
-                continue;
-            }
-            match run_scheduled_analysis(&state, &mailer, today).await {
+            match run_due_scheduled_analysis(&state, &mailer, Utc::now()).await {
                 Ok(outcomes) => {
-                    let summary = serde_json::to_string(&outcomes).unwrap_or_default();
-                    tracing::info!(%summary, "tick del análisis programado completado");
-                    last_attempt_date = Some(today);
+                    if outcomes.iter().any(|outcome| {
+                        !matches!(
+                            outcome,
+                            ScheduledOutcome::Skipped { reason, .. }
+                                if reason == "fuera de horario programado"
+                        )
+                    }) {
+                        let summary = serde_json::to_string(&outcomes).unwrap_or_default();
+                        tracing::info!(%summary, "tick del análisis programado completado");
+                    }
                 }
                 Err(error) => {
-                    // Error duro antes de tocar correo/estado (p. ej. Firestore
-                    // caído): no memorizar el día para reintentar al minuto.
                     tracing::error!(?error, "tick del análisis programado falló");
                 }
             }
@@ -267,7 +308,7 @@ async fn analyze_and_report(
         .get_analysis_run(&run.id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("el run programado desapareció del storage"))?;
-    let review_items = collect_review_items(state, &run.id).await?;
+    let review_items = collect_review_items_for_report(state, &run).await?;
     let email = build_report_email(&run, &review_items, &state.config.web_base_url);
 
     let recipients = recipients_for(state, config);
@@ -349,6 +390,62 @@ async fn create_scheduled_run(
     config: &ScheduleConfig,
     window: &AnalysisWindow,
 ) -> anyhow::Result<AnalysisRun> {
+    if let Some(bundle) = state
+        .storage
+        .get_org_config_for_user(&config.user_email)
+        .await?
+    {
+        if !bundle.draft.schedule_report_policy.scheduler_enabled {
+            return Err(anyhow::anyhow!(
+                "scheduler deshabilitado en la política de organización"
+            ));
+        }
+        let current_setup = setup_state(&bundle.draft);
+        if !current_setup.ready_for_analysis {
+            return Err(anyhow::anyhow!(
+                "configuración incompleta para análisis programado: {}",
+                current_setup.missing.join(", ")
+            ));
+        }
+        let snapshot = bundle.policy_version.snapshot.clone();
+        let analysis = &snapshot.analysis_policy;
+        let now = Utc::now();
+        let run = AnalysisRun {
+            id: Uuid::new_v4().to_string(),
+            user_email: config.user_email.clone(),
+            org_id: Some(bundle.org.id),
+            mailbox_id: Some(snapshot.mailbox.id.clone()),
+            trigger_type: Some(crate::analysis::TriggerType::Scheduled),
+            policy_version_id: Some(bundle.policy_version.id),
+            policy_hash: Some(bundle.policy_version.policy_hash),
+            policy_snapshot: Some(snapshot.clone()),
+            gmail_scope_snapshot: snapshot.mailbox.gmail_scope_snapshot.clone(),
+            retention_expires_at: Some(retention_expires_at(now, &snapshot)),
+            data_minimization_mode: Some("metadata_snippets_excerpts_only".to_string()),
+            config: AnalysisConfig {
+                date_from: window.date_from.clone(),
+                date_to: window.date_to.clone(),
+                time_from: analysis.default_time_from.clone(),
+                time_to: analysis.default_time_to.clone(),
+                timezone: analysis.timezone.clone(),
+                internal_domains: analysis.internal_domains.clone(),
+                ignored_senders: analysis.ignored_senders.clone(),
+                ignored_domains: analysis.ignored_domains.clone(),
+                ignored_keywords: analysis.ignored_keywords.clone(),
+            },
+            status: AnalysisStatus::Running,
+            progress_message: "Análisis programado iniciando".to_string(),
+            processed_threads: 0,
+            total_candidate_threads: 0,
+            metrics: AnalysisMetrics::default(),
+            created_at: now,
+            completed_at: None,
+            error_message: None,
+        };
+        state.storage.create_analysis_run(&run).await?;
+        return Ok(run);
+    }
+
     let run = AnalysisRun {
         id: Uuid::new_v4().to_string(),
         user_email: config.user_email.clone(),
@@ -385,7 +482,32 @@ async fn create_scheduled_run(
     Ok(run)
 }
 
-async fn collect_review_items(state: &AppState, run_id: &str) -> anyhow::Result<Vec<ReviewItem>> {
+async fn collect_review_items_for_report(
+    state: &AppState,
+    run: &AnalysisRun,
+) -> anyhow::Result<Vec<ReviewItem>> {
+    let Some(snapshot) = &run.policy_snapshot else {
+        return collect_review_items(state, &run.id, true, true).await;
+    };
+    let content = &snapshot.schedule_report_policy.report_content;
+    if content.mode == ReportMode::MetricsOnly {
+        return Ok(Vec::new());
+    }
+    collect_review_items(
+        state,
+        &run.id,
+        content.include_subjects,
+        content.include_senders,
+    )
+    .await
+}
+
+async fn collect_review_items(
+    state: &AppState,
+    run_id: &str,
+    include_subjects: bool,
+    include_senders: bool,
+) -> anyhow::Result<Vec<ReviewItem>> {
     let threads = state.storage.list_threads(run_id).await?;
     let mut items = Vec::new();
     for thread in threads
@@ -399,8 +521,16 @@ async fn collect_review_items(state: &AppState, run_id: &str) -> anyhow::Result<
             .map(|message| message.from_email.clone())
             .unwrap_or_default();
         items.push(ReviewItem {
-            subject: thread.subject,
-            from_email,
+            subject: if include_subjects {
+                thread.subject
+            } else {
+                "Asunto oculto por política de reporte".to_string()
+            },
+            from_email: if include_senders {
+                from_email
+            } else {
+                "Remitente oculto por política de reporte".to_string()
+            },
             reason: thread
                 .reasons
                 .last()
@@ -498,6 +628,7 @@ mod tests {
     use crate::{
         auth::UserSession,
         config::{AppConfig, test_app_config},
+        policies::{ReportMode, policy_version_from_draft, provision_default_config},
         storage::{MemoryStorage, StorageRepository},
     };
 
@@ -567,6 +698,55 @@ mod tests {
 
     fn date(value: &str) -> NaiveDate {
         NaiveDate::parse_from_str(value, "%Y-%m-%d").unwrap()
+    }
+
+    fn thread(id: &str, run_id: &str) -> crate::analysis::EmailThread {
+        let now = Utc::now();
+        crate::analysis::EmailThread {
+            id: id.to_string(),
+            analysis_run_id: run_id.to_string(),
+            gmail_thread_id: format!("gmail-{id}"),
+            subject: "Ayuda sensible".to_string(),
+            normalized_subject: "ayuda sensible".to_string(),
+            classification: crate::analysis::Classification::Ambiguous,
+            classification_source: crate::analysis::ClassificationSource::Rules,
+            classification_confidence: 0.5,
+            is_valid_client_request: true,
+            is_answered: false,
+            first_message_at: Some(now),
+            first_client_message_id: Some("msg-a".to_string()),
+            first_internal_reply_message_id: None,
+            last_internal_message_id: None,
+            first_client_message_at: Some(now),
+            first_internal_reply_at: None,
+            last_internal_message_at: None,
+            response_time_minutes: None,
+            resolution_time_minutes: None,
+            manual_review_required: true,
+            manual_override_applied: false,
+            reasons: vec!["Confianza baja".to_string()],
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn message(id: &str, from: &str) -> crate::analysis::EmailMessage {
+        crate::analysis::EmailMessage {
+            id: id.to_string(),
+            gmail_message_id: format!("gmail-{id}"),
+            from_email: from.to_string(),
+            from_name: None,
+            to_emails: vec!["help@x.cl".to_string()],
+            cc_emails: vec![],
+            date: Utc::now(),
+            subject: "Ayuda sensible".to_string(),
+            snippet: "Necesito ayuda".to_string(),
+            headers: serde_json::json!({}),
+            is_internal: false,
+            is_external: true,
+            is_automated: false,
+            body_text: None,
+        }
     }
 
     fn skip_reason(outcomes: &[ScheduledOutcome]) -> &str {
@@ -697,6 +877,157 @@ mod tests {
             .unwrap();
         // Sin sesión disponible el reintento falla, pero ya no se salta.
         assert!(matches!(outcomes[0], ScheduledOutcome::Failed { .. }));
+    }
+
+    #[tokio::test]
+    async fn scheduled_policy_run_uses_current_snapshot() {
+        let (state, storage) = app_state(None);
+        let mut bundle = provision_default_config("a@x.cl", Utc::now());
+        bundle.draft.analysis_policy.valid_request_criteria =
+            vec!["Clientes externos solicitan soporte".to_string()];
+        bundle.draft.analysis_policy.default_time_from = "08:30".to_string();
+        bundle.draft.analysis_policy.default_time_to = "18:15".to_string();
+        bundle.draft.schedule_report_policy.scheduler_enabled = true;
+        bundle.draft.schedule_report_policy.report_recipients = vec!["ops@x.cl".to_string()];
+        bundle.policy_version =
+            policy_version_from_draft(&bundle.mailbox, &bundle.draft, 2, "a@x.cl", Utc::now());
+        storage.upsert_org_config(&bundle).await.unwrap();
+
+        let run = create_scheduled_run(
+            &state,
+            &schedule_config("a@x.cl"),
+            &AnalysisWindow {
+                date_from: "2026-06-11".to_string(),
+                date_to: "2026-06-11".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(run.org_id, Some(bundle.org.id));
+        assert_eq!(run.policy_version_id, Some(bundle.policy_version.id));
+        assert!(run.policy_snapshot.is_some());
+        assert_eq!(run.config.time_from, "08:30");
+        assert_eq!(run.config.time_to, "18:15");
+        assert_eq!(run.config.internal_domains, vec!["x.cl"]);
+        assert!(run.retention_expires_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn scheduled_policy_report_respects_metrics_only_mode() {
+        let (state, storage) = app_state(None);
+        let mut run = AnalysisRun {
+            id: "run-policy".to_string(),
+            user_email: "a@x.cl".to_string(),
+            org_id: None,
+            mailbox_id: None,
+            trigger_type: Some(crate::analysis::TriggerType::Scheduled),
+            policy_version_id: None,
+            policy_hash: None,
+            policy_snapshot: None,
+            gmail_scope_snapshot: vec![],
+            retention_expires_at: None,
+            data_minimization_mode: None,
+            config: AnalysisConfig {
+                date_from: "2026-06-11".to_string(),
+                date_to: "2026-06-11".to_string(),
+                time_from: "00:00".to_string(),
+                time_to: "23:59".to_string(),
+                timezone: "America/Santiago".to_string(),
+                internal_domains: vec!["x.cl".to_string()],
+                ignored_senders: vec![],
+                ignored_domains: vec![],
+                ignored_keywords: vec![],
+            },
+            status: AnalysisStatus::Completed,
+            progress_message: String::new(),
+            processed_threads: 1,
+            total_candidate_threads: 1,
+            metrics: AnalysisMetrics::default(),
+            created_at: Utc::now(),
+            completed_at: Some(Utc::now()),
+            error_message: None,
+        };
+        let bundle = provision_default_config("a@x.cl", Utc::now());
+        run.policy_snapshot = Some(bundle.policy_version.snapshot);
+        storage.create_analysis_run(&run).await.unwrap();
+        storage
+            .upsert_thread(
+                &thread("thread-policy", "run-policy"),
+                &[message("msg-policy", "cliente@example.com")],
+            )
+            .await
+            .unwrap();
+
+        let items = collect_review_items_for_report(&state, &run).await.unwrap();
+        assert!(items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn scheduled_policy_report_redacts_subjects_and_senders_when_disabled() {
+        let (state, storage) = app_state(None);
+        let mut bundle = provision_default_config("a@x.cl", Utc::now());
+        bundle.draft.schedule_report_policy.report_content.mode = ReportMode::MetricsAndReviewItems;
+        bundle
+            .draft
+            .schedule_report_policy
+            .report_content
+            .include_subjects = false;
+        bundle
+            .draft
+            .schedule_report_policy
+            .report_content
+            .include_senders = false;
+        bundle.policy_version =
+            policy_version_from_draft(&bundle.mailbox, &bundle.draft, 2, "a@x.cl", Utc::now());
+        let run = AnalysisRun {
+            id: "run-redacted".to_string(),
+            user_email: "a@x.cl".to_string(),
+            org_id: Some(bundle.org.id.clone()),
+            mailbox_id: Some(bundle.mailbox.id.clone()),
+            trigger_type: Some(crate::analysis::TriggerType::Scheduled),
+            policy_version_id: Some(bundle.policy_version.id.clone()),
+            policy_hash: Some(bundle.policy_version.policy_hash.clone()),
+            policy_snapshot: Some(bundle.policy_version.snapshot.clone()),
+            gmail_scope_snapshot: bundle.mailbox.gmail_scope_snapshot.clone(),
+            retention_expires_at: None,
+            data_minimization_mode: None,
+            config: AnalysisConfig {
+                date_from: "2026-06-11".to_string(),
+                date_to: "2026-06-11".to_string(),
+                time_from: "00:00".to_string(),
+                time_to: "23:59".to_string(),
+                timezone: "America/Santiago".to_string(),
+                internal_domains: vec!["x.cl".to_string()],
+                ignored_senders: vec![],
+                ignored_domains: vec![],
+                ignored_keywords: vec![],
+            },
+            status: AnalysisStatus::Completed,
+            progress_message: String::new(),
+            processed_threads: 1,
+            total_candidate_threads: 1,
+            metrics: AnalysisMetrics::default(),
+            created_at: Utc::now(),
+            completed_at: Some(Utc::now()),
+            error_message: None,
+        };
+        storage.create_analysis_run(&run).await.unwrap();
+        storage
+            .upsert_thread(
+                &thread("thread-redacted", "run-redacted"),
+                &[message("msg-redacted", "cliente@example.com")],
+            )
+            .await
+            .unwrap();
+
+        let items = collect_review_items_for_report(&state, &run).await.unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].subject, "Asunto oculto por política de reporte");
+        assert_eq!(
+            items[0].from_email,
+            "Remitente oculto por política de reporte"
+        );
     }
 
     #[tokio::test]

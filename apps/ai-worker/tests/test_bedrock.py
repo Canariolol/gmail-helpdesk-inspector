@@ -3,8 +3,8 @@ import json
 import httpx
 import pytest
 
-from ai_worker.bedrock import audit_with_bedrock
-from ai_worker.schemas import AuditThreadRequest
+from ai_worker.bedrock import audit_with_bedrock, build_system_prompt
+from ai_worker.schemas import AuditPolicyContext, AuditThreadRequest
 from ai_worker.settings import Settings
 
 
@@ -99,8 +99,37 @@ async def test_audit_parses_bedrock_response() -> None:
     assert result.output_tokens == 45
 
 
-def test_settings_default_model_is_nova_2_lite() -> None:
-    assert Settings.model_fields["bedrock_model_id"].default == NOVA_2_LITE_MODEL_ID
+def test_settings_default_model_is_sonnet() -> None:
+    assert Settings.model_fields["bedrock_model_id"].default == "us.anthropic.claude-sonnet-4-6"
+
+
+def test_system_prompt_has_no_tenant_hardcodes_by_default() -> None:
+    prompt = build_system_prompt(Settings())
+    forbidden = ["west-ingenieria", "West Ingeniería", "catherine.trivino"]
+    for value in forbidden:
+        assert value not in prompt
+
+
+def test_system_prompt_uses_request_policy_context() -> None:
+    prompt = build_system_prompt(
+        Settings(),
+        AuditPolicyContext(
+            mailbox_email="soporte@acme.test",
+            mailbox_display_name="Soporte Acme",
+            workspace_domain="acme.test",
+            internal_domains=["acme.test"],
+            responder_emails=["agent@acme.test"],
+            mailbox_aliases=["help@acme.test"],
+            valid_request_criteria=["Clientes externos piden soporte de plataforma"],
+            non_responsibility_rules=["Facturación no es responsabilidad de soporte"],
+            ignored_domains=["calendar.google.com"],
+            prompt_version="test_v1",
+        ),
+    )
+    assert "soporte@acme.test" in prompt
+    assert "help@acme.test" in prompt
+    assert "Clientes externos piden soporte de plataforma" in prompt
+    assert "Facturación no es responsabilidad de soporte" in prompt
 
 
 @pytest.mark.asyncio

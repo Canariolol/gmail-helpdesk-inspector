@@ -1,7 +1,7 @@
-import { BarChart3, ClipboardList, HelpCircle, History, LayoutDashboard, LogOut, MessagesSquare, Settings } from "lucide-react";
+import { BarChart3, ClipboardList, HelpCircle, History, LayoutDashboard, Lock, LogOut, MessagesSquare, Settings } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
-export type AppView = "resumen" | "hilos" | "revision" | "anteriores" | "reportes" | "configuracion" | "ayuda";
+export type AppView = "resumen" | "hilos" | "revision" | "anteriores" | "reportes" | "configuracion" | "privacidad" | "ayuda";
 
 type Props = {
   view: AppView;
@@ -18,7 +18,8 @@ const navItems: Array<{ view: AppView; label: string; icon: LucideIcon }> = [
   { view: "anteriores", label: "Análisis anteriores", icon: History },
   { view: "reportes", label: "Reportes", icon: BarChart3 },
   { view: "configuracion", label: "Configuración", icon: Settings },
-  { view: "ayuda", label: "Ayuda y privacidad", icon: HelpCircle },
+  { view: "privacidad", label: "Privacidad y datos", icon: Lock },
+  { view: "ayuda", label: "Ayuda", icon: HelpCircle },
 ];
 
 export function Sidebar({ view, onNavigate, email, reviewCount, onLogout }: Props) {
