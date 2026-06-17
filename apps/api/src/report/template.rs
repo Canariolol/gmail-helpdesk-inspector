@@ -354,6 +354,15 @@ mod tests {
         AnalysisRun {
             id: "run-1".to_string(),
             user_email: "a@x.cl".to_string(),
+            org_id: None,
+            mailbox_id: None,
+            trigger_type: None,
+            policy_version_id: None,
+            policy_hash: None,
+            policy_snapshot: None,
+            gmail_scope_snapshot: vec![],
+            retention_expires_at: None,
+            data_minimization_mode: None,
             config: AnalysisConfig {
                 date_from: "2026-06-12".to_string(),
                 date_to: "2026-06-14".to_string(),

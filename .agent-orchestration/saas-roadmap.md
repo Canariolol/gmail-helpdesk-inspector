@@ -17,7 +17,7 @@ No lanzar como SaaS público hasta resolver ownership/autorización, privacidad,
 6. Redacción de errores públicos y logs sensibles.
 7. CSRF/rate limiting para mutaciones y análisis.
 
-## P1 — Confianza y privacidad visible
+## P1 — Confianza, privacidad y configuración SaaS visible
 
 1. Login profesional con explicación de `gmail.readonly`.
 2. Modal previo a OAuth explicando permisos.
@@ -26,15 +26,18 @@ No lanzar como SaaS público hasta resolver ownership/autorización, privacidad,
 5. Desconectar Gmail y revocar OAuth.
 6. Borrar análisis/cuenta/datos.
 7. Consentimiento explícito de auditoría IA.
+8. Remover hardcodes de la empresa original: dominio, timezone, contexto IA, destinatarios, reportes, thresholds y defaults.
+9. Diseñar configuración guiada por política operacional, no solo checkboxes/keywords.
 
 ## P2 — Arquitectura beta privada
 
 1. Modelo mínimo de tenant/org/roles.
 2. Firestore tenant-scoped o owner-scoped por defecto.
-3. Configuración por usuario/tenant: dominios internos, exclusiones, IA, reportes.
-4. Job runner persistente para análisis y scheduler.
-5. Observabilidad por run/tenant/coste IA.
-6. Paginación real en runs/threads/messages.
+3. Configuración por usuario/tenant: dominios internos, unidades/equipos, exclusiones, fuentes automáticas, reglas de cliente válido, IA, reportes, horario laboral, retención.
+4. Versionar política de análisis y política de auditor IA por run para trazabilidad.
+5. Job runner persistente para análisis y scheduler.
+6. Observabilidad por run/tenant/coste IA.
+7. Paginación real en runs/threads/messages.
 
 ## P3 — Beta pública y SaaS
 
@@ -57,6 +60,6 @@ No lanzar como SaaS público hasta resolver ownership/autorización, privacidad,
 
 1. Implementar TASK-003: authz/ownership P0.
 2. Implementar TASK-004: quick wins UI de confianza que no dependen de backend.
-3. Crear TASK para disconnect/delete data.
-4. Crear TASK para configuración por usuario y remover hardcodes de empresa.
+3. Planificar configuración SaaS parametrizable y auditor IA sin hardcodes.
+4. Crear TASK para disconnect/delete data.
 5. Preparar paquete OAuth verification + privacy docs.

@@ -4,6 +4,7 @@ mod config;
 mod firestore;
 mod gmail;
 mod http;
+mod policies;
 mod report;
 mod scheduler;
 mod storage;
@@ -66,7 +67,13 @@ pub fn build_app_from_state(state: AppState) -> Router {
         .allow_origin(AllowOrigin::exact(
             HeaderValue::from_str(&state.config.web_base_url).expect("valid WEB_BASE_URL"),
         ))
-        .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::OPTIONS])
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::OPTIONS,
+        ])
         .allow_headers([
             header::ACCEPT,
             header::AUTHORIZATION,

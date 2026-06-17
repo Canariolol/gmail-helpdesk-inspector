@@ -9,15 +9,17 @@ Este directorio es el control plane local para coordinar Pi, Codex CLI y Claude 
 - **Claude** diseña e implementa UI/UX cuando la tarea afecta experiencia visual, flujos, componentes o microcopy.
 - Los agentes no compiten por los mismos archivos. Cada tarea declara ownership explícito.
 - Ningún agente debe leer, copiar, resumir ni modificar `.env`, `secrets/*`, credenciales o tokens.
+- Todos los agentes deben seguir `.agent-orchestration/human-in-loop.md`: ante dudas, deben preguntar a Pi; Pi pregunta al dueño del producto cuando la decisión afecte producto, seguridad, privacidad o SaaS.
 
 ## Flujo estándar
 
 1. Pi crea o actualiza `.agent-orchestration/tasks/TASK-XXX.md`.
-2. Codex produce plan/review en `.agent-orchestration/runs/TASK-XXX/codex-plan.md`.
-3. Pi valida el plan y decide si se requiere UI/UX.
-4. Claude produce diseño/implementación UI en `.agent-orchestration/runs/TASK-XXX/claude-ui.md` o en un worktree controlado.
-5. Codex revisa seguridad/integración si aplica.
-6. Pi aplica cambios, ejecuta checks y actualiza `board.md`/`decisions.md`.
+2. Codex/Claude producen plan/review en `.agent-orchestration/runs/TASK-XXX/`.
+3. Si el output contiene `BLOCKED_QUESTIONS`, Pi consolida opciones y pregunta al dueño del producto antes de implementar.
+4. Pi valida el plan y decide si se requiere UI/UX, backend o revisión cruzada.
+5. Claude/Codex implementan solo con paths y criterios aprobados.
+6. Codex revisa seguridad/integración si aplica.
+7. Pi aplica cambios, ejecuta checks y actualiza `board.md`/`decisions.md`.
 
 ## Comandos locales
 

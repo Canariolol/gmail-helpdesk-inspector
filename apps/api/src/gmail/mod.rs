@@ -252,10 +252,10 @@ fn parse_date(
     headers: &Map<String, Value>,
     internal_date: Option<&str>,
 ) -> anyhow::Result<DateTime<Utc>> {
-    if let Some(date) = header(headers, "date") {
-        if let Ok(parsed) = DateTime::parse_from_rfc2822(&date) {
-            return Ok(parsed.with_timezone(&Utc));
-        }
+    if let Some(date) = header(headers, "date")
+        && let Ok(parsed) = DateTime::parse_from_rfc2822(&date)
+    {
+        return Ok(parsed.with_timezone(&Utc));
     }
     if let Some(ms) = internal_date.and_then(|v| v.parse::<i64>().ok()) {
         return DateTime::from_timestamp_millis(ms)
@@ -288,27 +288,22 @@ fn extract_text(payload: &GmailPayload) -> String {
 }
 
 fn collect_text(payload: &GmailPayload, chunks: &mut Vec<String>) {
-    if let Some(body) = &payload.body {
-        if let Some(data) = &body.data {
-            if payload
-                .mime_type
-                .as_deref()
-                .unwrap_or("")
-                .starts_with("text/")
-            {
-                if let Ok(bytes) = URL_SAFE_NO_PAD
-                    .decode(data.as_bytes())
-                    .or_else(|_| URL_SAFE.decode(data.as_bytes()))
-                {
-                    if let Ok(text) = String::from_utf8(bytes) {
-                        if payload.mime_type.as_deref() == Some("text/html") {
-                            chunks.push(html_to_text(&text));
-                        } else {
-                            chunks.push(text);
-                        }
-                    }
-                }
-            }
+    if let Some(body) = &payload.body
+        && let Some(data) = &body.data
+        && payload
+            .mime_type
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("text/")
+        && let Ok(bytes) = URL_SAFE_NO_PAD
+            .decode(data.as_bytes())
+            .or_else(|_| URL_SAFE.decode(data.as_bytes()))
+        && let Ok(text) = String::from_utf8(bytes)
+    {
+        if payload.mime_type.as_deref() == Some("text/html") {
+            chunks.push(html_to_text(&text));
+        } else {
+            chunks.push(text);
         }
     }
     for part in &payload.parts {

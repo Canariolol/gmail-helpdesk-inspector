@@ -1,5 +1,5 @@
-import { CheckCheck, CheckCircle2, Clock, Gauge, HelpCircle, Mail, Reply, ShieldCheck, Timer } from "lucide-react";
-import type { AnalysisRun, EmailThread, ThreadDetail } from "../api/types";
+import { AlertTriangle, CheckCheck, CheckCircle2, Clock, Gauge, HelpCircle, Mail, Reply, ShieldCheck, Timer } from "lucide-react";
+import type { AnalysisRun, EmailThread, OrgConfig, ThreadDetail } from "../api/types";
 import { ClassificationBarChart } from "../components/charts/ClassificationBarChart";
 import { CompositionDonut } from "../components/charts/CompositionDonut";
 import { EmptyState } from "../components/common/EmptyState";
@@ -27,15 +27,43 @@ type Props = {
   onStartRun: () => void;
   startingRun: boolean;
   onViewDetails: () => void;
+  orgConfig?: OrgConfig | null;
+  onGoToSetup?: () => void;
 };
 
 export function ResumenView(props: Props) {
   const { run } = props;
   const visibleThreads = filterThreads(props.threads, props.threadFilter);
+  const setupNotReady = props.orgConfig !== null && props.orgConfig !== undefined
+    && !props.orgConfig.setup_state.ready_for_analysis;
 
   return (
     <div className="view">
-      <FilterBar loading={props.analyzing} onAnalyze={props.onAnalyze} />
+      {setupNotReady && props.orgConfig && (
+        <div className="setup-banner" role="alert">
+          <AlertTriangle size={18} />
+          <div>
+            <strong>Configuración incompleta</strong>
+            <p>
+              Completa la configuración de tu organización antes de iniciar un análisis.
+              {props.orgConfig.setup_state.missing.length > 0 && (
+                <> Faltan: {props.orgConfig.setup_state.missing.join(", ")}.</>
+              )}
+            </p>
+          </div>
+          {props.onGoToSetup && (
+            <button type="button" className="btn-primary" onClick={props.onGoToSetup}>
+              Completar configuración
+            </button>
+          )}
+        </div>
+      )}
+      <FilterBar
+        loading={props.analyzing}
+        onAnalyze={props.onAnalyze}
+        orgConfig={props.orgConfig}
+        onGoToSetup={props.onGoToSetup}
+      />
       {!run ? (
         <div className="card">
           <EmptyState message="Crea tu primer análisis con los filtros de arriba." />

@@ -25,8 +25,9 @@ use uuid::Uuid;
 use crate::{
     analysis::{
         AiAuditResult, AnalysisConfig, AnalysisMetrics, AnalysisRun, AnalysisStatus,
-        ClassificationSource, EmailMessage, EmailThread, ManualReview, calculate_metrics,
-        classify_thread, message_is_inside_analysis_window, should_auto_apply_ai,
+        ClassificationSource, EmailMessage, EmailThread, ManualReview, TriggerType,
+        calculate_metrics, classify_thread, message_is_inside_analysis_window,
+        should_auto_apply_ai,
     },
     auth::{
         GoogleTokenResponse, UserSession, clear_oauth_cookie, clear_session_cookie, decrypt_token,
@@ -34,6 +35,12 @@ use crate::{
     },
     config::AppConfig,
     gmail::GmailClient,
+    policies::{
+        AiPolicy, AnalysisPolicy, MailboxPurpose, OrgConfigBundle, OrgConfigResponse,
+        PolicyVersion, ScheduleReportPolicy, email_domain, is_consumer_gmail_domain,
+        normalize_domains, normalize_list, policy_version_from_draft, provision_default_config,
+        retention_expires_at, setup_state, validate_timezone,
+    },
     storage::StorageRepository,
 };
 
@@ -73,6 +80,7 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/google/callback", get(auth_google_callback))
         .route("/auth/logout", post(auth_logout))
         .route("/auth/me", get(auth_me))
+        .route("/me/org/config", get(get_org_config).put(update_org_config))
         .route(
             "/analysis-runs",
             post(create_analysis_run).get(list_analysis_runs),
@@ -246,6 +254,332 @@ async fn auth_me(
     })))
 }
 
+async fn get_org_config(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<OrgConfigResponse>, ApiError> {
+    let session = require_session(&state, &headers).await?;
+    let bundle = get_or_provision_org_config(&state, &session.google_account_email).await?;
+    Ok(Json(bundle.response()))
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct OrgConfigUpdateRequest {
+    org: Option<OrgUpdateRequest>,
+    mailbox: Option<MailboxUpdateRequest>,
+    analysis_policy: Option<AnalysisPolicyUpdateRequest>,
+    ai_policy: Option<AiPolicyUpdateRequest>,
+    schedule_report_policy: Option<ScheduleReportPolicyUpdateRequest>,
+    retention_policy: Option<RetentionPolicyUpdateRequest>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OrgUpdateRequest {
+    name: Option<String>,
+    default_timezone: Option<String>,
+    locale: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MailboxUpdateRequest {
+    display_name: Option<String>,
+    purpose: Option<MailboxPurpose>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnalysisPolicyUpdateRequest {
+    timezone: Option<String>,
+    internal_domains: Option<Vec<String>>,
+    responder_emails: Option<Vec<String>>,
+    mailbox_aliases: Option<Vec<String>>,
+    valid_request_criteria: Option<Vec<String>>,
+    non_responsibility_rules: Option<Vec<String>>,
+    ignored_senders: Option<Vec<String>>,
+    ignored_domains: Option<Vec<String>>,
+    ignored_keywords: Option<Vec<String>>,
+    default_time_from: Option<String>,
+    default_time_to: Option<String>,
+    max_threads_per_run: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AiPolicyUpdateRequest {
+    enabled: Option<bool>,
+    consent_confirmed: Option<bool>,
+    auto_apply_threshold: Option<f64>,
+    manual_review_threshold: Option<f64>,
+    max_audit_messages: Option<u32>,
+    max_body_chars_per_message: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ScheduleReportPolicyUpdateRequest {
+    scheduler_enabled: Option<bool>,
+    timezone: Option<String>,
+    report_recipients: Option<Vec<String>>,
+    report_content: Option<crate::policies::ReportContentPolicy>,
+    failure_notice_enabled: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RetentionPolicyUpdateRequest {
+    retention_days: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+struct UpdateOrgConfigResponse {
+    policy_version: PolicyVersion,
+    setup_state: crate::policies::SetupState,
+}
+
+async fn update_org_config(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<OrgConfigUpdateRequest>,
+) -> Result<Json<UpdateOrgConfigResponse>, ApiError> {
+    let session = require_session(&state, &headers).await?;
+    let mut bundle = get_or_provision_org_config(&state, &session.google_account_email).await?;
+    apply_org_config_update(&mut bundle, request, &session.google_account_email)?;
+    let now = Utc::now();
+    bundle.org.updated_at = now;
+    bundle.draft.updated_at = now;
+    bundle.draft.updated_by_user_email = session.google_account_email.clone();
+    let next_version = bundle.policy_version.version + 1;
+    let new_version = policy_version_from_draft(
+        &bundle.mailbox,
+        &bundle.draft,
+        next_version,
+        &session.google_account_email,
+        now,
+    );
+    if new_version.policy_hash != bundle.policy_version.policy_hash {
+        bundle.policy_version = new_version;
+    }
+    state.storage.upsert_org_config(&bundle).await?;
+    Ok(Json(UpdateOrgConfigResponse {
+        policy_version: bundle.policy_version,
+        setup_state: setup_state(&bundle.draft),
+    }))
+}
+
+fn apply_org_config_update(
+    bundle: &mut OrgConfigBundle,
+    request: OrgConfigUpdateRequest,
+    user_email: &str,
+) -> Result<(), ApiError> {
+    if let Some(org) = request.org {
+        if let Some(name) = org.name.map(|value| value.trim().to_string())
+            && !name.is_empty()
+        {
+            bundle.org.name = name;
+        }
+        if let Some(timezone) = org.default_timezone {
+            validate_policy_timezone(&timezone)?;
+            bundle.org.default_timezone = timezone.clone();
+            bundle.draft.analysis_policy.timezone = timezone.clone();
+            bundle.draft.schedule_report_policy.timezone = timezone;
+        }
+        if let Some(locale) = org.locale.map(|value| value.trim().to_string())
+            && !locale.is_empty()
+        {
+            bundle.org.locale = locale;
+        }
+    }
+    if let Some(mailbox) = request.mailbox {
+        if let Some(display_name) = mailbox.display_name.map(|value| value.trim().to_string())
+            && !display_name.is_empty()
+        {
+            bundle.mailbox.display_name = display_name;
+        }
+        if let Some(purpose) = mailbox.purpose {
+            bundle.mailbox.purpose = purpose;
+        }
+    }
+    if let Some(policy) = request.analysis_policy {
+        apply_analysis_policy_update(&mut bundle.draft.analysis_policy, policy)?;
+    }
+    if let Some(policy) = request.ai_policy {
+        apply_ai_policy_update(&mut bundle.draft.ai_policy, policy)?;
+    }
+    if let Some(policy) = request.schedule_report_policy {
+        apply_schedule_report_policy_update(&mut bundle.draft.schedule_report_policy, policy)?;
+    }
+    if let Some(policy) = request.retention_policy
+        && let Some(days) = policy.retention_days
+    {
+        if !(7..=365).contains(&days) {
+            return Err(ApiError::bad_request(
+                "retention_days debe estar entre 7 y 365",
+            ));
+        }
+        bundle.draft.retention_policy.retention_days = days;
+    }
+    let Some(domain) = email_domain(user_email) else {
+        return Err(ApiError::bad_request("email de cuenta Google inválido"));
+    };
+    if is_consumer_gmail_domain(&domain) {
+        return Err(ApiError::bad_request(
+            "la beta privada acepta solo cuentas Google Workspace",
+        ));
+    }
+    Ok(())
+}
+
+fn apply_analysis_policy_update(
+    current: &mut AnalysisPolicy,
+    update: AnalysisPolicyUpdateRequest,
+) -> Result<(), ApiError> {
+    if let Some(timezone) = update.timezone {
+        validate_policy_timezone(&timezone)?;
+        current.timezone = timezone;
+    }
+    if let Some(values) = update.internal_domains {
+        current.internal_domains = normalize_domains(values);
+    }
+    if let Some(values) = update.responder_emails {
+        current.responder_emails = normalize_list(values);
+    }
+    if let Some(values) = update.mailbox_aliases {
+        current.mailbox_aliases = normalize_list(values);
+    }
+    if let Some(values) = update.valid_request_criteria {
+        current.valid_request_criteria = normalize_text_list(values);
+    }
+    if let Some(values) = update.non_responsibility_rules {
+        current.non_responsibility_rules = normalize_text_list(values);
+    }
+    if let Some(values) = update.ignored_senders {
+        current.ignored_senders = normalize_list(values);
+    }
+    if let Some(values) = update.ignored_domains {
+        current.ignored_domains = normalize_domains(values);
+    }
+    if let Some(values) = update.ignored_keywords {
+        current.ignored_keywords = normalize_text_list(values);
+    }
+    if let Some(value) = update.default_time_from {
+        current.default_time_from = validate_time(&value)?;
+    }
+    if let Some(value) = update.default_time_to {
+        current.default_time_to = validate_time(&value)?;
+    }
+    if let Some(value) = update.max_threads_per_run {
+        current.max_threads_per_run = value.clamp(1, 500);
+    }
+    Ok(())
+}
+
+fn apply_ai_policy_update(
+    current: &mut AiPolicy,
+    update: AiPolicyUpdateRequest,
+) -> Result<(), ApiError> {
+    if let Some(threshold) = update.auto_apply_threshold {
+        validate_threshold(threshold, "auto_apply_threshold")?;
+        current.auto_apply_threshold = threshold;
+    }
+    if let Some(threshold) = update.manual_review_threshold {
+        validate_threshold(threshold, "manual_review_threshold")?;
+        current.manual_review_threshold = threshold;
+    }
+    if let Some(value) = update.max_audit_messages {
+        current.max_audit_messages = value.clamp(1, 50);
+    }
+    if let Some(value) = update.max_body_chars_per_message {
+        current.max_body_chars_per_message = value.clamp(80, 2000);
+    }
+    if let Some(enabled) = update.enabled {
+        if enabled && !current.enabled && update.consent_confirmed != Some(true) {
+            return Err(ApiError::bad_request(
+                "para activar IA debes confirmar consentimiento explícito",
+            ));
+        }
+        current.enabled = enabled;
+        current.consent_granted_at = if enabled {
+            current.consent_granted_at.or_else(|| Some(Utc::now()))
+        } else {
+            None
+        };
+    }
+    Ok(())
+}
+
+fn apply_schedule_report_policy_update(
+    current: &mut ScheduleReportPolicy,
+    update: ScheduleReportPolicyUpdateRequest,
+) -> Result<(), ApiError> {
+    if let Some(timezone) = update.timezone {
+        validate_policy_timezone(&timezone)?;
+        current.timezone = timezone;
+    }
+    if let Some(values) = update.report_recipients {
+        current.report_recipients = normalize_list(values);
+    }
+    if let Some(content) = update.report_content {
+        current.report_content = content;
+    }
+    if let Some(value) = update.failure_notice_enabled {
+        current.failure_notice_enabled = value;
+    }
+    if let Some(enabled) = update.scheduler_enabled {
+        if enabled && current.report_recipients.is_empty() {
+            return Err(ApiError::bad_request(
+                "agrega destinatarios antes de activar reportes programados",
+            ));
+        }
+        current.scheduler_enabled = enabled;
+    }
+    Ok(())
+}
+
+fn normalize_text_list(values: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    for value in values {
+        let value = value.trim().to_string();
+        if !value.is_empty() && !out.contains(&value) {
+            out.push(value);
+        }
+    }
+    out
+}
+
+fn validate_policy_timezone(timezone: &str) -> Result<(), ApiError> {
+    if validate_timezone(timezone) {
+        Ok(())
+    } else {
+        Err(ApiError::bad_request(
+            "timezone inválida; usa una zona IANA",
+        ))
+    }
+}
+
+fn validate_time(value: &str) -> Result<String, ApiError> {
+    chrono::NaiveTime::parse_from_str(value, "%H:%M")
+        .map(|_| value.to_string())
+        .map_err(|_| ApiError::bad_request("hora inválida; usa formato HH:MM"))
+}
+
+fn validate_threshold(value: f64, label: &str) -> Result<(), ApiError> {
+    if (0.0..=1.0).contains(&value) {
+        Ok(())
+    } else {
+        Err(ApiError::bad_request(&format!(
+            "{label} debe estar entre 0 y 1"
+        )))
+    }
+}
+
+async fn get_or_provision_org_config(
+    state: &AppState,
+    user_email: &str,
+) -> Result<OrgConfigBundle, ApiError> {
+    if let Some(bundle) = state.storage.get_org_config_for_user(user_email).await? {
+        return Ok(bundle);
+    }
+    let bundle = provision_default_config(user_email, Utc::now());
+    state.storage.upsert_org_config(&bundle).await?;
+    Ok(bundle)
+}
+
 #[derive(Debug, Deserialize)]
 struct CreateAnalysisRunRequest {
     date_from: String,
@@ -253,10 +587,16 @@ struct CreateAnalysisRunRequest {
     time_from: Option<String>,
     time_to: Option<String>,
     timezone: Option<String>,
+    #[serde(default)]
     internal_domains: Vec<String>,
+    #[serde(default)]
     ignored_senders: Vec<String>,
+    #[serde(default)]
     ignored_domains: Vec<String>,
+    #[serde(default)]
     ignored_keywords: Vec<String>,
+    #[serde(default)]
+    policy_version_id: Option<String>,
 }
 
 async fn create_analysis_run(
@@ -265,9 +605,39 @@ async fn create_analysis_run(
     Json(request): Json<CreateAnalysisRunRequest>,
 ) -> Result<Json<AnalysisRun>, ApiError> {
     let session = require_session(&state, &headers).await?;
-    let run = AnalysisRun {
+    let now = Utc::now();
+    let uses_legacy_config = request.policy_version_id.is_none()
+        && (!request.internal_domains.is_empty()
+            || !request.ignored_senders.is_empty()
+            || !request.ignored_domains.is_empty()
+            || !request.ignored_keywords.is_empty()
+            || request.timezone.is_some());
+    let run = if uses_legacy_config {
+        build_legacy_run(session.google_account_email, request, now)
+    } else {
+        build_policy_run(&state, &session.google_account_email, request, now).await?
+    };
+    state.storage.create_analysis_run(&run).await?;
+    Ok(Json(run))
+}
+
+fn build_legacy_run(
+    user_email: String,
+    request: CreateAnalysisRunRequest,
+    now: chrono::DateTime<Utc>,
+) -> AnalysisRun {
+    AnalysisRun {
         id: Uuid::new_v4().to_string(),
-        user_email: session.google_account_email,
+        user_email,
+        org_id: None,
+        mailbox_id: None,
+        trigger_type: Some(TriggerType::Manual),
+        policy_version_id: None,
+        policy_hash: None,
+        policy_snapshot: None,
+        gmail_scope_snapshot: vec![],
+        retention_expires_at: None,
+        data_minimization_mode: Some("metadata_snippets_excerpts_only".to_string()),
         config: AnalysisConfig {
             date_from: request.date_from,
             date_to: request.date_to,
@@ -286,12 +656,72 @@ async fn create_analysis_run(
         processed_threads: 0,
         total_candidate_threads: 0,
         metrics: AnalysisMetrics::default(),
-        created_at: Utc::now(),
+        created_at: now,
         completed_at: None,
         error_message: None,
+    }
+}
+
+async fn build_policy_run(
+    state: &AppState,
+    user_email: &str,
+    request: CreateAnalysisRunRequest,
+    now: chrono::DateTime<Utc>,
+) -> Result<AnalysisRun, ApiError> {
+    let bundle = get_or_provision_org_config(state, user_email).await?;
+    let policy_version = if let Some(policy_version_id) = request.policy_version_id.as_deref() {
+        state
+            .storage
+            .get_policy_version(&bundle.org.id, policy_version_id)
+            .await?
+            .ok_or(ApiError::not_found("policy version not found"))?
+    } else {
+        bundle.policy_version.clone()
     };
-    state.storage.create_analysis_run(&run).await?;
-    Ok(Json(run))
+    let current_setup = setup_state(&bundle.draft);
+    if !current_setup.ready_for_analysis {
+        return Err(ApiError::bad_request(
+            "completa la configuración antes de crear análisis desde policy",
+        ));
+    }
+    let snapshot = policy_version.snapshot.clone();
+    let analysis = &snapshot.analysis_policy;
+    Ok(AnalysisRun {
+        id: Uuid::new_v4().to_string(),
+        user_email: user_email.to_string(),
+        org_id: Some(bundle.org.id),
+        mailbox_id: Some(snapshot.mailbox.id.clone()),
+        trigger_type: Some(TriggerType::Manual),
+        policy_version_id: Some(policy_version.id),
+        policy_hash: Some(policy_version.policy_hash),
+        policy_snapshot: Some(snapshot.clone()),
+        gmail_scope_snapshot: snapshot.mailbox.gmail_scope_snapshot.clone(),
+        retention_expires_at: Some(retention_expires_at(now, &snapshot)),
+        data_minimization_mode: Some("metadata_snippets_excerpts_only".to_string()),
+        config: AnalysisConfig {
+            date_from: request.date_from,
+            date_to: request.date_to,
+            time_from: request
+                .time_from
+                .unwrap_or_else(|| analysis.default_time_from.clone()),
+            time_to: request
+                .time_to
+                .unwrap_or_else(|| analysis.default_time_to.clone()),
+            timezone: analysis.timezone.clone(),
+            internal_domains: analysis.internal_domains.clone(),
+            ignored_senders: analysis.ignored_senders.clone(),
+            ignored_domains: analysis.ignored_domains.clone(),
+            ignored_keywords: analysis.ignored_keywords.clone(),
+        },
+        status: AnalysisStatus::Pending,
+        progress_message: "Listo para analizar".to_string(),
+        processed_threads: 0,
+        total_candidate_threads: 0,
+        metrics: AnalysisMetrics::default(),
+        created_at: now,
+        completed_at: None,
+        error_message: None,
+    })
 }
 
 async fn list_analysis_runs(
@@ -309,15 +739,11 @@ async fn list_analysis_runs(
 
 async fn get_analysis_run(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<AnalysisRun>, ApiError> {
-    Ok(Json(
-        state
-            .storage
-            .get_analysis_run(&id)
-            .await?
-            .ok_or(ApiError::not_found("analysis run not found"))?,
-    ))
+    let session = require_session(&state, &headers).await?;
+    Ok(Json(require_owned_run(&state, &id, &session).await?))
 }
 
 async fn start_analysis_run(
@@ -326,14 +752,7 @@ async fn start_analysis_run(
     Path(id): Path<String>,
 ) -> Result<Json<AnalysisRun>, ApiError> {
     let session = require_session(&state, &headers).await?;
-    let mut run = state
-        .storage
-        .get_analysis_run(&id)
-        .await?
-        .ok_or(ApiError::not_found("analysis run not found"))?;
-    if run.user_email != session.google_account_email {
-        return Err(ApiError::forbidden());
-    }
+    let mut run = require_owned_run(&state, &id, &session).await?;
     run.status = AnalysisStatus::Running;
     run.progress_message = "Iniciando lectura de Gmail".to_string();
     state.storage.update_analysis_run(&run).await?;
@@ -357,8 +776,11 @@ async fn start_analysis_run(
 
 async fn analysis_events(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
-) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
+) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    let session = require_session(&state, &headers).await?;
+    require_owned_run(&state, &id, &session).await?;
     let stream = stream::unfold((), move |_| {
         let state = state.clone();
         let id = id.clone();
@@ -372,27 +794,28 @@ async fn analysis_events(
             Some((Ok(Event::default().data(payload)), ()))
         }
     });
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
 async fn get_metrics(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<AnalysisMetrics>, ApiError> {
-    let run = state
-        .storage
-        .get_analysis_run(&id)
-        .await?
-        .ok_or(ApiError::not_found("analysis run not found"))?;
+    let session = require_session(&state, &headers).await?;
+    let run = require_owned_run(&state, &id, &session).await?;
     Ok(Json(run.metrics))
 }
 
 async fn list_threads(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
     Query(query): Query<ThreadQuery>,
 ) -> Result<Json<Vec<EmailThread>>, ApiError> {
-    let mut threads = state.storage.list_threads(&id).await?;
+    let session = require_session(&state, &headers).await?;
+    let run = require_owned_run(&state, &id, &session).await?;
+    let mut threads = state.storage.list_threads(&run.id).await?;
     if let Some(classification) = query.classification {
         threads.retain(|thread| {
             serde_json::to_value(&thread.classification).ok() == Some(json!(classification))
@@ -416,13 +839,11 @@ struct ThreadQuery {
 
 async fn get_thread(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(thread_id): Path<String>,
 ) -> Result<Json<ThreadDetailResponse>, ApiError> {
-    let mut thread = state
-        .storage
-        .get_thread(&thread_id)
-        .await?
-        .ok_or(ApiError::not_found("thread not found"))?;
+    let session = require_session(&state, &headers).await?;
+    let mut thread = require_owned_thread(&state, &thread_id, &session).await?;
     let messages = state
         .storage
         .list_messages(&thread.analysis_run_id, &thread.id)
@@ -441,7 +862,6 @@ struct ThreadDetailResponse {
 
 #[derive(Debug, Deserialize)]
 struct ManualReviewRequest {
-    reviewer_label: String,
     new_classification: crate::analysis::Classification,
     is_valid_client_request: bool,
     is_answered: bool,
@@ -453,14 +873,12 @@ struct ManualReviewRequest {
 
 async fn manual_review(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(thread_id): Path<String>,
     Json(request): Json<ManualReviewRequest>,
 ) -> Result<Json<AnalysisRun>, ApiError> {
-    let thread = state
-        .storage
-        .get_thread(&thread_id)
-        .await?
-        .ok_or(ApiError::not_found("thread not found"))?;
+    let session = require_session(&state, &headers).await?;
+    let thread = require_owned_thread(&state, &thread_id, &session).await?;
     let messages = state
         .storage
         .list_messages(&thread.analysis_run_id, &thread.id)
@@ -489,7 +907,7 @@ async fn manual_review(
     let review = ManualReview {
         id: Uuid::new_v4().to_string(),
         email_thread_id: thread.id.clone(),
-        reviewer_label: request.reviewer_label,
+        reviewer_label: session.google_account_email,
         new_classification: request.new_classification,
         is_valid_client_request: request.is_valid_client_request,
         is_answered: request.is_answered,
@@ -537,13 +955,14 @@ pub(crate) async fn execute_analysis(
         .get_analysis_run(&run_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("analysis run not found"))?;
+    let max_threads = run
+        .policy_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.analysis_policy.max_threads_per_run)
+        .unwrap_or(state.config.google.gmail_max_threads);
     let thread_ids = state
         .gmail
-        .list_thread_ids(
-            &access_token,
-            &run.config,
-            state.config.google.gmail_max_threads,
-        )
+        .list_thread_ids(&access_token, &run.config, max_threads)
         .await?;
     run.total_candidate_threads = thread_ids.len() as u64;
     run.progress_message = format!("{} hilos encontrados en Gmail", thread_ids.len());
@@ -557,12 +976,16 @@ pub(crate) async fn execute_analysis(
     // classification, AI audit and storage writes are independent, so we run up to
     // ANALYSIS_CONCURRENCY of them at once instead of strictly one-at-a-time.
     let config = run.config.clone();
+    let policy_snapshot = run.policy_snapshot.clone();
+    let policy_version_id = run.policy_version_id.clone();
     let run_id = run.id.clone();
     let total = run.total_candidate_threads;
     {
         let state_ref = &state;
         let access_ref = access_token.as_str();
         let config_ref = &config;
+        let policy_ref = policy_snapshot.as_ref();
+        let policy_version_id_ref = policy_version_id.as_deref();
         let excluded_ref = &excluded_sample;
         let run_id_ref = run_id.as_str();
         let mut task_stream = stream::iter(thread_ids.into_iter().map(|thread_id| async move {
@@ -571,7 +994,11 @@ pub(crate) async fn execute_analysis(
                 access_ref,
                 run_id_ref,
                 config_ref,
-                excluded_ref,
+                ThreadProcessingContext {
+                    excluded_sample: excluded_ref,
+                    policy_snapshot: policy_ref,
+                    policy_version_id: policy_version_id_ref,
+                },
                 thread_id,
             )
             .await
@@ -590,7 +1017,7 @@ pub(crate) async fn execute_analysis(
                     tracing::warn!(?error, "el procesamiento de un hilo falló; se omite");
                 }
             }
-            if processed % PROGRESS_UPDATE_EVERY == 0 {
+            if processed.is_multiple_of(PROGRESS_UPDATE_EVERY) {
                 run.processed_threads = processed;
                 run.metrics.ai_input_tokens = ai_input_tokens;
                 run.metrics.ai_output_tokens = ai_output_tokens;
@@ -624,12 +1051,18 @@ struct ThreadOutcome {
     output_tokens: u64,
 }
 
+struct ThreadProcessingContext<'a> {
+    excluded_sample: &'a [String],
+    policy_snapshot: Option<&'a crate::policies::PolicySnapshot>,
+    policy_version_id: Option<&'a str>,
+}
+
 async fn process_one_thread(
     state: &AppState,
     access_token: &str,
     run_id: &str,
     config: &AnalysisConfig,
-    excluded_sample: &[String],
+    processing: ThreadProcessingContext<'_>,
     thread_id: String,
 ) -> anyhow::Result<ThreadOutcome> {
     let data = state
@@ -655,16 +1088,40 @@ async fn process_one_thread(
 
     let mut thread = classify_thread(run_id, &data.id, &data.messages, config);
     let received_human_thread = thread.first_client_message_id.is_some();
-    let should_audit = received_human_thread
+    let ai_enabled = processing
+        .policy_snapshot
+        .map(|snapshot| snapshot.ai_policy.enabled)
+        .unwrap_or(true);
+    let should_audit = ai_enabled
+        && received_human_thread
         && (thread.is_valid_client_request
             || thread.manual_review_required
-            || excluded_sample.contains(&thread.gmail_thread_id));
+            || processing.excluded_sample.contains(&thread.gmail_thread_id));
 
     let mut outcome = ThreadOutcome::default();
     if should_audit {
-        let audit_messages = audit_messages_for_thread(&thread, &data.messages);
+        let (max_messages, max_body_chars, auto_apply_threshold) = processing
+            .policy_snapshot
+            .map(|snapshot| {
+                (
+                    snapshot.ai_policy.max_audit_messages as usize,
+                    snapshot.ai_policy.max_body_chars_per_message as usize,
+                    snapshot.ai_policy.auto_apply_threshold,
+                )
+            })
+            .unwrap_or((14, 280, state.config.ai.apply_confidence_threshold));
+        let audit_messages =
+            audit_messages_for_thread(&thread, &data.messages, max_messages, max_body_chars);
         match audit_thread(state, &thread, &audit_messages).await {
-            Ok(audit) => {
+            Ok(mut audit) => {
+                audit.policy_version_id = processing.policy_version_id.map(ToOwned::to_owned);
+                if let Some(snapshot) = processing.policy_snapshot {
+                    audit.prompt_version = Some(snapshot.ai_policy.prompt_version.clone());
+                    audit.model_id = Some(snapshot.ai_policy.model_id.clone());
+                    audit.auto_apply_threshold = Some(auto_apply_threshold);
+                    audit.max_audit_messages = Some(max_messages as u32);
+                    audit.max_body_chars_per_message = Some(max_body_chars as u32);
+                }
                 outcome.input_tokens = audit.input_tokens;
                 outcome.output_tokens = audit.output_tokens;
                 state
@@ -677,7 +1134,7 @@ async fn process_one_thread(
                     .map(|m| m.id.clone())
                     .collect::<Vec<_>>();
                 if should_auto_apply_ai(&audit, &known_ids)
-                    && audit.confidence >= state.config.ai.apply_confidence_threshold
+                    && audit.confidence >= auto_apply_threshold
                 {
                     thread.classification = audit.classification.clone();
                     thread.classification_source = ClassificationSource::Ai;
@@ -691,8 +1148,7 @@ async fn process_one_thread(
                     apply_trace_dates(&mut thread, &data.messages);
                     thread.manual_review_required = false;
                     thread.reasons.push(
-                        "La auditoría IA se aplicó automáticamente por alta confianza."
-                            .to_string(),
+                        "La auditoría IA se aplicó automáticamente por alta confianza.".to_string(),
                     );
                 } else {
                     thread.manual_review_required = true;
@@ -723,17 +1179,20 @@ async fn process_one_thread(
     Ok(outcome)
 }
 
-fn audit_messages_for_thread(thread: &EmailThread, messages: &[EmailMessage]) -> Vec<EmailMessage> {
+fn audit_messages_for_thread(
+    thread: &EmailThread,
+    messages: &[EmailMessage],
+    max_audit_messages: usize,
+    max_audit_body_chars: usize,
+) -> Vec<EmailMessage> {
     // For the AI arbiter, breadth beats depth: send a compact view of as many messages
     // as possible (short body excerpts) so it can see who is involved and the gist of
     // each, instead of only a few full-body "milestones" the heuristic may have mis-picked.
-    const MAX_AUDIT_BODY_CHARS: usize = 280;
-    const MAX_AUDIT_MESSAGES: usize = 14;
-
+    let max_audit_messages = max_audit_messages.max(1);
     let mut ordered = messages.to_vec();
     ordered.sort_by_key(|message| message.date);
 
-    if ordered.len() > MAX_AUDIT_MESSAGES {
+    if ordered.len() > max_audit_messages {
         // Long thread: keep the messages that matter for validity/answered — all
         // external (client) messages, the heuristic milestones, and the latest few —
         // and drop internal back-and-forth from the middle.
@@ -756,7 +1215,7 @@ fn audit_messages_for_thread(thread: &EmailThread, messages: &[EmailMessage]) ->
             })
             .map(|(_, message)| message.clone())
             .collect();
-        kept.truncate(MAX_AUDIT_MESSAGES);
+        kept.truncate(max_audit_messages);
         ordered = kept;
     }
 
@@ -764,7 +1223,7 @@ fn audit_messages_for_thread(thread: &EmailThread, messages: &[EmailMessage]) ->
         .into_iter()
         .map(|mut message| {
             if let Some(text) = &message.body_text {
-                message.body_text = Some(truncate_chars(text, MAX_AUDIT_BODY_CHARS));
+                message.body_text = Some(truncate_chars(text, max_audit_body_chars));
             }
             message
         })
@@ -864,6 +1323,48 @@ fn excluded_sample_ids(ids: &[String]) -> Vec<String> {
         .collect()
 }
 
+async fn require_owned_run(
+    state: &AppState,
+    run_id: &str,
+    session: &UserSession,
+) -> Result<AnalysisRun, ApiError> {
+    let run = state
+        .storage
+        .get_analysis_run(run_id)
+        .await?
+        .ok_or(ApiError::not_found("analysis run not found"))?;
+    if let Some(org_id) = &run.org_id {
+        if !state
+            .storage
+            .user_is_org_member(org_id, &session.google_account_email)
+            .await?
+        {
+            return Err(ApiError::not_found("analysis run not found"));
+        }
+        return Ok(run);
+    }
+    if run.user_email != session.google_account_email {
+        return Err(ApiError::not_found("analysis run not found"));
+    }
+    Ok(run)
+}
+
+async fn require_owned_thread(
+    state: &AppState,
+    thread_id: &str,
+    session: &UserSession,
+) -> Result<EmailThread, ApiError> {
+    let thread = state
+        .storage
+        .get_thread(thread_id)
+        .await?
+        .ok_or(ApiError::not_found("thread not found"))?;
+    require_owned_run(state, &thread.analysis_run_id, session)
+        .await
+        .map_err(|_| ApiError::not_found("thread not found"))?;
+    Ok(thread)
+}
+
 async fn require_session(state: &AppState, headers: &HeaderMap) -> Result<UserSession, ApiError> {
     let Some(cookie) = headers
         .get(header::COOKIE)
@@ -920,13 +1421,6 @@ impl ApiError {
         }
     }
 
-    fn forbidden() -> Self {
-        Self {
-            status: StatusCode::FORBIDDEN,
-            message: "Acceso denegado".to_string(),
-        }
-    }
-
     fn bad_request(message: &str) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
@@ -973,5 +1467,441 @@ impl GoogleResponseExt for reqwest::Response {
         serde_json::from_str(&text).map_err(|error| {
             anyhow::anyhow!("{label} returned invalid JSON: {error}; body: {text}")
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use axum::{
+        body::Body,
+        http::{Method, Request, StatusCode, header},
+    };
+    use chrono::Utc;
+    use http_body_util::BodyExt;
+    use serde_json::json;
+    use tower::ServiceExt;
+
+    use super::*;
+    use crate::{
+        analysis::{AnalysisConfig, Classification},
+        auth::sign_session_id,
+        config::test_app_config,
+        policies::OrgConfigResponse,
+        storage::MemoryStorage,
+    };
+
+    struct TestApp {
+        app: axum::Router,
+        alice_cookie: String,
+        bob_cookie: String,
+    }
+
+    async fn seeded_app() -> TestApp {
+        let config = test_app_config();
+        let storage = MemoryStorage::default();
+        storage
+            .upsert_user_session(&session("alice-session", "alice@example.com"))
+            .await
+            .unwrap();
+        storage
+            .upsert_user_session(&session("bob-session", "bob@example.com"))
+            .await
+            .unwrap();
+        let alice_run = run("run-alice", "alice@example.com");
+        let bob_run = run("run-bob", "bob@example.com");
+        storage.create_analysis_run(&alice_run).await.unwrap();
+        storage.create_analysis_run(&bob_run).await.unwrap();
+        storage
+            .upsert_thread(
+                &thread("thread-alice", "run-alice"),
+                &[message("msg-a", "cliente@example.com")],
+            )
+            .await
+            .unwrap();
+        storage
+            .upsert_thread(
+                &thread("thread-bob", "run-bob"),
+                &[message("msg-b", "cliente@example.com")],
+            )
+            .await
+            .unwrap();
+
+        let alice_cookie = signed_cookie("alice-session", &config.session_secret);
+        let bob_cookie = signed_cookie("bob-session", &config.session_secret);
+        TestApp {
+            app: crate::build_app(config, Arc::new(storage)),
+            alice_cookie,
+            bob_cookie,
+        }
+    }
+
+    fn signed_cookie(session_id: &str, secret: &str) -> String {
+        format!(
+            "ghmi_session={}",
+            sign_session_id(session_id, secret).unwrap()
+        )
+    }
+
+    fn session(id: &str, email: &str) -> UserSession {
+        let now = Utc::now();
+        UserSession {
+            id: id.to_string(),
+            google_account_email: email.to_string(),
+            access_token_encrypted: "access".to_string(),
+            refresh_token_encrypted: Some("refresh".to_string()),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn run(id: &str, user_email: &str) -> AnalysisRun {
+        AnalysisRun {
+            id: id.to_string(),
+            user_email: user_email.to_string(),
+            org_id: None,
+            mailbox_id: None,
+            trigger_type: None,
+            policy_version_id: None,
+            policy_hash: None,
+            policy_snapshot: None,
+            gmail_scope_snapshot: vec![],
+            retention_expires_at: None,
+            data_minimization_mode: None,
+            config: AnalysisConfig {
+                date_from: "2026-06-01".to_string(),
+                date_to: "2026-06-02".to_string(),
+                time_from: "00:00".to_string(),
+                time_to: "23:59".to_string(),
+                timezone: "America/Santiago".to_string(),
+                internal_domains: vec!["example.com".to_string()],
+                ignored_senders: vec![],
+                ignored_domains: vec![],
+                ignored_keywords: vec![],
+            },
+            status: AnalysisStatus::Completed,
+            progress_message: "done".to_string(),
+            processed_threads: 1,
+            total_candidate_threads: 1,
+            metrics: AnalysisMetrics::default(),
+            created_at: Utc::now(),
+            completed_at: Some(Utc::now()),
+            error_message: None,
+        }
+    }
+
+    fn thread(id: &str, run_id: &str) -> EmailThread {
+        let now = Utc::now();
+        EmailThread {
+            id: id.to_string(),
+            analysis_run_id: run_id.to_string(),
+            gmail_thread_id: format!("gmail-{id}"),
+            subject: "Ayuda".to_string(),
+            normalized_subject: "ayuda".to_string(),
+            classification: Classification::ValidClientRequest,
+            classification_source: ClassificationSource::Rules,
+            classification_confidence: 0.9,
+            is_valid_client_request: true,
+            is_answered: false,
+            first_message_at: Some(now),
+            first_client_message_id: Some("msg-a".to_string()),
+            first_internal_reply_message_id: None,
+            last_internal_message_id: None,
+            first_client_message_at: Some(now),
+            first_internal_reply_at: None,
+            last_internal_message_at: None,
+            response_time_minutes: None,
+            resolution_time_minutes: None,
+            manual_review_required: true,
+            manual_override_applied: false,
+            reasons: vec!["test".to_string()],
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn message(id: &str, from: &str) -> EmailMessage {
+        EmailMessage {
+            id: id.to_string(),
+            gmail_message_id: format!("gmail-{id}"),
+            from_email: from.to_string(),
+            from_name: None,
+            to_emails: vec!["help@example.com".to_string()],
+            cc_emails: vec![],
+            date: Utc::now(),
+            subject: "Ayuda".to_string(),
+            snippet: "Necesito ayuda".to_string(),
+            headers: json!({}),
+            is_internal: false,
+            is_external: true,
+            is_automated: false,
+            body_text: None,
+        }
+    }
+
+    async fn response_json<T: serde::de::DeserializeOwned>(
+        response: axum::response::Response,
+    ) -> T {
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    fn request(
+        method: Method,
+        uri: &str,
+        cookie: Option<&str>,
+        body: Option<serde_json::Value>,
+    ) -> Request<Body> {
+        let mut builder = Request::builder().method(method).uri(uri);
+        if let Some(cookie) = cookie {
+            builder = builder.header(header::COOKIE, cookie);
+        }
+        if body.is_some() {
+            builder = builder.header(header::CONTENT_TYPE, "application/json");
+        }
+        builder
+            .body(Body::from(
+                body.map(|value| value.to_string()).unwrap_or_default(),
+            ))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn org_config_provisions_default_policy() {
+        let test = seeded_app().await;
+        let response = test
+            .app
+            .oneshot(request(
+                Method::GET,
+                "/me/org/config",
+                Some(&test.alice_cookie),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: OrgConfigResponse = response_json(response).await;
+        assert_eq!(body.membership.user_email, "alice@example.com");
+        assert_eq!(
+            body.draft.analysis_policy.internal_domains,
+            vec!["example.com"]
+        );
+        assert!(!body.draft.ai_policy.enabled);
+        assert_eq!(body.draft.retention_policy.retention_days, 30);
+        assert_eq!(body.setup_state.missing, vec!["valid_request_criteria"]);
+    }
+
+    #[tokio::test]
+    async fn org_config_requires_ai_consent_and_updates_policy_version() {
+        let test = seeded_app().await;
+        let response = test
+            .app
+            .clone()
+            .oneshot(request(
+                Method::PUT,
+                "/me/org/config",
+                Some(&test.alice_cookie),
+                Some(json!({ "ai_policy": { "enabled": true } })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let response = test
+            .app
+            .oneshot(request(
+                Method::PUT,
+                "/me/org/config",
+                Some(&test.alice_cookie),
+                Some(json!({
+                    "analysis_policy": {
+                        "valid_request_criteria": ["Clientes externos solicitan soporte"]
+                    },
+                    "ai_policy": {
+                        "enabled": true,
+                        "consent_confirmed": true
+                    },
+                    "retention_policy": { "retention_days": 60 }
+                })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = response_json(response).await;
+        assert_eq!(body["policy_version"]["version"], 2);
+        assert_eq!(body["setup_state"]["ready_for_analysis"], true);
+    }
+
+    #[tokio::test]
+    async fn policy_run_uses_snapshot_and_keeps_legacy_compatibility() {
+        let test = seeded_app().await;
+        let response = test
+            .app
+            .clone()
+            .oneshot(request(
+                Method::PUT,
+                "/me/org/config",
+                Some(&test.alice_cookie),
+                Some(json!({
+                    "analysis_policy": {
+                        "valid_request_criteria": ["Clientes externos solicitan soporte"]
+                    }
+                })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = test
+            .app
+            .clone()
+            .oneshot(request(
+                Method::POST,
+                "/analysis-runs",
+                Some(&test.alice_cookie),
+                Some(json!({
+                    "date_from": "2026-06-01",
+                    "date_to": "2026-06-02"
+                })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let run: AnalysisRun = response_json(response).await;
+        assert!(run.org_id.is_some());
+        assert!(run.policy_snapshot.is_some());
+        assert_eq!(run.config.internal_domains, vec!["example.com"]);
+        assert_eq!(
+            run.retention_expires_at,
+            run.created_at.checked_add_days(chrono::Days::new(30))
+        );
+
+        let response = test
+            .app
+            .oneshot(request(
+                Method::POST,
+                "/analysis-runs",
+                Some(&test.alice_cookie),
+                Some(json!({
+                    "date_from": "2026-06-01",
+                    "date_to": "2026-06-02",
+                    "internal_domains": ["legacy.test"]
+                })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let legacy: AnalysisRun = response_json(response).await;
+        assert!(legacy.org_id.is_none());
+        assert!(legacy.policy_snapshot.is_none());
+        assert_eq!(legacy.config.internal_domains, vec!["legacy.test"]);
+    }
+
+    #[tokio::test]
+    async fn owned_run_endpoints_require_session() {
+        let test = seeded_app().await;
+        let response = test
+            .app
+            .oneshot(request(Method::GET, "/analysis-runs/run-alice", None, None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn foreign_run_endpoints_return_not_found() {
+        let test = seeded_app().await;
+        for uri in [
+            "/analysis-runs/run-alice",
+            "/analysis-runs/run-alice/status",
+            "/analysis-runs/run-alice/metrics",
+            "/analysis-runs/run-alice/threads",
+            "/analysis-runs/run-alice/events",
+        ] {
+            let response = test
+                .app
+                .clone()
+                .oneshot(request(Method::GET, uri, Some(&test.bob_cookie), None))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn foreign_thread_read_and_manual_review_return_not_found() {
+        let test = seeded_app().await;
+        let response = test
+            .app
+            .clone()
+            .oneshot(request(
+                Method::GET,
+                "/threads/thread-alice",
+                Some(&test.bob_cookie),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let response = test
+            .app
+            .oneshot(request(
+                Method::PATCH,
+                "/threads/thread-alice/manual-review",
+                Some(&test.bob_cookie),
+                Some(json!({
+                    "reviewer_label": "spoofed-admin@example.com",
+                    "new_classification": "misc",
+                    "is_valid_client_request": false,
+                    "is_answered": false,
+                    "first_client_message_id": null,
+                    "first_internal_reply_message_id": null,
+                    "last_internal_message_id": null,
+                    "notes": "should not be applied"
+                })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn owner_can_read_threads_and_apply_manual_review() {
+        let test = seeded_app().await;
+        let response = test
+            .app
+            .clone()
+            .oneshot(request(
+                Method::GET,
+                "/threads/thread-alice",
+                Some(&test.alice_cookie),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = test
+            .app
+            .oneshot(request(
+                Method::PATCH,
+                "/threads/thread-alice/manual-review",
+                Some(&test.alice_cookie),
+                Some(json!({
+                    "reviewer_label": "spoofed-admin@example.com",
+                    "new_classification": "misc",
+                    "is_valid_client_request": false,
+                    "is_answered": false,
+                    "first_client_message_id": null,
+                    "first_internal_reply_message_id": null,
+                    "last_internal_message_id": null,
+                    "notes": "confirmed ignored"
+                })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 }

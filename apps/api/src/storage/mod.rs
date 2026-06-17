@@ -8,6 +8,7 @@ use tokio::sync::RwLock;
 use crate::{
     analysis::{AiAuditResult, AnalysisRun, EmailMessage, EmailThread, ManualReview},
     auth::UserSession,
+    policies::{OrgConfigBundle, PolicyVersion},
     scheduler::model::{ScheduleConfig, ScheduleState},
 };
 
@@ -25,6 +26,17 @@ pub trait StorageRepository: Send + Sync {
     async fn upsert_schedule_config(&self, config: &ScheduleConfig) -> anyhow::Result<()>;
     async fn get_schedule_state(&self, user_email: &str) -> anyhow::Result<Option<ScheduleState>>;
     async fn upsert_schedule_state(&self, state: &ScheduleState) -> anyhow::Result<()>;
+    async fn get_org_config_for_user(
+        &self,
+        user_email: &str,
+    ) -> anyhow::Result<Option<OrgConfigBundle>>;
+    async fn upsert_org_config(&self, bundle: &OrgConfigBundle) -> anyhow::Result<()>;
+    async fn get_policy_version(
+        &self,
+        org_id: &str,
+        policy_version_id: &str,
+    ) -> anyhow::Result<Option<PolicyVersion>>;
+    async fn user_is_org_member(&self, org_id: &str, user_email: &str) -> anyhow::Result<bool>;
     async fn create_analysis_run(&self, run: &AnalysisRun) -> anyhow::Result<()>;
     async fn update_analysis_run(&self, run: &AnalysisRun) -> anyhow::Result<()>;
     async fn get_analysis_run(&self, id: &str) -> anyhow::Result<Option<AnalysisRun>>;
@@ -65,6 +77,8 @@ struct MemoryInner {
     reviews: Vec<ManualReview>,
     schedule_configs: HashMap<String, ScheduleConfig>,
     schedule_states: HashMap<String, ScheduleState>,
+    org_configs: HashMap<String, OrgConfigBundle>,
+    policy_versions: HashMap<String, PolicyVersion>,
 }
 
 #[async_trait]
@@ -136,6 +150,60 @@ impl StorageRepository for MemoryStorage {
             .schedule_states
             .insert(state.user_email.clone(), state.clone());
         Ok(())
+    }
+
+    async fn get_org_config_for_user(
+        &self,
+        user_email: &str,
+    ) -> anyhow::Result<Option<OrgConfigBundle>> {
+        Ok(self
+            .inner
+            .read()
+            .await
+            .org_configs
+            .get(&user_email.trim().to_lowercase())
+            .cloned())
+    }
+
+    async fn upsert_org_config(&self, bundle: &OrgConfigBundle) -> anyhow::Result<()> {
+        let mut inner = self.inner.write().await;
+        inner.org_configs.insert(
+            bundle.membership.user_email.trim().to_lowercase(),
+            bundle.clone(),
+        );
+        inner.policy_versions.insert(
+            format!(
+                "{}:{}",
+                bundle.policy_version.org_id, bundle.policy_version.id
+            ),
+            bundle.policy_version.clone(),
+        );
+        Ok(())
+    }
+
+    async fn get_policy_version(
+        &self,
+        org_id: &str,
+        policy_version_id: &str,
+    ) -> anyhow::Result<Option<PolicyVersion>> {
+        Ok(self
+            .inner
+            .read()
+            .await
+            .policy_versions
+            .get(&format!("{org_id}:{policy_version_id}"))
+            .cloned())
+    }
+
+    async fn user_is_org_member(&self, org_id: &str, user_email: &str) -> anyhow::Result<bool> {
+        Ok(self.inner.read().await.org_configs.values().any(|bundle| {
+            bundle.org.id == org_id
+                && bundle
+                    .membership
+                    .user_email
+                    .eq_ignore_ascii_case(user_email)
+                && bundle.membership.status == crate::policies::MembershipStatus::Active
+        }))
     }
 
     async fn create_analysis_run(&self, run: &AnalysisRun) -> anyhow::Result<()> {
@@ -251,10 +319,16 @@ impl StorageRepository for MemoryStorage {
 
     async fn add_manual_review(&self, run_id: &str, review: &ManualReview) -> anyhow::Result<()> {
         let mut inner = self.inner.write().await;
+        if !inner.runs.contains_key(run_id) {
+            return Err(anyhow!("run not found"));
+        }
         let thread = inner
             .threads
             .get_mut(&review.email_thread_id)
             .ok_or_else(|| anyhow!("thread not found"))?;
+        if thread.analysis_run_id != run_id {
+            return Err(anyhow!("thread does not belong to run"));
+        }
         thread.classification = review.new_classification.clone();
         thread.classification_source = crate::analysis::ClassificationSource::Manual;
         thread.is_valid_client_request = review.is_valid_client_request;
@@ -288,9 +362,6 @@ impl StorageRepository for MemoryStorage {
             notes: review.notes.clone(),
             created_at: review.created_at,
         });
-        if !inner.runs.contains_key(run_id) {
-            return Err(anyhow!("run not found"));
-        }
         Ok(())
     }
 }

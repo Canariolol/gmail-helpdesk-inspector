@@ -352,6 +352,15 @@ async fn create_scheduled_run(
     let run = AnalysisRun {
         id: Uuid::new_v4().to_string(),
         user_email: config.user_email.clone(),
+        org_id: None,
+        mailbox_id: None,
+        trigger_type: Some(crate::analysis::TriggerType::Scheduled),
+        policy_version_id: None,
+        policy_hash: None,
+        policy_snapshot: None,
+        gmail_scope_snapshot: vec![],
+        retention_expires_at: None,
+        data_minimization_mode: Some("metadata_snippets_excerpts_only".to_string()),
         config: AnalysisConfig {
             date_from: window.date_from.clone(),
             date_to: window.date_to.clone(),

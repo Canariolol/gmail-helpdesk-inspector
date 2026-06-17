@@ -1,4 +1,5 @@
 import type { Classification } from "../api/types";
+import { PrivacyCallout } from "../components/common/PrivacyCallout";
 import { StatusBadge } from "../components/common/StatusBadge";
 
 const classifications: Classification[] = [
@@ -55,10 +56,23 @@ export function AyudaView() {
       <section className="card">
         <h2>Métricas</h2>
         <ul className="help-list plain">
-          <li><strong>T. medio respuesta:</strong> promedio entre la recepción del primer mensaje del cliente y la primera respuesta interna.</li>
+          <li>
+            <strong>T. medio respuesta:</strong> promedio entre la recepción del primer mensaje del cliente y la primera
+            respuesta interna.
+          </li>
           <li><strong>P90 respuesta:</strong> el 90% de las solicitudes se respondió en este tiempo o menos.</li>
           <li><strong>Cierre medio:</strong> promedio entre la recepción y el último envío interno del hilo.</li>
           <li><strong>Confianza:</strong> certeza promedio de la clasificación automática (reglas + IA).</li>
+        </ul>
+      </section>
+      <section className="card">
+        <h2>Privacidad y permisos</h2>
+        <PrivacyCallout />
+        <ul className="help-list plain">
+          <li>El permiso de Gmail usado por la aplicación es exclusivamente <code>gmail.readonly</code>.</li>
+          <li>Gmail Inspector no envía, etiqueta, archiva, edita ni elimina correos.</li>
+          <li>Los cuerpos completos se usan solo durante el análisis/auditoría y no se persisten en Firestore.</li>
+          <li>Las métricas guardan trazabilidad: puedes revisar qué hilos componen cada número.</li>
         </ul>
       </section>
     </div>

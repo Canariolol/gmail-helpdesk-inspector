@@ -1,10 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { api } from "./api/client";
-import type { AnalysisRun, EmailThread, ThreadDetail } from "./api/types";
+import type { AnalysisRun, EmailThread, OrgConfig, ThreadDetail } from "./api/types";
 import { Sidebar } from "./components/layout/Sidebar";
 import type { AppView } from "./components/layout/Sidebar";
 import { AyudaView } from "./views/AyudaView";
+import { ConfiguracionView } from "./views/ConfiguracionView";
 import { HilosView } from "./views/HilosView";
 import { LoginView } from "./views/LoginView";
 import { ReportesView } from "./views/ReportesView";
@@ -22,6 +23,14 @@ export function App() {
     queryKey: ["me"],
     queryFn: () => api<{ email: string }>("/auth/me"),
     retry: false,
+  });
+
+  const orgConfig = useQuery({
+    queryKey: ["org-config"],
+    queryFn: () => api<OrgConfig>("/me/org/config"),
+    enabled: me.isSuccess,
+    retry: false,
+    staleTime: 30_000,
   });
 
   const runs = useQuery({
@@ -113,9 +122,13 @@ export function App() {
     api("/auth/logout", { method: "POST" }).then(() => location.reload());
   };
 
+  const handleGoToSetup = () => setView("configuracion");
+
   if (me.isError) {
     return <LoginView />;
   }
+
+  const currentOrgConfig = orgConfig.data ?? null;
 
   return (
     <div className="app-shell">
@@ -144,6 +157,8 @@ export function App() {
             onStartRun={() => selectedRun && startRun.mutate(selectedRun.id)}
             startingRun={startRun.isPending}
             onViewDetails={() => setView("hilos")}
+            orgConfig={currentOrgConfig}
+            onGoToSetup={handleGoToSetup}
           />
         )}
         {(view === "hilos" || view === "revision") && (
@@ -164,6 +179,13 @@ export function App() {
           <RunsView runs={runs.data ?? []} selectedRunId={selectedRunId} onSelect={handleSelectRun} />
         )}
         {view === "reportes" && <ReportesView runs={runs.data ?? []} />}
+        {view === "configuracion" && (
+          <ConfiguracionView
+            orgConfig={currentOrgConfig}
+            isLoading={orgConfig.isLoading}
+            isError={orgConfig.isError}
+          />
+        )}
         {view === "ayuda" && <AyudaView />}
       </main>
     </div>

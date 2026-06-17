@@ -28,7 +28,6 @@ export function ReviewForm({ detail, onReview, saving }: Props) {
       onSubmit={(event) => {
         event.preventDefault();
         onReview({
-          reviewer_label: "local-user",
           new_classification: classification,
           is_valid_client_request: valid,
           is_answered: answered,

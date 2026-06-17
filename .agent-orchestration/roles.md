@@ -11,6 +11,7 @@ Responsabilidades:
 - Integrar o rechazar outputs de Codex/Claude.
 - Evitar que agentes toquen secretos, `.env`, credenciales o cambios fuera de alcance.
 - Decidir cuándo conviene paralelizar o escalar modelo.
+- Mantener al dueño del producto in-the-loop: consolidar dudas de agentes, sugerir opciones y pedir decisión cuando corresponda.
 
 Pi puede tocar todo el repo excepto secretos, pero debe documentar decisiones relevantes.
 
@@ -36,7 +37,7 @@ Output esperado:
 - Secuencia recomendada.
 - Paths impactados.
 - Criterios de aceptación.
-- Preguntas abiertas.
+- Preguntas abiertas en formato `BLOCKED_QUESTIONS` cuando haya ambigüedad.
 
 ## Claude — UI/UX, diseño de producto e implementación frontend
 
@@ -60,13 +61,17 @@ Output esperado:
 - Estados cubiertos.
 - Consideraciones de accesibilidad.
 - Dependencias sobre API/datos.
+- Preguntas abiertas en formato `BLOCKED_QUESTIONS` cuando la UX dependa de una decisión de producto, privacidad o backend.
 
 ## Reglas compartidas
 
+- Leer y respetar `.agent-orchestration/human-in-loop.md` antes de planificar o implementar.
+- No asumir decisiones ambiguas: preguntar a Pi usando `BLOCKED_QUESTIONS` o declarar `ASSUMPTIONS` si se puede avanzar sin riesgo.
 - No leer ni modificar `.env`, `secrets/*`, tokens ni credenciales.
 - No tocar archivos fuera de `Puede tocar` en la task.
 - No instalar dependencias sin justificarlo.
 - No cambiar scopes Gmail. El scope base debe seguir siendo `gmail.readonly`.
 - No agregar envío/modificación de Gmail.
 - No introducir persistencia de cuerpos completos de email sin decisión explícita.
+- No mantener hardcodes de la empresa original para comportamiento SaaS: dominios, contexto IA, reportes, timezone, filtros, umbrales y defaults deben ser configurables por usuario/organización.
 - Todo cambio debe ser auditable y reversible.

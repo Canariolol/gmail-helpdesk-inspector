@@ -1,7 +1,7 @@
-import { BarChart3, ClipboardList, HelpCircle, History, LayoutDashboard, LogOut, MessagesSquare } from "lucide-react";
+import { BarChart3, ClipboardList, HelpCircle, History, LayoutDashboard, LogOut, MessagesSquare, Settings } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
-export type AppView = "resumen" | "hilos" | "revision" | "anteriores" | "reportes" | "ayuda";
+export type AppView = "resumen" | "hilos" | "revision" | "anteriores" | "reportes" | "configuracion" | "ayuda";
 
 type Props = {
   view: AppView;
@@ -17,10 +17,20 @@ const navItems: Array<{ view: AppView; label: string; icon: LucideIcon }> = [
   { view: "revision", label: "Revisión manual", icon: ClipboardList },
   { view: "anteriores", label: "Análisis anteriores", icon: History },
   { view: "reportes", label: "Reportes", icon: BarChart3 },
-  { view: "ayuda", label: "Ayuda", icon: HelpCircle },
+  { view: "configuracion", label: "Configuración", icon: Settings },
+  { view: "ayuda", label: "Ayuda y privacidad", icon: HelpCircle },
 ];
 
 export function Sidebar({ view, onNavigate, email, reviewCount, onLogout }: Props) {
+  const localPart = email.split("@")[0] ?? "";
+  const initials =
+    localPart
+      .split(/[._-]/)
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((part) => part[0]?.toUpperCase())
+      .join("") || "GI";
+
   return (
     <aside className="sidebar">
       <div className="sidebar-brand">
@@ -34,6 +44,7 @@ export function Sidebar({ view, onNavigate, email, reviewCount, onLogout }: Prop
             type="button"
             key={item.view}
             className={item.view === view ? "nav-item active" : "nav-item"}
+            aria-current={item.view === view ? "page" : undefined}
             onClick={() => onNavigate(item.view)}
           >
             <item.icon size={18} />
@@ -43,9 +54,12 @@ export function Sidebar({ view, onNavigate, email, reviewCount, onLogout }: Prop
         ))}
       </nav>
       <div className="sidebar-user">
-        <img src="/logo-192.png" alt="" />
+        <div className="sidebar-avatar" aria-hidden="true">
+          {initials}
+        </div>
         <div className="sidebar-user-info">
           <span className="sidebar-user-email">{email}</span>
+          <span className="sidebar-user-scope">Gmail readonly</span>
         </div>
         <button type="button" className="logout-button" onClick={onLogout}>
           <LogOut size={15} />

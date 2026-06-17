@@ -30,23 +30,52 @@
 
 ### TASK-004 — UI quick wins de confianza
 
-- Estado: ready
-- Owner: Claude
+- Estado: done
+- Owner: Pi/Claude
 - Objetivo: implementar cambios frontend sin bloqueantes: LoginView profesional, PrivacyCallout, OAuthExplainModal, Sidebar a11y, AyudaView privacidad.
+- Output: `.agent-orchestration/runs/TASK-004/pi-implementation.md`
 
-### TASK-005 — Checklist seguridad, privacidad y compliance Gmail
+### TASK-005 — Configuración SaaS parametrizable + política del auditor IA
+
+- Estado: done
+- Owner: Codex/Pi
+- Objetivo: diseñar modelo robusto de configuración por usuario/organización y eliminar hardcodes de la empresa original, incluyendo política del auditor IA.
+- Output: `.agent-orchestration/runs/TASK-005/codex-plan.md`
+- Decisiones del dueño: registradas en `.agent-orchestration/owner-questions.md` y D-011.
+
+### TASK-006 — Remover reviewer_label desde frontend
+
+- Estado: done
+- Owner: Pi
+- Objetivo: limpiar `ReviewForm` para no enviar `reviewer_label`; backend ya usa el email autenticado.
+- Output: `.agent-orchestration/runs/TASK-006/pi-implementation.md`
+
+### TASK-007 — Configuración SaaS incremental
+
+- Estado: done — incremento backend policy-first + UI inicial
+- Owner: Codex/Pi/Claude
+- Objetivo: implementar primer modelo de configuración owner/org-ready para reemplazar hardcodes de dominio, timezone, filtros, IA y scheduler.
+- Outputs:
+  - `.agent-orchestration/runs/TASK-007/codex-plan.md`
+  - `.agent-orchestration/runs/TASK-007/claude-ui.md`
+  - `.agent-orchestration/runs/TASK-007/pi-integration.md`
+  - `.agent-orchestration/runs/TASK-007/pi-implementation.md`
+  - `.agent-orchestration/runs/TASK-007B/claude-implementation.md`
+- Checks: API tests 55 OK, clippy OK, web build OK.
+
+### TASK-008 — Checklist seguridad, privacidad y compliance Gmail
 
 - Estado: backlog
 - Owner: Codex
 - Objetivo: definir requisitos antes de lanzamiento público: OAuth verification, datos sensibles, retention, logs, scopes, términos, privacidad.
 
-### TASK-006 — Backlog técnico por épicas
+### TASK-009 — Backlog técnico por épicas
 
 - Estado: backlog
 - Owner: Pi + Codex
 - Objetivo: convertir el plan aprobado en épicas y tareas implementables con path ownership.
 
-### TASK-007 — Design system SaaS liviano
+### TASK-010 — Design system SaaS liviano
 
 - Estado: backlog
 - Owner: Claude

@@ -10,7 +10,7 @@ Pi | Codex | Claude
 
 ## Modelo recomendado
 
-- Codex: `gpt-5.5-high` / cheaper / n/a
+- Codex: `gpt-5.5` high reasoning / cheaper / n/a
 - Claude: `sonnet` / `opus` / n/a
 - Esfuerzo: low | medium | high | max
 
@@ -46,6 +46,8 @@ Guardar en `.agent-orchestration/runs/TASK-XXX/`:
 - riesgos
 - criterios de aceptación
 - handoff
+- `BLOCKED_QUESTIONS` si hay ambigüedades que requieran decisión de Pi/dueño
+- `ASSUMPTIONS` si se avanza con supuestos no críticos
 
 ## Criterios de aceptación
 
@@ -54,6 +56,12 @@ Guardar en `.agent-orchestration/runs/TASK-XXX/`:
 - [ ] Identifica riesgos.
 - [ ] No toca secretos.
 - [ ] Incluye próximos pasos verificables.
+
+## Preguntas / decision gates
+
+- ¿Qué debe decidir Pi antes de implementar?
+- ¿Qué debe preguntarse al dueño del producto?
+- ¿Qué supuestos serían peligrosos?
 
 ## Handoff
 

@@ -2,6 +2,8 @@ use chrono::{DateTime, NaiveTime, Utc};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 
+use crate::policies::PolicySnapshot;
+
 pub const AI_AUTO_APPLY_THRESHOLD: f64 = 0.92;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -128,10 +130,36 @@ impl Default for AnalysisMetrics {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TriggerType {
+    Manual,
+    Scheduled,
+    Backfill,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnalysisRun {
     pub id: String,
     pub user_email: String,
+    #[serde(default)]
+    pub org_id: Option<String>,
+    #[serde(default)]
+    pub mailbox_id: Option<String>,
+    #[serde(default)]
+    pub trigger_type: Option<TriggerType>,
+    #[serde(default)]
+    pub policy_version_id: Option<String>,
+    #[serde(default)]
+    pub policy_hash: Option<String>,
+    #[serde(default)]
+    pub policy_snapshot: Option<PolicySnapshot>,
+    #[serde(default)]
+    pub gmail_scope_snapshot: Vec<String>,
+    #[serde(default)]
+    pub retention_expires_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub data_minimization_mode: Option<String>,
     pub config: AnalysisConfig,
     pub status: AnalysisStatus,
     pub progress_message: String,
@@ -196,6 +224,18 @@ pub struct EmailThread {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiAuditResult {
+    #[serde(default)]
+    pub policy_version_id: Option<String>,
+    #[serde(default)]
+    pub prompt_version: Option<String>,
+    #[serde(default)]
+    pub model_id: Option<String>,
+    #[serde(default)]
+    pub auto_apply_threshold: Option<f64>,
+    #[serde(default)]
+    pub max_audit_messages: Option<u32>,
+    #[serde(default)]
+    pub max_body_chars_per_message: Option<u32>,
     pub classification: Classification,
     pub is_valid_client_request: bool,
     pub is_answered: bool,
@@ -390,8 +430,9 @@ pub fn classify_thread(
     let mut noise = false;
     if first_message.is_internal {
         noise = true;
-        reasons
-            .push("El hilo abre con un mensaje interno; el cliente humano aparece después.".to_string());
+        reasons.push(
+            "El hilo abre con un mensaje interno; el cliente humano aparece después.".to_string(),
+        );
     }
     if first_message.is_automated {
         noise = true;
@@ -921,6 +962,12 @@ mod tests {
     #[test]
     fn ai_auto_apply_requires_threshold_and_known_ids() {
         let result = AiAuditResult {
+            policy_version_id: None,
+            prompt_version: None,
+            model_id: None,
+            auto_apply_threshold: None,
+            max_audit_messages: None,
+            max_body_chars_per_message: None,
             classification: Classification::ValidClientRequest,
             is_valid_client_request: true,
             is_answered: true,

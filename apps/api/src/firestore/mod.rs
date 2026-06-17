@@ -17,6 +17,7 @@ use crate::{
     analysis::{AiAuditResult, AnalysisRun, EmailMessage, EmailThread, ManualReview},
     auth::UserSession,
     config::{FirestoreConfig, ServiceAccountKey},
+    policies::{OrgConfigBundle, PolicyVersion, hash_owner_email},
     scheduler::model::{ScheduleConfig, ScheduleState},
     storage::StorageRepository,
 };
@@ -81,10 +82,10 @@ impl FirestoreStorage {
         }
 
         let now = epoch();
-        if let Some(cached) = self.token_cache.lock().await.clone() {
-            if cached.expires_at_epoch > now + 60 {
-                return Ok(cached.token);
-            }
+        if let Some(cached) = self.token_cache.lock().await.clone()
+            && cached.expires_at_epoch > now + 60
+        {
+            return Ok(cached.token);
         }
 
         let token = if let Some(path) = &self.config.service_account_path {
@@ -262,6 +263,74 @@ impl StorageRepository for FirestoreStorage {
             .await
     }
 
+    async fn get_org_config_for_user(
+        &self,
+        user_email: &str,
+    ) -> anyhow::Result<Option<OrgConfigBundle>> {
+        self.get(&format!(
+            "ownerProfiles/{}/config/current",
+            hash_owner_email(user_email)
+        ))
+        .await
+    }
+
+    async fn upsert_org_config(&self, bundle: &OrgConfigBundle) -> anyhow::Result<()> {
+        let owner_key = hash_owner_email(&bundle.membership.user_email);
+        self.put(&format!("ownerProfiles/{owner_key}/config/current"), bundle)
+            .await?;
+        self.put(&format!("organizations/{}", bundle.org.id), &bundle.org)
+            .await?;
+        self.put(
+            &format!("organizations/{}/memberships/{}", bundle.org.id, owner_key),
+            &bundle.membership,
+        )
+        .await?;
+        self.put(
+            &format!(
+                "organizations/{}/mailboxes/{}",
+                bundle.org.id, bundle.mailbox.id
+            ),
+            &bundle.mailbox,
+        )
+        .await?;
+        self.put(
+            &format!("organizations/{}/policyDraft/current", bundle.org.id),
+            &bundle.draft,
+        )
+        .await?;
+        self.put(
+            &format!(
+                "organizations/{}/policyVersions/{}",
+                bundle.org.id, bundle.policy_version.id
+            ),
+            &bundle.policy_version,
+        )
+        .await
+    }
+
+    async fn get_policy_version(
+        &self,
+        org_id: &str,
+        policy_version_id: &str,
+    ) -> anyhow::Result<Option<PolicyVersion>> {
+        self.get(&format!(
+            "organizations/{org_id}/policyVersions/{policy_version_id}"
+        ))
+        .await
+    }
+
+    async fn user_is_org_member(&self, org_id: &str, user_email: &str) -> anyhow::Result<bool> {
+        Ok(self
+            .get::<crate::policies::Membership>(&format!(
+                "organizations/{org_id}/memberships/{}",
+                hash_owner_email(user_email)
+            ))
+            .await?
+            .is_some_and(|membership| {
+                membership.status == crate::policies::MembershipStatus::Active
+            }))
+    }
+
     async fn create_analysis_run(&self, run: &AnalysisRun) -> anyhow::Result<()> {
         self.put(&format!("analysisRuns/{}", run.id), run).await
     }
@@ -372,30 +441,39 @@ impl StorageRepository for FirestoreStorage {
     }
 
     async fn add_manual_review(&self, run_id: &str, review: &ManualReview) -> anyhow::Result<()> {
+        if self
+            .get::<AnalysisRun>(&format!("analysisRuns/{run_id}"))
+            .await?
+            .is_none()
+        {
+            return Err(anyhow!("run not found"));
+        }
+        let path = format!("analysisRuns/{run_id}/threads/{}", review.email_thread_id);
+        let mut thread = self
+            .get::<EmailThread>(&path)
+            .await?
+            .ok_or_else(|| anyhow!("thread not found"))?;
+        thread.classification = review.new_classification.clone();
+        thread.classification_source = crate::analysis::ClassificationSource::Manual;
+        thread.is_valid_client_request = review.is_valid_client_request;
+        thread.is_answered = review.is_answered;
+        thread.first_client_message_id = review.first_client_message_id.clone();
+        thread.first_internal_reply_message_id = review.first_internal_reply_message_id.clone();
+        thread.last_internal_message_id = review.last_internal_message_id.clone();
+        thread.first_client_message_at = review.first_client_message_at;
+        thread.first_internal_reply_at = review.first_internal_reply_at;
+        thread.last_internal_message_at = review.last_internal_message_at;
+        thread.response_time_minutes = review.response_time_minutes;
+        thread.resolution_time_minutes = review.resolution_time_minutes;
+        thread.manual_review_required = false;
+        thread.manual_override_applied = true;
+        thread.updated_at = Utc::now();
         self.put(
             &format!("analysisRuns/{run_id}/manualReviews/{}", review.id),
             review,
         )
         .await?;
-        let path = format!("analysisRuns/{run_id}/threads/{}", review.email_thread_id);
-        if let Some(mut thread) = self.get::<EmailThread>(&path).await? {
-            thread.classification = review.new_classification.clone();
-            thread.classification_source = crate::analysis::ClassificationSource::Manual;
-            thread.is_valid_client_request = review.is_valid_client_request;
-            thread.is_answered = review.is_answered;
-            thread.first_client_message_id = review.first_client_message_id.clone();
-            thread.first_internal_reply_message_id = review.first_internal_reply_message_id.clone();
-            thread.last_internal_message_id = review.last_internal_message_id.clone();
-            thread.first_client_message_at = review.first_client_message_at;
-            thread.first_internal_reply_at = review.first_internal_reply_at;
-            thread.last_internal_message_at = review.last_internal_message_at;
-            thread.response_time_minutes = review.response_time_minutes;
-            thread.resolution_time_minutes = review.resolution_time_minutes;
-            thread.manual_review_required = false;
-            thread.manual_override_applied = true;
-            thread.updated_at = Utc::now();
-            self.put(&path, &thread).await?;
-        }
+        self.put(&path, &thread).await?;
         Ok(())
     }
 }
