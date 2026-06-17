@@ -19,5 +19,8 @@ __pycache__/
 *.egg-info/
 apps/ai-worker/src/*.egg-info/
 
+# Agent orchestration
+.agent-orchestration/runs/**/*.log
+
 # OS/editor
 .DS_Store
