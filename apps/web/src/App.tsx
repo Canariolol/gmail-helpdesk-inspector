@@ -7,7 +7,7 @@ import type { AppView } from "./components/layout/Sidebar";
 import { AyudaView } from "./views/AyudaView";
 import { ConfiguracionView } from "./views/ConfiguracionView";
 import { HilosView } from "./views/HilosView";
-import { LoginView } from "./views/LoginView";
+import { LandingPage } from "./views/landing/LandingPage";
 import { PrivacidadDatosView } from "./views/PrivacidadDatosView";
 import { ReportesView } from "./views/ReportesView";
 import { ResumenView } from "./views/ResumenView";
@@ -128,7 +128,7 @@ export function App() {
   const handleGoToSetup = () => setView("configuracion");
 
   if (me.isError) {
-    return <LoginView />;
+    return <LandingPage />;
   }
 
   const currentOrgConfig = orgConfig.data ?? null;

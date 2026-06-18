@@ -390,13 +390,6 @@ pub fn email_domain(email: &str) -> Option<String> {
         .filter(|domain| !domain.is_empty())
 }
 
-pub fn is_consumer_gmail_domain(domain: &str) -> bool {
-    matches!(
-        domain.trim().to_lowercase().as_str(),
-        "gmail.com" | "googlemail.com"
-    )
-}
-
 pub fn hash_owner_email(email: &str) -> String {
     let normalized = email.trim().to_lowercase();
     URL_SAFE_HASH_PREFIX.to_string() + &hex_hash(normalized.as_bytes())

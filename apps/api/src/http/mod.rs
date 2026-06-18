@@ -43,8 +43,8 @@ use crate::{
     gmail::GmailClient,
     policies::{
         AiPolicy, AnalysisPolicy, MailboxPurpose, OrgConfigBundle, OrgConfigResponse,
-        PolicyVersion, ScheduleReportPolicy, email_domain, is_consumer_gmail_domain,
-        normalize_domains, normalize_list, policy_version_from_draft, provision_default_config,
+        PolicyVersion, ScheduleReportPolicy, normalize_domains, normalize_list,
+        policy_version_from_draft, provision_default_config,
         retention_expires_at, setup_state, validate_timezone,
     },
     scheduler::{
@@ -740,7 +740,7 @@ async fn update_org_config(
 ) -> Result<Json<UpdateOrgConfigResponse>, ApiError> {
     let session = require_session(&state, &headers).await?;
     let mut bundle = get_or_provision_org_config(&state, &session.google_account_email).await?;
-    apply_org_config_update(&mut bundle, request, &session.google_account_email)?;
+    apply_org_config_update(&mut bundle, request)?;
     let now = Utc::now();
     bundle.org.updated_at = now;
     bundle.draft.updated_at = now;
@@ -791,7 +791,6 @@ async fn sync_schedule_config_from_policy(
 fn apply_org_config_update(
     bundle: &mut OrgConfigBundle,
     request: OrgConfigUpdateRequest,
-    user_email: &str,
 ) -> Result<(), ApiError> {
     if let Some(org) = request.org {
         if let Some(name) = org.name.map(|value| value.trim().to_string())
@@ -839,14 +838,6 @@ fn apply_org_config_update(
             ));
         }
         bundle.draft.retention_policy.retention_days = days;
-    }
-    let Some(domain) = email_domain(user_email) else {
-        return Err(ApiError::bad_request("email de cuenta Google inválido"));
-    };
-    if is_consumer_gmail_domain(&domain) {
-        return Err(ApiError::bad_request(
-            "la beta privada acepta solo cuentas Google Workspace",
-        ));
     }
     Ok(())
 }
@@ -2275,6 +2266,35 @@ mod tests {
         assert!(!body.draft.ai_policy.enabled);
         assert_eq!(body.draft.retention_policy.retention_days, 30);
         assert_eq!(body.setup_state.missing, vec!["valid_request_criteria"]);
+    }
+
+    #[tokio::test]
+    async fn org_config_accepts_personal_gmail_account() {
+        // La beta ahora acepta cualquier cuenta de Google, incluidas las
+        // personales @gmail.com (antes devolvía 400 "solo Workspace").
+        let config = test_app_config();
+        let storage = MemoryStorage::default();
+        storage
+            .upsert_user_session(&session("gmail-session", "persona@gmail.com"))
+            .await
+            .unwrap();
+        let cookie = signed_cookie("gmail-session", &config.session_secret);
+        let app = crate::build_app(config, Arc::new(storage));
+
+        let response = app
+            .oneshot(request(
+                Method::PUT,
+                "/me/org/config",
+                Some(&cookie),
+                Some(json!({
+                    "analysis_policy": {
+                        "valid_request_criteria": ["Clientes externos solicitan soporte"]
+                    }
+                })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]

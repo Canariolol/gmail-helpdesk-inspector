@@ -419,7 +419,7 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
               <div>
                 <h3 className="wizard-step-title">Organización y contexto</h3>
                 <p className="wizard-step-desc">
-                  Esta beta está pensada para Google Workspace. Usamos Gmail solo lectura y la zona horaria de tu equipo
+                  Funciona con cualquier cuenta de Google. Usamos Gmail solo lectura y la zona horaria de tu equipo
                   para calcular ventanas y reportes.
                 </p>
               </div>
