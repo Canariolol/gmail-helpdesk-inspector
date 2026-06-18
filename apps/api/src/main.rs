@@ -1,5 +1,6 @@
 mod analysis;
 mod auth;
+mod billing;
 mod config;
 mod firestore;
 mod gmail;

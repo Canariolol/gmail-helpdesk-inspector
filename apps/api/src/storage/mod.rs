@@ -8,12 +8,19 @@ use tokio::sync::RwLock;
 use crate::{
     analysis::{AiAuditResult, AnalysisRun, EmailMessage, EmailThread, ManualReview},
     auth::UserSession,
+    billing::{Account, CheckoutSession, Subscription, UsageLedger},
     policies::{OrgConfigBundle, PolicyVersion},
     scheduler::model::{ScheduleConfig, ScheduleState},
 };
 
 #[async_trait]
 pub trait StorageRepository: Send + Sync {
+    async fn upsert_account(&self, account: &Account) -> anyhow::Result<()>;
+    async fn get_account_by_workos_user_id(
+        &self,
+        workos_user_id: &str,
+    ) -> anyhow::Result<Option<Account>>;
+    async fn get_account_by_email(&self, email: &str) -> anyhow::Result<Option<Account>>;
     async fn upsert_user_session(&self, session: &UserSession) -> anyhow::Result<()>;
     async fn get_user_session(&self, id: &str) -> anyhow::Result<Option<UserSession>>;
     /// Sesión más reciente del usuario que tenga refresh token; la usa el
@@ -37,6 +44,24 @@ pub trait StorageRepository: Send + Sync {
         policy_version_id: &str,
     ) -> anyhow::Result<Option<PolicyVersion>>;
     async fn user_is_org_member(&self, org_id: &str, user_email: &str) -> anyhow::Result<bool>;
+    async fn upsert_subscription(&self, subscription: &Subscription) -> anyhow::Result<()>;
+    async fn get_subscription_for_org(&self, org_id: &str) -> anyhow::Result<Option<Subscription>>;
+    async fn find_subscription_by_provider_id(
+        &self,
+        provider_subscription_id: &str,
+    ) -> anyhow::Result<Option<Subscription>>;
+    async fn upsert_checkout_session(&self, checkout: &CheckoutSession) -> anyhow::Result<()>;
+    async fn get_checkout_session(&self, id: &str) -> anyhow::Result<Option<CheckoutSession>>;
+    async fn find_checkout_session_by_provider_id(
+        &self,
+        provider_subscription_id: &str,
+    ) -> anyhow::Result<Option<CheckoutSession>>;
+    async fn upsert_usage_ledger(&self, usage: &UsageLedger) -> anyhow::Result<()>;
+    async fn get_usage_ledger(
+        &self,
+        org_id: &str,
+        period_key: &str,
+    ) -> anyhow::Result<Option<UsageLedger>>;
     async fn create_analysis_run(&self, run: &AnalysisRun) -> anyhow::Result<()>;
     async fn update_analysis_run(&self, run: &AnalysisRun) -> anyhow::Result<()>;
     async fn get_analysis_run(&self, id: &str) -> anyhow::Result<Option<AnalysisRun>>;
@@ -70,6 +95,7 @@ pub struct MemoryStorage {
 #[derive(Default)]
 struct MemoryInner {
     sessions: HashMap<String, UserSession>,
+    accounts: HashMap<String, Account>,
     runs: HashMap<String, AnalysisRun>,
     threads: HashMap<String, EmailThread>,
     messages: HashMap<String, Vec<EmailMessage>>,
@@ -79,10 +105,47 @@ struct MemoryInner {
     schedule_states: HashMap<String, ScheduleState>,
     org_configs: HashMap<String, OrgConfigBundle>,
     policy_versions: HashMap<String, PolicyVersion>,
+    subscriptions: HashMap<String, Subscription>,
+    checkout_sessions: HashMap<String, CheckoutSession>,
+    usage_ledgers: HashMap<String, UsageLedger>,
 }
 
 #[async_trait]
 impl StorageRepository for MemoryStorage {
+    async fn upsert_account(&self, account: &Account) -> anyhow::Result<()> {
+        self.inner
+            .write()
+            .await
+            .accounts
+            .insert(account.workos_user_id.clone(), account.clone());
+        Ok(())
+    }
+
+    async fn get_account_by_workos_user_id(
+        &self,
+        workos_user_id: &str,
+    ) -> anyhow::Result<Option<Account>> {
+        Ok(self
+            .inner
+            .read()
+            .await
+            .accounts
+            .get(workos_user_id)
+            .cloned())
+    }
+
+    async fn get_account_by_email(&self, email: &str) -> anyhow::Result<Option<Account>> {
+        let normalized = email.trim().to_lowercase();
+        Ok(self
+            .inner
+            .read()
+            .await
+            .accounts
+            .values()
+            .find(|account| account.email.trim().eq_ignore_ascii_case(&normalized))
+            .cloned())
+    }
+
     async fn upsert_user_session(&self, session: &UserSession) -> anyhow::Result<()> {
         self.inner
             .write()
@@ -107,7 +170,9 @@ impl StorageRepository for MemoryStorage {
             .sessions
             .values()
             .filter(|session| {
-                session.google_account_email == email && session.refresh_token_encrypted.is_some()
+                session.google_account_email == email
+                    && (session.gmail_refresh_token_encrypted.is_some()
+                        || session.refresh_token_encrypted.is_some())
             })
             .max_by_key(|session| session.updated_at)
             .cloned())
@@ -204,6 +269,86 @@ impl StorageRepository for MemoryStorage {
                     .eq_ignore_ascii_case(user_email)
                 && bundle.membership.status == crate::policies::MembershipStatus::Active
         }))
+    }
+
+    async fn upsert_subscription(&self, subscription: &Subscription) -> anyhow::Result<()> {
+        self.inner
+            .write()
+            .await
+            .subscriptions
+            .insert(subscription.org_id.clone(), subscription.clone());
+        Ok(())
+    }
+
+    async fn get_subscription_for_org(&self, org_id: &str) -> anyhow::Result<Option<Subscription>> {
+        Ok(self.inner.read().await.subscriptions.get(org_id).cloned())
+    }
+
+    async fn find_subscription_by_provider_id(
+        &self,
+        provider_subscription_id: &str,
+    ) -> anyhow::Result<Option<Subscription>> {
+        Ok(self
+            .inner
+            .read()
+            .await
+            .subscriptions
+            .values()
+            .find(|subscription| {
+                subscription.provider_subscription_id.as_deref() == Some(provider_subscription_id)
+            })
+            .cloned())
+    }
+
+    async fn upsert_checkout_session(&self, checkout: &CheckoutSession) -> anyhow::Result<()> {
+        self.inner
+            .write()
+            .await
+            .checkout_sessions
+            .insert(checkout.id.clone(), checkout.clone());
+        Ok(())
+    }
+
+    async fn get_checkout_session(&self, id: &str) -> anyhow::Result<Option<CheckoutSession>> {
+        Ok(self.inner.read().await.checkout_sessions.get(id).cloned())
+    }
+
+    async fn find_checkout_session_by_provider_id(
+        &self,
+        provider_subscription_id: &str,
+    ) -> anyhow::Result<Option<CheckoutSession>> {
+        Ok(self
+            .inner
+            .read()
+            .await
+            .checkout_sessions
+            .values()
+            .find(|checkout| {
+                checkout.provider_subscription_id.as_deref() == Some(provider_subscription_id)
+            })
+            .cloned())
+    }
+
+    async fn upsert_usage_ledger(&self, usage: &UsageLedger) -> anyhow::Result<()> {
+        self.inner.write().await.usage_ledgers.insert(
+            format!("{}:{}", usage.org_id, usage.period_key),
+            usage.clone(),
+        );
+        Ok(())
+    }
+
+    async fn get_usage_ledger(
+        &self,
+        org_id: &str,
+        period_key: &str,
+    ) -> anyhow::Result<Option<UsageLedger>> {
+        Ok(self
+            .inner
+            .read()
+            .await
+            .usage_ledgers
+            .get(&format!("{org_id}:{period_key}"))
+            .cloned())
     }
 
     async fn create_analysis_run(&self, run: &AnalysisRun) -> anyhow::Result<()> {
@@ -377,9 +522,13 @@ mod tests {
         let at = Utc::now() - Duration::minutes(age_minutes);
         UserSession {
             id: id.to_string(),
+            workos_user_id: Some(format!("workos-{id}")),
             google_account_email: email.to_string(),
+            gmail_account_email: Some(email.to_string()),
             access_token_encrypted: "access".to_string(),
             refresh_token_encrypted: refresh.map(ToOwned::to_owned),
+            gmail_access_token_encrypted: Some("access".to_string()),
+            gmail_refresh_token_encrypted: refresh.map(ToOwned::to_owned),
             created_at: at,
             updated_at: at,
         }

@@ -1,7 +1,7 @@
-import { BarChart3, ClipboardList, HelpCircle, History, LayoutDashboard, Lock, LogOut, MessagesSquare, Settings } from "lucide-react";
+import { BarChart3, ClipboardList, CreditCard, HelpCircle, History, LayoutDashboard, Lock, LogOut, MessagesSquare, Settings } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
-export type AppView = "resumen" | "hilos" | "revision" | "anteriores" | "reportes" | "configuracion" | "privacidad" | "ayuda";
+export type AppView = "resumen" | "hilos" | "revision" | "anteriores" | "reportes" | "cuenta" | "configuracion" | "privacidad" | "ayuda";
 
 type Props = {
   view: AppView;
@@ -9,6 +9,8 @@ type Props = {
   email: string;
   reviewCount: number;
   onLogout: () => void;
+  /** Si se provee, solo se muestran estas vistas (p. ej. cuando el plan está bloqueado). */
+  availableViews?: AppView[];
 };
 
 const navItems: Array<{ view: AppView; label: string; icon: LucideIcon }> = [
@@ -17,12 +19,17 @@ const navItems: Array<{ view: AppView; label: string; icon: LucideIcon }> = [
   { view: "revision", label: "Revisión manual", icon: ClipboardList },
   { view: "anteriores", label: "Análisis anteriores", icon: History },
   { view: "reportes", label: "Reportes", icon: BarChart3 },
+  { view: "cuenta", label: "Plan y cuenta", icon: CreditCard },
   { view: "configuracion", label: "Configuración", icon: Settings },
   { view: "privacidad", label: "Privacidad y datos", icon: Lock },
   { view: "ayuda", label: "Ayuda", icon: HelpCircle },
 ];
 
-export function Sidebar({ view, onNavigate, email, reviewCount, onLogout }: Props) {
+export function Sidebar({ view, onNavigate, email, reviewCount, onLogout, availableViews }: Props) {
+  const items = availableViews
+    ? navItems.filter((item) => availableViews.includes(item.view))
+    : navItems;
+
   const localPart = email.split("@")[0] ?? "";
   const initials =
     localPart
@@ -40,7 +47,7 @@ export function Sidebar({ view, onNavigate, email, reviewCount, onLogout }: Prop
         <span>Análisis de correos</span>
       </div>
       <nav className="sidebar-nav" aria-label="Navegación principal">
-        {navItems.map((item) => (
+        {items.map((item) => (
           <button
             type="button"
             key={item.view}

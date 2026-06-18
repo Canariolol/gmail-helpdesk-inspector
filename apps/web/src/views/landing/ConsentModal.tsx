@@ -22,22 +22,22 @@ export function ConsentModal({ loginUrl, onClose }: ConsentModalProps) {
         <div className="lp-modal-icon" aria-hidden="true">
           <ShieldCheck size={26} />
         </div>
-        <h2 id="lp-consent-title">Antes de continuar con Google</h2>
+        <h2 id="lp-consent-title">Crea tu cuenta para empezar</h2>
         <p id="lp-consent-desc">
-          Vas a autorizar acceso de <strong>solo lectura</strong> a tu Gmail para construir métricas
-          auditables de soporte.
+          Primero creas tu cuenta segura. Después de elegir plan o activar trial,
+          podrás conectar Gmail con permiso de <strong>solo lectura</strong>.
         </p>
         <ul className="lp-modal-list">
-          <li>Solo lectura. Punto: no enviamos, editamos, etiquetamos, archivamos ni borramos.</li>
-          <li>El acceso queda guardado de forma segura y puedes revocarlo cuando quieras.</li>
-          <li>No guardamos el contenido completo de tus correos.</li>
+          <li>La cuenta se maneja con WorkOS AuthKit.</li>
+          <li>Gmail se conecta en un paso separado y solo para auditar métricas.</li>
+          <li>Los pagos se procesan en CLP por Mercado Pago.</li>
         </ul>
         <div className="lp-modal-actions">
           <button type="button" className="lp-btn-ghost" onClick={onClose}>
             Cancelar
           </button>
           <a className="lp-btn-primary" href={loginUrl}>
-            <LogIn size={18} /> Continuar con Google
+            <LogIn size={18} /> Crear cuenta
           </a>
         </div>
       </section>

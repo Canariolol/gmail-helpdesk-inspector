@@ -4,8 +4,8 @@ import type { LucideIcon } from "lucide-react";
 export const BRAND = {
   name: "Gmail Helpdesk Inspector",
   short: "Helpdesk Inspector",
-  // Beta abierta: cualquier cuenta de Google.
-  betaTag: "Beta privada · cualquier cuenta de Google",
+  // La cuenta se crea con WorkOS; Gmail se conecta después, aparte.
+  betaTag: "Beta privada · sin reemplazar tu correo",
 };
 
 export interface HeroCopy {
@@ -22,7 +22,7 @@ export const HERO: { focus: HeroCopy } = {
     title: "¿Cuántas respondiste",
     highlight: "de verdad?",
     subtitle: "Convierte tu casilla de Gmail en métricas auditables. Sin reemplazar tu correo.",
-    cta: "Entrar con Google",
+    cta: "Crear cuenta",
   },
 };
 
@@ -69,13 +69,13 @@ export interface Step {
 export const STEPS: Step[] = [
   {
     n: 1,
-    title: "Conecta tu Gmail",
-    body: "Autorizas acceso de solo lectura con Google. Funciona con cualquier cuenta.",
+    title: "Crea tu cuenta",
+    body: "Cuenta segura con WorkOS. Eliges plan mensual o activas la prueba de 30 días del plan Pro.",
   },
   {
     n: 2,
-    title: "Define tu política",
-    body: "Qué cuenta como solicitud, dominios internos, exclusiones y si quieres IA.",
+    title: "Conecta tu Gmail",
+    body: "Recién aquí autorizas Gmail, con acceso de solo lectura. No tocamos tu bandeja.",
   },
   {
     n: 3,

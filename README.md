@@ -32,8 +32,9 @@ through Amazon Bedrock when enabled by the organization policy.
    cp .env.example .env
    ```
 
-2. Fill Google OAuth, Firestore, and Bedrock values in `.env`.
-   Add your Gmail account as an OAuth test user in Google Cloud Console.
+2. Fill WorkOS AuthKit, Mercado Pago, Google Gmail OAuth, Firestore, and
+   Bedrock values in `.env`. Add your Gmail account as an OAuth test user in
+   Google Cloud Console while the Google app is in Testing.
 
 3. Start the stack:
 
@@ -84,16 +85,25 @@ It commonly expires after about one hour.
 
 ## SaaS Configuration Model
 
-The current app is no longer configured only through per-run filters. After login,
-`GET /me/org/config` provisions a private-beta organization, an owner membership,
-one connected mailbox, a mutable policy draft and an immutable policy version.
+The current app is no longer configured only through per-run filters. Account
+authentication uses WorkOS AuthKit. Gmail OAuth is a separate mailbox connection
+step and is only used with the readonly Gmail scope after the account has an
+active subscription or trial. `GET /me/org/config` provisions a private-beta
+organization, an owner membership, one mailbox record, a mutable policy draft
+and an immutable policy version.
 Analysis runs created from policy store a snapshot with org/mailbox ids, policy
 version/hash, Gmail scope snapshot, retention expiry and data minimization mode.
 Legacy per-run filters are still accepted for local/backward compatibility.
 
 Key defaults for the private beta:
 
-- One Workspace mailbox per organization.
+- One Gmail mailbox per organization for now.
+- WorkOS AuthKit is the account login layer; Gmail OAuth is only the mailbox
+  connection layer.
+- Billing is enforced before Gmail connection, manual analysis, and scheduled
+  analysis when `BILLING_ENFORCEMENT_ENABLED=true`.
+- Plans charge in CLP through Mercado Pago. USD prices are reference copy only.
+- `Pro` is the only plan with a 30-day trial.
 - AI auditing is off by default and requires explicit consent.
 - Retention defaults to 30 days and is stored per run as `retention_expires_at`.
 - Scheduled reports default to metrics-only content.
@@ -103,11 +113,24 @@ Useful authenticated endpoints:
 
 | Endpoint | Purpose |
 |----------|---------|
+| `GET /auth/workos/login` | Start WorkOS AuthKit account login/signup |
+| `GET /me/account` | Read account, Gmail connection, and entitlement state |
+| `GET /me/usage` | Read current billing-period usage ledger |
+| `POST /checkout/subscriptions` | Create a Mercado Pago subscription checkout in CLP |
+| `GET /checkout/sessions/:id` | Read checkout session state |
+| `GET /gmail/connect/login` | Connect the audited Gmail mailbox with readonly scope |
 | `GET /me/org/config` | Read/provision organization policy config |
 | `PUT /me/org/config` | Patch policy draft and create a new policy version when it changes |
 | `GET /me/data-summary` | Read-only privacy/data summary |
 | `GET /me/operations/status` | Read-only scheduler/operations status |
 | `GET /me/operations/history` | Read-only recent operational history with redacted errors |
+
+Useful public/provider endpoints:
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /public/plans` | Public billing plan catalog for pricing UI |
+| `POST /billing/mercadopago/webhook` | Mercado Pago subscription notification receiver |
 
 Pagination note: `GET /analysis-runs` and `GET /analysis-runs/:id/threads` remain backward-compatible arrays without query params. With `limit`/`page_token`, they return `{ items, next_page_token, total_count }` for beta-scale pagination.
 
@@ -154,6 +177,13 @@ combined safely. If `CRON_SECRET` is unset the endpoint answers 404.
 | `REPORT_FROM_EMAIL` | Verified Resend sender, e.g. `Helpdesk <reportes@domain.cl>` |
 | `REPORT_TO_EMAIL` | Legacy fallback/default recipients |
 | `APP_ENV` | Set `production`/`prod` to reject development secret defaults |
+| `WORKOS_CLIENT_ID` | WorkOS AuthKit client id |
+| `WORKOS_API_KEY` | WorkOS API key; never commit real values |
+| `WORKOS_REDIRECT_URI` | WorkOS callback URL, e.g. `/auth/workos/callback` |
+| `WORKOS_COOKIE_SECRET` | Secret used for WorkOS OAuth state cookie signing |
+| `BILLING_ENFORCEMENT_ENABLED` | Enables subscription/trial guards; defaults on in production |
+| `MERCADOPAGO_ACCESS_TOKEN` | Mercado Pago access token for CLP subscriptions |
+| `MERCADOPAGO_WEBHOOK_SECRET` | Shared webhook secret for receiver validation |
 | `RATE_LIMIT_ANALYSIS_CREATE_PER_HOUR` | Per-user manual run creation limit; default `12` |
 | `RATE_LIMIT_ANALYSIS_START_PER_HOUR` | Per-user manual run start limit; default `12` |
 

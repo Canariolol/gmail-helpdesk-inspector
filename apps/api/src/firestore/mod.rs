@@ -16,6 +16,7 @@ use uuid::Uuid;
 use crate::{
     analysis::{AiAuditResult, AnalysisRun, EmailMessage, EmailThread, ManualReview},
     auth::UserSession,
+    billing::{Account, CheckoutSession, Subscription, UsageLedger},
     config::{FirestoreConfig, ServiceAccountKey},
     policies::{OrgConfigBundle, PolicyVersion, hash_owner_email},
     scheduler::model::{ScheduleConfig, ScheduleState},
@@ -220,6 +221,25 @@ impl FirestoreStorage {
 
 #[async_trait]
 impl StorageRepository for FirestoreStorage {
+    async fn upsert_account(&self, account: &Account) -> anyhow::Result<()> {
+        self.put(&format!("accounts/{}", account.workos_user_id), account)
+            .await
+    }
+
+    async fn get_account_by_workos_user_id(
+        &self,
+        workos_user_id: &str,
+    ) -> anyhow::Result<Option<Account>> {
+        self.get(&format!("accounts/{workos_user_id}")).await
+    }
+
+    async fn get_account_by_email(&self, email: &str) -> anyhow::Result<Option<Account>> {
+        let accounts: Vec<Account> = self.list("", "accounts").await?;
+        Ok(accounts
+            .into_iter()
+            .find(|account| account.email.eq_ignore_ascii_case(email)))
+    }
+
     async fn upsert_user_session(&self, session: &UserSession) -> anyhow::Result<()> {
         self.put(&format!("users/{}", session.id), session).await
     }
@@ -240,7 +260,9 @@ impl StorageRepository for FirestoreStorage {
         Ok(sessions
             .into_iter()
             .filter(|session| {
-                session.google_account_email == email && session.refresh_token_encrypted.is_some()
+                session.google_account_email == email
+                    && (session.gmail_refresh_token_encrypted.is_some()
+                        || session.refresh_token_encrypted.is_some())
             })
             .max_by_key(|session| session.updated_at))
     }
@@ -329,6 +351,64 @@ impl StorageRepository for FirestoreStorage {
             .is_some_and(|membership| {
                 membership.status == crate::policies::MembershipStatus::Active
             }))
+    }
+
+    async fn upsert_subscription(&self, subscription: &Subscription) -> anyhow::Result<()> {
+        self.put(
+            &format!("subscriptions/{}", subscription.org_id),
+            subscription,
+        )
+        .await
+    }
+
+    async fn get_subscription_for_org(&self, org_id: &str) -> anyhow::Result<Option<Subscription>> {
+        self.get(&format!("subscriptions/{org_id}")).await
+    }
+
+    async fn find_subscription_by_provider_id(
+        &self,
+        provider_subscription_id: &str,
+    ) -> anyhow::Result<Option<Subscription>> {
+        let subscriptions: Vec<Subscription> = self.list("", "subscriptions").await?;
+        Ok(subscriptions.into_iter().find(|subscription| {
+            subscription.provider_subscription_id.as_deref() == Some(provider_subscription_id)
+        }))
+    }
+
+    async fn upsert_checkout_session(&self, checkout: &CheckoutSession) -> anyhow::Result<()> {
+        self.put(&format!("checkoutSessions/{}", checkout.id), checkout)
+            .await
+    }
+
+    async fn get_checkout_session(&self, id: &str) -> anyhow::Result<Option<CheckoutSession>> {
+        self.get(&format!("checkoutSessions/{id}")).await
+    }
+
+    async fn find_checkout_session_by_provider_id(
+        &self,
+        provider_subscription_id: &str,
+    ) -> anyhow::Result<Option<CheckoutSession>> {
+        let sessions: Vec<CheckoutSession> = self.list("", "checkoutSessions").await?;
+        Ok(sessions.into_iter().find(|checkout| {
+            checkout.provider_subscription_id.as_deref() == Some(provider_subscription_id)
+        }))
+    }
+
+    async fn upsert_usage_ledger(&self, usage: &UsageLedger) -> anyhow::Result<()> {
+        self.put(
+            &format!("usageLedgers/{}_{}", usage.org_id, usage.period_key),
+            usage,
+        )
+        .await
+    }
+
+    async fn get_usage_ledger(
+        &self,
+        org_id: &str,
+        period_key: &str,
+    ) -> anyhow::Result<Option<UsageLedger>> {
+        self.get(&format!("usageLedgers/{org_id}_{period_key}"))
+            .await
     }
 
     async fn create_analysis_run(&self, run: &AnalysisRun) -> anyhow::Result<()> {

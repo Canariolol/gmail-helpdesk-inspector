@@ -20,6 +20,7 @@ use axum::{
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
 use futures_util::{StreamExt, stream};
+use hmac::{Hmac, Mac};
 use rand::RngCore;
 use reqwest::Client;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -39,13 +40,18 @@ use crate::{
         GoogleTokenResponse, UserSession, clear_oauth_cookie, clear_session_cookie, decrypt_token,
         encrypt_token, oauth_cookie, session_cookie, sign_session_id, verify_session_cookie,
     },
+    billing::{
+        Account, BillingPlan, BillingPlanId, CheckoutSession, CheckoutSessionStatus,
+        EntitlementSnapshot, SubscriptionStatus, UsageLedger, active_subscription_for_trial,
+        plan_by_id, public_plans, subscription_allows_access,
+    },
     config::AppConfig,
     gmail::GmailClient,
     policies::{
         AiPolicy, AnalysisPolicy, MailboxPurpose, OrgConfigBundle, OrgConfigResponse,
         PolicyVersion, ScheduleReportPolicy, normalize_domains, normalize_list,
-        policy_version_from_draft, provision_default_config,
-        retention_expires_at, setup_state, validate_timezone,
+        policy_version_from_draft, provision_default_config, retention_expires_at, setup_state,
+        validate_timezone,
     },
     scheduler::{
         model::{ScheduleConfig, ScheduleState},
@@ -113,10 +119,25 @@ impl RateLimiter {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
-        .route("/auth/google/login", get(auth_google_login))
-        .route("/auth/google/callback", get(auth_google_callback))
+        .route("/auth/workos/login", get(auth_workos_login))
+        .route("/auth/workos/callback", get(auth_workos_callback))
+        .route("/auth/google/login", get(gmail_connect_login))
+        .route("/auth/google/callback", get(gmail_connect_callback))
+        .route("/gmail/connect/login", get(gmail_connect_login))
+        .route("/gmail/connect/callback", get(gmail_connect_callback))
         .route("/auth/logout", post(auth_logout))
         .route("/auth/me", get(auth_me))
+        .route("/me/account", get(get_account_status))
+        .route("/me/usage", get(get_usage))
+        .route("/public/plans", get(get_public_plans))
+        .route(
+            "/checkout/subscriptions",
+            post(create_checkout_subscription),
+        )
+        .route("/checkout/sessions/{id}", get(get_checkout_session))
+        .route("/me/subscription/cancel", post(cancel_subscription))
+        .route("/me/subscription/change-plan", post(change_plan))
+        .route("/billing/mercadopago/webhook", post(mercadopago_webhook))
         .route("/me/data-summary", get(get_data_summary))
         .route("/me/operations/status", get(get_operations_status))
         .route("/me/operations/history", get(get_operations_history))
@@ -144,7 +165,172 @@ async fn health() -> Json<serde_json::Value> {
     Json(json!({ "ok": true }))
 }
 
-async fn auth_google_login(State(state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
+async fn auth_workos_login(State(state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
+    if state.config.workos.client_id.trim().is_empty() {
+        return Err(ApiError::service_unavailable("WorkOS no está configurado"));
+    }
+    let oauth_state = random_urlsafe(24);
+    let signed_oauth = sign_session_id(&oauth_state, &state.config.workos.cookie_secret)?;
+    let url = url::Url::parse_with_params(
+        "https://api.workos.com/user_management/authorize",
+        &[
+            ("response_type", "code"),
+            ("provider", "authkit"),
+            ("client_id", state.config.workos.client_id.as_str()),
+            ("redirect_uri", state.config.workos.redirect_uri.as_str()),
+            ("state", oauth_state.as_str()),
+        ],
+    )
+    .expect("valid workos auth url");
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&oauth_cookie(
+            &signed_oauth,
+            &state.config.cookie_same_site,
+            state.config.cookie_secure,
+        ))
+        .unwrap(),
+    );
+    Ok((headers, Redirect::temporary(url.as_str())))
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkosCallback {
+    code: Option<String>,
+    state: Option<String>,
+    error: Option<String>,
+    error_description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkosAuthenticateResponse {
+    user: WorkosUser,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkosUser {
+    id: String,
+    email: String,
+    #[serde(default)]
+    first_name: Option<String>,
+    #[serde(default)]
+    last_name: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+async fn auth_workos_callback(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<WorkosCallback>,
+) -> Result<impl IntoResponse, ApiError> {
+    if let Some(error) = query.error {
+        return Err(ApiError::bad_request(&format!(
+            "WorkOS rechazó el login: {}",
+            query.error_description.unwrap_or(error)
+        )));
+    }
+    let verifier_payload = headers
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|cookies| extract_named_cookie(cookies, "ghmi_oauth"))
+        .and_then(|cookie| verify_session_cookie(&cookie, &state.config.workos.cookie_secret))
+        .ok_or_else(|| ApiError::bad_request("missing or invalid WorkOS state cookie"))?;
+    if query.state.as_deref() != Some(verifier_payload.as_str()) {
+        return Err(ApiError::bad_request("WorkOS state mismatch"));
+    }
+    let code = query
+        .code
+        .ok_or_else(|| ApiError::bad_request("missing WorkOS code"))?;
+
+    let auth: WorkosAuthenticateResponse = state
+        .http
+        .post("https://api.workos.com/user_management/authenticate")
+        .json(&json!({
+            "client_id": state.config.workos.client_id,
+            "client_secret": state.config.workos.api_key,
+            "grant_type": "authorization_code",
+            "code": code,
+        }))
+        .send()
+        .await?
+        .json_or_external_error("WorkOS authenticate")
+        .await?;
+
+    let now = Utc::now();
+    let existing_account = state
+        .storage
+        .get_account_by_workos_user_id(&auth.user.id)
+        .await?;
+    let org_id = existing_account
+        .as_ref()
+        .map(|account| account.org_id.clone())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let account = Account {
+        workos_user_id: auth.user.id.clone(),
+        email: auth.user.email.trim().to_lowercase(),
+        name: auth.user.name.clone().or_else(|| {
+            match (&auth.user.first_name, &auth.user.last_name) {
+                (Some(first), Some(last)) => Some(format!("{first} {last}")),
+                (Some(first), None) => Some(first.clone()),
+                _ => None,
+            }
+        }),
+        org_id,
+        created_at: existing_account
+            .as_ref()
+            .map(|account| account.created_at)
+            .unwrap_or(now),
+        updated_at: now,
+    };
+    state.storage.upsert_account(&account).await?;
+    let session = UserSession {
+        id: Uuid::new_v4().to_string(),
+        workos_user_id: Some(auth.user.id),
+        google_account_email: account.email,
+        gmail_account_email: None,
+        access_token_encrypted: String::new(),
+        refresh_token_encrypted: None,
+        gmail_access_token_encrypted: None,
+        gmail_refresh_token_encrypted: None,
+        created_at: now,
+        updated_at: now,
+    };
+    state.storage.upsert_user_session(&session).await?;
+
+    let signed = sign_session_id(&session.id, &state.config.session_secret)?;
+    let mut headers = HeaderMap::new();
+    headers.append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&session_cookie(
+            &signed,
+            &state.config.cookie_same_site,
+            state.config.cookie_secure,
+        ))
+        .unwrap(),
+    );
+    headers.append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&clear_oauth_cookie(
+            &state.config.cookie_same_site,
+            state.config.cookie_secure,
+        ))
+        .unwrap(),
+    );
+    headers.insert(
+        header::LOCATION,
+        HeaderValue::from_str(&state.config.web_base_url).unwrap(),
+    );
+    Ok((StatusCode::FOUND, headers))
+}
+
+async fn gmail_connect_login(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    let session = require_session(&state, &headers).await?;
+    require_active_entitlement(&state, &session).await?;
     let scope = "https://www.googleapis.com/auth/gmail.readonly";
     let oauth_state = random_urlsafe(24);
     let code_verifier = random_urlsafe(48);
@@ -187,11 +373,13 @@ struct OAuthCallback {
     state: Option<String>,
 }
 
-async fn auth_google_callback(
+async fn gmail_connect_callback(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(query): Query<OAuthCallback>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let mut existing_session = require_session(&state, &headers).await?;
+    require_active_entitlement(&state, &existing_session).await?;
     let verifier_payload = headers
         .get(header::COOKIE)
         .and_then(|v| v.to_str().ok())
@@ -231,31 +419,35 @@ async fn auth_google_callback(
         .await?;
 
     let now = Utc::now();
-    let session = UserSession {
-        id: Uuid::new_v4().to_string(),
-        google_account_email: profile.email_address,
-        access_token_encrypted: encrypt_token(&token.access_token, &state.config.encryption_key)?,
-        refresh_token_encrypted: token
-            .refresh_token
-            .as_deref()
-            .map(|refresh| encrypt_token(refresh, &state.config.encryption_key))
-            .transpose()?,
-        created_at: now,
-        updated_at: now,
-    };
-    state.storage.upsert_user_session(&session).await?;
-
-    let signed = sign_session_id(&session.id, &state.config.session_secret)?;
-    let mut headers = HeaderMap::new();
-    headers.append(
-        header::SET_COOKIE,
-        HeaderValue::from_str(&session_cookie(
-            &signed,
-            &state.config.cookie_same_site,
-            state.config.cookie_secure,
-        ))
-        .unwrap(),
+    existing_session.gmail_account_email = Some(profile.email_address.clone());
+    existing_session.gmail_access_token_encrypted = Some(encrypt_token(
+        &token.access_token,
+        &state.config.encryption_key,
+    )?);
+    existing_session.gmail_refresh_token_encrypted = token
+        .refresh_token
+        .as_deref()
+        .map(|refresh| encrypt_token(refresh, &state.config.encryption_key))
+        .transpose()?;
+    existing_session.updated_at = now;
+    state.storage.upsert_user_session(&existing_session).await?;
+    let mut bundle =
+        get_or_provision_org_config(&state, &existing_session.google_account_email).await?;
+    bundle.mailbox.google_account_email = profile.email_address.clone();
+    bundle.mailbox.display_name = profile.email_address.clone();
+    bundle.mailbox.authorized_by_user_email = existing_session.google_account_email.clone();
+    bundle.mailbox.connected_at = now;
+    bundle.mailbox.revoked_at = None;
+    bundle.policy_version = policy_version_from_draft(
+        &bundle.mailbox,
+        &bundle.draft,
+        bundle.policy_version.version + 1,
+        &existing_session.google_account_email,
+        now,
     );
+    state.storage.upsert_org_config(&bundle).await?;
+
+    let mut headers = HeaderMap::new();
     headers.append(
         header::SET_COOKIE,
         HeaderValue::from_str(&clear_oauth_cookie(
@@ -291,7 +483,319 @@ async fn auth_me(
     let session = require_session(&state, &headers).await?;
     Ok(Json(json!({
         "email": session.google_account_email,
+        "workos_user_id": session.workos_user_id,
+        "gmail_connected": gmail_connected(&session),
+        "gmail_account_email": session.gmail_account_email,
     })))
+}
+
+#[derive(Debug, Serialize)]
+struct AccountStatusResponse {
+    account_email: String,
+    workos_user_id: Option<String>,
+    org_id: String,
+    gmail_connected: bool,
+    gmail_account_email: Option<String>,
+    entitlement: EntitlementSnapshot,
+}
+
+async fn get_account_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<AccountStatusResponse>, ApiError> {
+    let session = require_session(&state, &headers).await?;
+    let bundle = get_or_provision_org_config(&state, &session.google_account_email).await?;
+    let entitlement = entitlement_snapshot(&state, &bundle.org.id).await?;
+    Ok(Json(AccountStatusResponse {
+        account_email: session.google_account_email.clone(),
+        workos_user_id: session.workos_user_id.clone(),
+        org_id: bundle.org.id,
+        gmail_connected: gmail_connected(&session),
+        gmail_account_email: session.gmail_account_email.clone(),
+        entitlement,
+    }))
+}
+
+async fn get_public_plans() -> Json<Vec<BillingPlan>> {
+    Json(public_plans())
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateCheckoutSubscriptionRequest {
+    plan_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct CheckoutSessionResponse {
+    session: CheckoutSession,
+}
+
+async fn create_checkout_subscription(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<CreateCheckoutSubscriptionRequest>,
+) -> Result<Json<CheckoutSessionResponse>, ApiError> {
+    let session = require_session(&state, &headers).await?;
+    let bundle = get_or_provision_org_config(&state, &session.google_account_email).await?;
+    let plan_id = BillingPlanId::parse(&request.plan_id)
+        .ok_or_else(|| ApiError::bad_request("plan_id inválido"))?;
+    let plan = plan_by_id(&plan_id);
+    let now = Utc::now();
+    let mut checkout = CheckoutSession {
+        id: Uuid::new_v4().to_string(),
+        org_id: bundle.org.id.clone(),
+        account_email: session.google_account_email.clone(),
+        plan_id: plan_id.clone(),
+        status: CheckoutSessionStatus::Pending,
+        provider: "mercadopago".to_string(),
+        provider_subscription_id: None,
+        checkout_url: None,
+        currency_id: "CLP".to_string(),
+        amount_clp: plan.clp_monthly,
+        usd_reference_monthly: plan.usd_reference_monthly,
+        trial_days: plan.trial_days,
+        created_at: now,
+        updated_at: now,
+    };
+
+    if let Some(access_token) = &state.config.billing.mercadopago_access_token {
+        let mp = create_mercadopago_preapproval(&state, access_token, &checkout).await?;
+        checkout.status = CheckoutSessionStatus::ProviderCreated;
+        checkout.provider_subscription_id = Some(mp.id.clone());
+        checkout.checkout_url = mp.init_point.or(mp.sandbox_init_point);
+        checkout.updated_at = Utc::now();
+    } else {
+        return Err(ApiError::service_unavailable(
+            "Mercado Pago no está configurado",
+        ));
+    }
+
+    state.storage.upsert_checkout_session(&checkout).await?;
+    Ok(Json(CheckoutSessionResponse { session: checkout }))
+}
+
+async fn get_checkout_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<CheckoutSessionResponse>, ApiError> {
+    let session = require_session(&state, &headers).await?;
+    let checkout = state
+        .storage
+        .get_checkout_session(&id)
+        .await?
+        .ok_or(ApiError::not_found("checkout session not found"))?;
+    if !checkout
+        .account_email
+        .eq_ignore_ascii_case(&session.google_account_email)
+    {
+        return Err(ApiError::not_found("checkout session not found"));
+    }
+    Ok(Json(CheckoutSessionResponse { session: checkout }))
+}
+
+async fn cancel_subscription(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<EntitlementSnapshot>, ApiError> {
+    let session = require_session(&state, &headers).await?;
+    let bundle = get_or_provision_org_config(&state, &session.google_account_email).await?;
+    let mut subscription = state
+        .storage
+        .get_subscription_for_org(&bundle.org.id)
+        .await?
+        .ok_or_else(|| ApiError::conflict("no hay una suscripción para cancelar"))?;
+
+    // Corta cobros futuros en Mercado Pago; el acceso se mantiene hasta el fin del período.
+    if let Some(provider_id) = subscription.provider_subscription_id.clone() {
+        let access_token = state
+            .config
+            .billing
+            .mercadopago_access_token
+            .as_deref()
+            .ok_or_else(|| ApiError::service_unavailable("Mercado Pago no está configurado"))?;
+        update_mercadopago_preapproval(
+            &state,
+            access_token,
+            &provider_id,
+            json!({ "status": "cancelled" }),
+        )
+        .await?;
+    }
+
+    subscription.cancel_at_period_end = true;
+    subscription.updated_at = Utc::now();
+    state.storage.upsert_subscription(&subscription).await?;
+
+    let entitlement = entitlement_snapshot(&state, &bundle.org.id).await?;
+    Ok(Json(entitlement))
+}
+
+#[derive(Debug, Deserialize)]
+struct ChangePlanRequest {
+    plan_id: String,
+}
+
+async fn change_plan(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<ChangePlanRequest>,
+) -> Result<Json<EntitlementSnapshot>, ApiError> {
+    let session = require_session(&state, &headers).await?;
+    let bundle = get_or_provision_org_config(&state, &session.google_account_email).await?;
+    let plan_id = BillingPlanId::parse(&request.plan_id)
+        .ok_or_else(|| ApiError::bad_request("plan_id inválido"))?;
+    let plan = plan_by_id(&plan_id);
+
+    let mut subscription = state
+        .storage
+        .get_subscription_for_org(&bundle.org.id)
+        .await?
+        .ok_or_else(|| ApiError::payment_required("no tienes una suscripción activa"))?;
+
+    if !subscription_allows_access(Some(&subscription), Utc::now()) {
+        return Err(ApiError::conflict(
+            "reactiva tu suscripción antes de cambiar de plan",
+        ));
+    }
+
+    let provider_id = subscription
+        .provider_subscription_id
+        .clone()
+        .ok_or_else(|| {
+            ApiError::conflict("la suscripción aún no está confirmada por Mercado Pago")
+        })?;
+    let access_token = state
+        .config
+        .billing
+        .mercadopago_access_token
+        .as_deref()
+        .ok_or_else(|| ApiError::service_unavailable("Mercado Pago no está configurado"))?;
+
+    update_mercadopago_preapproval(
+        &state,
+        access_token,
+        &provider_id,
+        json!({
+            "auto_recurring": {
+                "transaction_amount": plan.clp_monthly,
+                "currency_id": "CLP"
+            },
+            "reason": format!("{} - Helpdesk Inspector", plan.name)
+        }),
+    )
+    .await?;
+
+    subscription.plan_id = plan_id;
+    subscription.cancel_at_period_end = false;
+    subscription.updated_at = Utc::now();
+    state.storage.upsert_subscription(&subscription).await?;
+
+    let entitlement = entitlement_snapshot(&state, &bundle.org.id).await?;
+    Ok(Json(entitlement))
+}
+
+#[derive(Debug, Deserialize)]
+struct MercadoPagoWebhook {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    #[serde(rename = "type")]
+    event_type: Option<String>,
+    #[serde(default)]
+    #[serde(rename = "action")]
+    _action: Option<String>,
+    #[serde(default)]
+    data: Option<MercadoPagoWebhookData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MercadoPagoWebhookData {
+    id: String,
+}
+
+async fn mercadopago_webhook(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<HashMap<String, String>>,
+    Json(payload): Json<MercadoPagoWebhook>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let signed_data_id = query.get("data.id").or_else(|| query.get("data_id"));
+    verify_mercadopago_webhook(&state, &headers, signed_data_id.map(String::as_str))?;
+    let provider_id = payload
+        .data
+        .map(|data| data.id)
+        .or(payload.id)
+        .ok_or_else(|| ApiError::bad_request("missing Mercado Pago data id"))?;
+    let event_type = payload.event_type.unwrap_or_default();
+    if !event_type.is_empty()
+        && event_type != "subscription_preapproval"
+        && event_type != "preapproval"
+    {
+        return Ok(Json(json!({ "ok": true, "ignored": true })));
+    }
+    let checkout = state
+        .storage
+        .find_checkout_session_by_provider_id(&provider_id)
+        .await?
+        .ok_or(ApiError::not_found("checkout session not found"))?;
+    let access_token = state
+        .config
+        .billing
+        .mercadopago_access_token
+        .as_deref()
+        .ok_or_else(|| ApiError::service_unavailable("Mercado Pago no está configurado"))?;
+    let provider = get_mercadopago_preapproval(&state, access_token, &provider_id).await?;
+    let status = map_mercadopago_status(provider.status.as_deref());
+    let now = Utc::now();
+    let mut subscription = state
+        .storage
+        .find_subscription_by_provider_id(&provider_id)
+        .await?
+        .unwrap_or_else(|| {
+            active_subscription_for_trial(
+                checkout.org_id.clone(),
+                checkout.plan_id.clone(),
+                Some(provider_id.clone()),
+                now,
+            )
+        });
+    subscription.status = status;
+    subscription.updated_at = now;
+    subscription.provider_subscription_id = Some(provider_id);
+    state.storage.upsert_subscription(&subscription).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Debug, Serialize)]
+struct UsageResponse {
+    period_key: String,
+    usage: UsageLedger,
+    limits: Option<crate::billing::PlanLimits>,
+}
+
+async fn get_usage(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<UsageResponse>, ApiError> {
+    let session = require_session(&state, &headers).await?;
+    let bundle = get_or_provision_org_config(&state, &session.google_account_email).await?;
+    let period_key = current_period_key();
+    let usage = state
+        .storage
+        .get_usage_ledger(&bundle.org.id, &period_key)
+        .await?
+        .unwrap_or_else(|| empty_usage(&bundle.org.id, &period_key));
+    let subscription = state
+        .storage
+        .get_subscription_for_org(&bundle.org.id)
+        .await?;
+    let limits = subscription.map(|subscription| plan_by_id(&subscription.plan_id).limits);
+    Ok(Json(UsageResponse {
+        period_key,
+        usage,
+        limits,
+    }))
 }
 
 #[derive(Debug, Serialize)]
@@ -992,7 +1496,14 @@ async fn get_or_provision_org_config(
     if let Some(bundle) = state.storage.get_org_config_for_user(user_email).await? {
         return Ok(bundle);
     }
-    let bundle = provision_default_config(user_email, Utc::now());
+    let mut bundle = provision_default_config(user_email, Utc::now());
+    if let Some(account) = state.storage.get_account_by_email(user_email).await? {
+        bundle.org.id = account.org_id.clone();
+        bundle.membership.org_id = account.org_id.clone();
+        bundle.mailbox.org_id = account.org_id.clone();
+        bundle.draft.org_id = account.org_id.clone();
+        bundle.policy_version.org_id = account.org_id;
+    }
     state.storage.upsert_org_config(&bundle).await?;
     Ok(bundle)
 }
@@ -1022,6 +1533,9 @@ async fn create_analysis_run(
     Json(request): Json<CreateAnalysisRunRequest>,
 ) -> Result<Json<AnalysisRun>, ApiError> {
     let session = require_session(&state, &headers).await?;
+    let bundle = require_active_entitlement(&state, &session).await?;
+    enforce_usage_allows_run(&state, &bundle.org.id).await?;
+    require_gmail_connected(&session)?;
     enforce_rate_limit(
         &state,
         &session.google_account_email,
@@ -1042,6 +1556,7 @@ async fn create_analysis_run(
         build_policy_run(&state, &session.google_account_email, request, now).await?
     };
     state.storage.create_analysis_run(&run).await?;
+    increment_runs_usage(&state, run.org_id.as_deref()).await?;
     Ok(Json(run))
 }
 
@@ -1154,6 +1669,7 @@ async fn list_analysis_runs(
     Query(query): Query<PaginationQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     let session = require_session(&state, &headers).await?;
+    require_entitlement(&state, &session).await?;
     let runs = state
         .storage
         .list_analysis_runs(&session.google_account_email)
@@ -1167,6 +1683,7 @@ async fn get_analysis_run(
     Path(id): Path<String>,
 ) -> Result<Json<AnalysisRun>, ApiError> {
     let session = require_session(&state, &headers).await?;
+    require_entitlement(&state, &session).await?;
     Ok(Json(require_owned_run(&state, &id, &session).await?))
 }
 
@@ -1176,6 +1693,8 @@ async fn start_analysis_run(
     Path(id): Path<String>,
 ) -> Result<Json<AnalysisRun>, ApiError> {
     let session = require_session(&state, &headers).await?;
+    require_active_entitlement(&state, &session).await?;
+    require_gmail_connected(&session)?;
     let mut run = require_owned_run(&state, &id, &session).await?;
     if run.status != AnalysisStatus::Pending {
         return Err(ApiError::conflict(
@@ -1193,10 +1712,7 @@ async fn start_analysis_run(
     run.progress_message = "Iniciando lectura de Gmail".to_string();
     state.storage.update_analysis_run(&run).await?;
 
-    let access_token = decrypt_token(
-        &session.access_token_encrypted,
-        &state.config.encryption_key,
-    )?;
+    let access_token = decrypt_token(&gmail_access_token(&session)?, &state.config.encryption_key)?;
     let worker_state = state.clone();
     let run_id = run.id.clone();
     tokio::spawn(async move {
@@ -1216,6 +1732,7 @@ async fn analysis_events(
     Path(id): Path<String>,
 ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>, ApiError> {
     let session = require_session(&state, &headers).await?;
+    require_entitlement(&state, &session).await?;
     require_owned_run(&state, &id, &session).await?;
     let stream = stream::unfold((), move |_| {
         let state = state.clone();
@@ -1239,6 +1756,7 @@ async fn get_metrics(
     Path(id): Path<String>,
 ) -> Result<Json<AnalysisMetrics>, ApiError> {
     let session = require_session(&state, &headers).await?;
+    require_entitlement(&state, &session).await?;
     let run = require_owned_run(&state, &id, &session).await?;
     Ok(Json(run.metrics))
 }
@@ -1250,6 +1768,7 @@ async fn list_threads(
     Query(query): Query<ThreadQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     let session = require_session(&state, &headers).await?;
+    require_entitlement(&state, &session).await?;
     let run = require_owned_run(&state, &id, &session).await?;
     let mut threads = state.storage.list_threads(&run.id).await?;
     if let Some(classification) = &query.classification {
@@ -1346,6 +1865,7 @@ async fn get_thread(
     Path(thread_id): Path<String>,
 ) -> Result<Json<ThreadDetailResponse>, ApiError> {
     let session = require_session(&state, &headers).await?;
+    require_entitlement(&state, &session).await?;
     let mut thread = require_owned_thread(&state, &thread_id, &session).await?;
     let messages = state
         .storage
@@ -1381,6 +1901,7 @@ async fn manual_review(
     Json(request): Json<ManualReviewRequest>,
 ) -> Result<Json<AnalysisRun>, ApiError> {
     let session = require_session(&state, &headers).await?;
+    require_entitlement(&state, &session).await?;
     let thread = require_owned_thread(&state, &thread_id, &session).await?;
     let messages = state
         .storage
@@ -1473,6 +1994,7 @@ pub(crate) async fn execute_analysis(
 
     let mut ai_input_tokens = 0u64;
     let mut ai_output_tokens = 0u64;
+    let mut ai_audited_threads = 0u32;
     let excluded_sample = excluded_sample_ids(&thread_ids);
 
     // Process threads with bounded concurrency: each thread's Gmail fetch, local
@@ -1515,6 +2037,9 @@ pub(crate) async fn execute_analysis(
                 Ok(outcome) => {
                     ai_input_tokens += outcome.input_tokens;
                     ai_output_tokens += outcome.output_tokens;
+                    if outcome.ai_audited {
+                        ai_audited_threads = ai_audited_threads.saturating_add(1);
+                    }
                 }
                 Err(error) => {
                     tracing::warn!(?error, "el procesamiento de un hilo falló; se omite");
@@ -1540,6 +2065,13 @@ pub(crate) async fn execute_analysis(
     run.progress_message = "Análisis completado".to_string();
     run.completed_at = Some(Utc::now());
     state.storage.update_analysis_run(&run).await?;
+    add_analysis_usage(
+        &state,
+        run.org_id.as_deref(),
+        run.total_candidate_threads as u32,
+        ai_audited_threads,
+    )
+    .await?;
     Ok(())
 }
 
@@ -1552,6 +2084,7 @@ const PROGRESS_UPDATE_EVERY: u64 = 5;
 struct ThreadOutcome {
     input_tokens: u64,
     output_tokens: u64,
+    ai_audited: bool,
 }
 
 struct ThreadProcessingContext<'a> {
@@ -1603,6 +2136,7 @@ async fn process_one_thread(
 
     let mut outcome = ThreadOutcome::default();
     if should_audit {
+        outcome.ai_audited = true;
         let (max_messages, max_body_chars, auto_apply_threshold) = processing
             .policy_snapshot
             .map(|snapshot| {
@@ -1882,6 +2416,370 @@ async fn enforce_rate_limit(
     }
 }
 
+fn gmail_connected(session: &UserSession) -> bool {
+    session.gmail_account_email.is_some()
+        && (session.gmail_access_token_encrypted.is_some()
+            || !session.access_token_encrypted.trim().is_empty())
+}
+
+fn gmail_access_token(session: &UserSession) -> Result<String, ApiError> {
+    session
+        .gmail_access_token_encrypted
+        .clone()
+        .or_else(|| {
+            (!session.access_token_encrypted.trim().is_empty())
+                .then(|| session.access_token_encrypted.clone())
+        })
+        .ok_or_else(|| ApiError::forbidden("conecta Gmail antes de analizar"))
+}
+
+fn require_gmail_connected(session: &UserSession) -> Result<(), ApiError> {
+    if gmail_connected(session) {
+        Ok(())
+    } else {
+        Err(ApiError::forbidden("conecta Gmail antes de analizar"))
+    }
+}
+
+async fn entitlement_snapshot(
+    state: &AppState,
+    org_id: &str,
+) -> Result<EntitlementSnapshot, ApiError> {
+    if !state.config.billing.enforcement_enabled {
+        return Ok(EntitlementSnapshot {
+            allowed: true,
+            reason: None,
+            subscription_status: Some(SubscriptionStatus::Active),
+            plan: Some(plan_by_id(&BillingPlanId::Pro)),
+            cancel_at_period_end: false,
+            current_period_end: None,
+            trial_ends_at: None,
+        });
+    }
+    let subscription = state.storage.get_subscription_for_org(org_id).await?;
+    let allowed = subscription_allows_access(subscription.as_ref(), Utc::now());
+    let plan = subscription
+        .as_ref()
+        .map(|subscription| plan_by_id(&subscription.plan_id));
+    let cancel_at_period_end = subscription
+        .as_ref()
+        .map(|subscription| subscription.cancel_at_period_end)
+        .unwrap_or(false);
+    let current_period_end = subscription
+        .as_ref()
+        .and_then(|subscription| subscription.current_period_end);
+    let trial_ends_at = subscription
+        .as_ref()
+        .and_then(|subscription| subscription.trial_ends_at);
+    // Si una cancelación agendada ya venció, reportar Cancelled para que el front la trate como bloqueada.
+    let subscription_status = subscription.map(|subscription| {
+        if !allowed
+            && subscription.status == SubscriptionStatus::Active
+            && subscription.cancel_at_period_end
+        {
+            SubscriptionStatus::Cancelled
+        } else {
+            subscription.status
+        }
+    });
+    Ok(EntitlementSnapshot {
+        allowed,
+        reason: if allowed {
+            None
+        } else {
+            Some("subscription_required".to_string())
+        },
+        subscription_status,
+        plan,
+        cancel_at_period_end,
+        current_period_end,
+        trial_ends_at,
+    })
+}
+
+async fn require_active_entitlement(
+    state: &AppState,
+    session: &UserSession,
+) -> Result<OrgConfigBundle, ApiError> {
+    let bundle = get_or_provision_org_config(state, &session.google_account_email).await?;
+    let entitlement = entitlement_snapshot(state, &bundle.org.id).await?;
+    if entitlement.allowed {
+        Ok(bundle)
+    } else {
+        Err(ApiError::payment_required(
+            "necesitas un plan activo o trial vigente para usar la app",
+        ))
+    }
+}
+
+/// Guard de lectura: bloquea el historial/datos de análisis cuando el plan no está vigente.
+async fn require_entitlement(state: &AppState, session: &UserSession) -> Result<(), ApiError> {
+    require_active_entitlement(state, session).await.map(|_| ())
+}
+
+fn current_period_key() -> String {
+    Utc::now().format("%Y-%m").to_string()
+}
+
+fn empty_usage(org_id: &str, period_key: &str) -> UsageLedger {
+    UsageLedger {
+        org_id: org_id.to_string(),
+        period_key: period_key.to_string(),
+        runs_created: 0,
+        candidate_threads: 0,
+        ai_audited_threads: 0,
+        updated_at: Utc::now(),
+    }
+}
+
+async fn enforce_usage_allows_run(state: &AppState, org_id: &str) -> Result<(), ApiError> {
+    if !state.config.billing.enforcement_enabled {
+        return Ok(());
+    }
+    let subscription = state
+        .storage
+        .get_subscription_for_org(org_id)
+        .await?
+        .ok_or_else(|| ApiError::payment_required("necesitas un plan activo"))?;
+    let plan = plan_by_id(&subscription.plan_id);
+    let period_key = current_period_key();
+    let usage = state
+        .storage
+        .get_usage_ledger(org_id, &period_key)
+        .await?
+        .unwrap_or_else(|| empty_usage(org_id, &period_key));
+    if usage.runs_created >= plan.limits.runs_per_month {
+        return Err(ApiError::payment_required(
+            "alcanzaste el límite mensual de análisis de tu plan",
+        ));
+    }
+    Ok(())
+}
+
+async fn increment_runs_usage(state: &AppState, org_id: Option<&str>) -> Result<(), ApiError> {
+    let Some(org_id) = org_id else {
+        return Ok(());
+    };
+    let period_key = current_period_key();
+    let mut usage = state
+        .storage
+        .get_usage_ledger(org_id, &period_key)
+        .await?
+        .unwrap_or_else(|| empty_usage(org_id, &period_key));
+    usage.runs_created = usage.runs_created.saturating_add(1);
+    usage.updated_at = Utc::now();
+    state.storage.upsert_usage_ledger(&usage).await?;
+    Ok(())
+}
+
+async fn add_analysis_usage(
+    state: &AppState,
+    org_id: Option<&str>,
+    candidate_threads: u32,
+    ai_audited_threads: u32,
+) -> anyhow::Result<()> {
+    let Some(org_id) = org_id else {
+        return Ok(());
+    };
+    let period_key = current_period_key();
+    let mut usage = state
+        .storage
+        .get_usage_ledger(org_id, &period_key)
+        .await?
+        .unwrap_or_else(|| empty_usage(org_id, &period_key));
+    usage.candidate_threads = usage.candidate_threads.saturating_add(candidate_threads);
+    usage.ai_audited_threads = usage.ai_audited_threads.saturating_add(ai_audited_threads);
+    usage.updated_at = Utc::now();
+    state.storage.upsert_usage_ledger(&usage).await
+}
+
+#[derive(Debug, Deserialize)]
+struct MercadoPagoPreapprovalResponse {
+    id: String,
+    #[serde(default)]
+    init_point: Option<String>,
+    #[serde(default)]
+    sandbox_init_point: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+}
+
+async fn create_mercadopago_preapproval(
+    state: &AppState,
+    access_token: &str,
+    checkout: &CheckoutSession,
+) -> Result<MercadoPagoPreapprovalResponse, ApiError> {
+    let plan = plan_by_id(&checkout.plan_id);
+    let start_date = if plan.trial_days > 0 {
+        (Utc::now() + chrono::Duration::days(plan.trial_days as i64)).to_rfc3339()
+    } else {
+        Utc::now().to_rfc3339()
+    };
+    state
+        .http
+        .post("https://api.mercadopago.com/preapproval")
+        .bearer_auth(access_token)
+        .json(&json!({
+            "reason": format!("{} - Helpdesk Inspector", plan.name),
+            "external_reference": checkout.id,
+            "payer_email": checkout.account_email,
+            "auto_recurring": {
+                "frequency": 1,
+                "frequency_type": "months",
+                "start_date": start_date,
+                "transaction_amount": checkout.amount_clp,
+                "currency_id": "CLP"
+            },
+            // Retorno del navegador -> web app (ruta NO proxyada por server.mjs).
+            "back_url": format!("{}/checkout-return?session_id={}", state.config.web_base_url, checkout.id),
+            // Webhook de eventos -> API.
+            "notification_url": format!("{}/billing/mercadopago/webhook", state.config.api_base_url),
+            "status": "pending"
+        }))
+        .send()
+        .await?
+        .json_or_external_error("Mercado Pago preapproval")
+        .await
+        .map_err(ApiError::from)
+}
+
+async fn update_mercadopago_preapproval(
+    state: &AppState,
+    access_token: &str,
+    provider_id: &str,
+    body: serde_json::Value,
+) -> Result<MercadoPagoPreapprovalResponse, ApiError> {
+    state
+        .http
+        .put(format!(
+            "https://api.mercadopago.com/preapproval/{provider_id}"
+        ))
+        .bearer_auth(access_token)
+        .json(&body)
+        .send()
+        .await?
+        .json_or_external_error("Mercado Pago preapproval update")
+        .await
+        .map_err(ApiError::from)
+}
+
+async fn get_mercadopago_preapproval(
+    state: &AppState,
+    access_token: &str,
+    provider_id: &str,
+) -> Result<MercadoPagoPreapprovalResponse, ApiError> {
+    state
+        .http
+        .get(format!(
+            "https://api.mercadopago.com/preapproval/{provider_id}"
+        ))
+        .bearer_auth(access_token)
+        .send()
+        .await?
+        .json_or_external_error("Mercado Pago preapproval fetch")
+        .await
+        .map_err(ApiError::from)
+}
+
+fn map_mercadopago_status(status: Option<&str>) -> SubscriptionStatus {
+    match status.unwrap_or_default() {
+        "authorized" => SubscriptionStatus::Active,
+        "paused" => SubscriptionStatus::PastDue,
+        "cancelled" => SubscriptionStatus::Cancelled,
+        _ => SubscriptionStatus::Pending,
+    }
+}
+
+fn verify_mercadopago_webhook(
+    state: &AppState,
+    headers: &HeaderMap,
+    signed_data_id: Option<&str>,
+) -> Result<(), ApiError> {
+    let Some(expected) = &state.config.billing.mercadopago_webhook_secret else {
+        return Ok(());
+    };
+    let x_signature = headers
+        .get("x-signature")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    let x_request_id = headers
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    validate_mercadopago_signature(x_signature, x_request_id, signed_data_id, expected)
+}
+
+fn validate_mercadopago_signature(
+    x_signature: &str,
+    x_request_id: &str,
+    signed_data_id: Option<&str>,
+    secret: &str,
+) -> Result<(), ApiError> {
+    let (timestamp, received_hash) =
+        parse_mercadopago_signature(x_signature).ok_or_else(ApiError::unauthorized)?;
+    let mut parts = Vec::new();
+    if let Some(data_id) = signed_data_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        parts.push(format!("id:{}", data_id.to_lowercase()));
+    }
+    let request_id = x_request_id.trim();
+    if !request_id.is_empty() {
+        parts.push(format!("request-id:{request_id}"));
+    }
+    parts.push(format!("ts:{timestamp}"));
+    let manifest = format!("{};", parts.join(";"));
+
+    type HmacSha256 = Hmac<Sha256>;
+    let mut mac =
+        HmacSha256::new_from_slice(secret.as_bytes()).map_err(|_| ApiError::unauthorized())?;
+    mac.update(manifest.as_bytes());
+    let received = hex_to_bytes(received_hash).ok_or_else(ApiError::unauthorized)?;
+    mac.verify_slice(&received)
+        .map_err(|_| ApiError::unauthorized())
+}
+
+fn parse_mercadopago_signature(header_value: &str) -> Option<(&str, &str)> {
+    let mut timestamp = None;
+    let mut v1 = None;
+    for part in header_value.split(',') {
+        let (key, value) = part.split_once('=')?;
+        match key.trim().to_ascii_lowercase().as_str() {
+            "ts" if !value.trim().is_empty() => timestamp = Some(value.trim()),
+            "v1" if !value.trim().is_empty() => v1 = Some(value.trim()),
+            _ => {}
+        }
+    }
+    Some((timestamp?, v1?))
+}
+
+#[cfg(test)]
+fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
+fn hex_to_bytes(value: &str) -> Option<Vec<u8>> {
+    let trimmed = value.trim();
+    if !trimmed.len().is_multiple_of(2) {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(trimmed.len() / 2);
+    let mut chars = trimmed.chars();
+    while let (Some(high), Some(low)) = (chars.next(), chars.next()) {
+        let high = high.to_digit(16)?;
+        let low = low.to_digit(16)?;
+        bytes.push(((high << 4) | low) as u8);
+    }
+    Some(bytes)
+}
+
 async fn require_owned_run(
     state: &AppState,
     run_id: &str,
@@ -1980,6 +2878,20 @@ impl ApiError {
         }
     }
 
+    fn forbidden(message: &str) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            message: message.to_string(),
+        }
+    }
+
+    fn payment_required(message: &str) -> Self {
+        Self {
+            status: StatusCode::PAYMENT_REQUIRED,
+            message: message.to_string(),
+        }
+    }
+
     fn bad_request(message: &str) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
@@ -1997,6 +2909,13 @@ impl ApiError {
     fn too_many_requests(message: &str) -> Self {
         Self {
             status: StatusCode::TOO_MANY_REQUESTS,
+            message: message.to_string(),
+        }
+    }
+
+    fn service_unavailable(message: &str) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
             message: message.to_string(),
         }
     }
@@ -2028,10 +2947,22 @@ impl From<reqwest::Error> for ApiError {
 
 trait GoogleResponseExt {
     async fn json_or_google_error<T: DeserializeOwned>(self, label: &str) -> anyhow::Result<T>;
+    async fn json_or_external_error<T: DeserializeOwned>(self, label: &str) -> anyhow::Result<T>;
 }
 
 impl GoogleResponseExt for reqwest::Response {
     async fn json_or_google_error<T: DeserializeOwned>(self, label: &str) -> anyhow::Result<T> {
+        let status = self.status();
+        let text = self.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(anyhow::anyhow!("{label} failed with {status}: {text}"));
+        }
+        serde_json::from_str(&text).map_err(|error| {
+            anyhow::anyhow!("{label} returned invalid JSON: {error}; body: {text}")
+        })
+    }
+
+    async fn json_or_external_error<T: DeserializeOwned>(self, label: &str) -> anyhow::Result<T> {
         let status = self.status();
         let text = self.text().await.unwrap_or_default();
         if !status.is_success() {
@@ -2060,6 +2991,7 @@ mod tests {
     use crate::{
         analysis::{AnalysisConfig, Classification},
         auth::sign_session_id,
+        billing::{Account, BillingPlanId, Subscription, SubscriptionStatus},
         config::{AppConfig, test_app_config},
         policies::OrgConfigResponse,
         storage::MemoryStorage,
@@ -2085,10 +3017,30 @@ mod tests {
             .upsert_user_session(&session("bob-session", "bob@example.com"))
             .await
             .unwrap();
+        storage
+            .upsert_account(&account(
+                "workos-alice-session",
+                "alice@example.com",
+                "alice-org",
+            ))
+            .await
+            .unwrap();
+        storage
+            .upsert_account(&account("workos-bob-session", "bob@example.com", "bob-org"))
+            .await
+            .unwrap();
         let alice_run = run("run-alice", "alice@example.com");
         let bob_run = run("run-bob", "bob@example.com");
         storage.create_analysis_run(&alice_run).await.unwrap();
         storage.create_analysis_run(&bob_run).await.unwrap();
+        storage
+            .upsert_subscription(&subscription("alice-org", "alice@example.com"))
+            .await
+            .unwrap();
+        storage
+            .upsert_subscription(&subscription("bob-org", "bob@example.com"))
+            .await
+            .unwrap();
         storage
             .upsert_thread(
                 &thread("thread-alice", "run-alice"),
@@ -2124,9 +3076,43 @@ mod tests {
         let now = Utc::now();
         UserSession {
             id: id.to_string(),
+            workos_user_id: Some(format!("workos-{id}")),
             google_account_email: email.to_string(),
+            gmail_account_email: Some(email.to_string()),
             access_token_encrypted: "access".to_string(),
             refresh_token_encrypted: Some("refresh".to_string()),
+            gmail_access_token_encrypted: Some("access".to_string()),
+            gmail_refresh_token_encrypted: Some("refresh".to_string()),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn subscription(org_id: &str, email: &str) -> Subscription {
+        let now = Utc::now();
+        Subscription {
+            id: format!("sub-{email}"),
+            org_id: org_id.to_string(),
+            plan_id: BillingPlanId::Pro,
+            status: SubscriptionStatus::Active,
+            provider: "test".to_string(),
+            provider_subscription_id: Some(format!("provider-{email}")),
+            current_period_start: Some(now),
+            current_period_end: Some(now + chrono::Duration::days(30)),
+            trial_ends_at: None,
+            cancel_at_period_end: false,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn account(workos_user_id: &str, email: &str, org_id: &str) -> Account {
+        let now = Utc::now();
+        Account {
+            workos_user_id: workos_user_id.to_string(),
+            email: email.to_string(),
+            name: None,
+            org_id: org_id.to_string(),
             created_at: now,
             updated_at: now,
         }
@@ -2295,6 +3281,121 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn public_plans_expose_clp_prices_and_only_pro_trial() {
+        let app = crate::build_app(test_app_config(), Arc::new(MemoryStorage::default()));
+        let response = app
+            .oneshot(request(Method::GET, "/public/plans", None, None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = response_json(response).await;
+        assert_eq!(body.as_array().unwrap().len(), 3);
+        assert_eq!(body[0]["id"], "inicial");
+        assert_eq!(body[0]["clp_monthly"], 9990);
+        assert_eq!(body[0]["trial_days"], 0);
+        assert_eq!(body[1]["id"], "pro");
+        assert_eq!(body[1]["clp_monthly"], 29990);
+        assert_eq!(body[1]["trial_days"], 30);
+        assert_eq!(body[2]["id"], "equipo");
+        assert_eq!(body[2]["clp_monthly"], 99990);
+        assert_eq!(body[2]["trial_days"], 0);
+    }
+
+    #[test]
+    fn mercadopago_signature_uses_hmac_manifest() {
+        let secret = "mp-webhook-secret";
+        let data_id = "PREAPPROVAL-123";
+        let request_id = "2066ca19-c6f1-498a-be75-1923005edd06";
+        let ts = "1742505638683";
+        let manifest =
+            "id:preapproval-123;request-id:2066ca19-c6f1-498a-be75-1923005edd06;ts:1742505638683;";
+        type HmacSha256 = Hmac<Sha256>;
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(manifest.as_bytes());
+        let signature = format!("ts={ts},v1={}", hex_lower(&mac.finalize().into_bytes()));
+
+        assert!(
+            validate_mercadopago_signature(&signature, request_id, Some(data_id), secret).is_ok()
+        );
+        assert!(validate_mercadopago_signature(secret, request_id, Some(data_id), secret).is_err());
+    }
+
+    #[tokio::test]
+    async fn analysis_creation_requires_active_subscription() {
+        let config = test_app_config();
+        let storage = MemoryStorage::default();
+        storage
+            .upsert_user_session(&session("trialless-session", "trialless@example.com"))
+            .await
+            .unwrap();
+        let cookie = signed_cookie("trialless-session", &config.session_secret);
+        let app = crate::build_app(config, Arc::new(storage));
+
+        let response = app
+            .oneshot(request(
+                Method::POST,
+                "/analysis-runs",
+                Some(&cookie),
+                Some(json!({
+                    "date_from": "2026-06-01",
+                    "date_to": "2026-06-02",
+                    "internal_domains": ["example.com"]
+                })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+    }
+
+    #[tokio::test]
+    async fn history_reads_require_active_subscription() {
+        let config = test_app_config();
+        let storage = MemoryStorage::default();
+        storage
+            .upsert_user_session(&session("blocked-session", "blocked@example.com"))
+            .await
+            .unwrap();
+        let cookie = signed_cookie("blocked-session", &config.session_secret);
+        let app = crate::build_app(config, Arc::new(storage));
+
+        for uri in ["/analysis-runs", "/threads/whatever"] {
+            let response = app
+                .clone()
+                .oneshot(request(Method::GET, uri, Some(&cookie), None))
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::PAYMENT_REQUIRED,
+                "GET {uri} debería exigir suscripción activa"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn gmail_connect_requires_active_subscription() {
+        let config = test_app_config();
+        let storage = MemoryStorage::default();
+        storage
+            .upsert_user_session(&session("no-plan-session", "noplan@example.com"))
+            .await
+            .unwrap();
+        let cookie = signed_cookie("no-plan-session", &config.session_secret);
+        let app = crate::build_app(config, Arc::new(storage));
+
+        let response = app
+            .oneshot(request(
+                Method::GET,
+                "/gmail/connect/login",
+                Some(&cookie),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
     }
 
     #[tokio::test]

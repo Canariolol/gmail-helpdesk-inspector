@@ -13,6 +13,7 @@ use crate::{
         decrypt_token, encrypt_token,
         refresh::{RefreshError, refresh_google_access_token},
     },
+    billing::subscription_allows_access,
     http::{AppState, execute_analysis, mark_run_failed},
     policies::{ReportMode, retention_expires_at, setup_state},
     report::{
@@ -360,8 +361,9 @@ async fn fresh_access_token(state: &AppState, config: &ScheduleConfig) -> anyhow
             )
         })?;
     let encrypted_refresh = session
-        .refresh_token_encrypted
+        .gmail_refresh_token_encrypted
         .clone()
+        .or(session.refresh_token_encrypted.clone())
         .expect("session filtered by refresh token presence");
     let refresh_token = decrypt_token(&encrypted_refresh, &state.config.encryption_key)?;
     let token = refresh_google_access_token(&state.http, &state.config.google, &refresh_token)
@@ -374,10 +376,12 @@ async fn fresh_access_token(state: &AppState, config: &ScheduleConfig) -> anyhow
         })?;
 
     let mut updated = session;
-    updated.access_token_encrypted =
-        encrypt_token(&token.access_token, &state.config.encryption_key)?;
+    updated.gmail_access_token_encrypted = Some(encrypt_token(
+        &token.access_token,
+        &state.config.encryption_key,
+    )?);
     if let Some(rotated) = &token.refresh_token {
-        updated.refresh_token_encrypted =
+        updated.gmail_refresh_token_encrypted =
             Some(encrypt_token(rotated, &state.config.encryption_key)?);
     }
     updated.updated_at = Utc::now();
@@ -406,6 +410,17 @@ async fn create_scheduled_run(
                 "configuración incompleta para análisis programado: {}",
                 current_setup.missing.join(", ")
             ));
+        }
+        if state.config.billing.enforcement_enabled {
+            let subscription = state
+                .storage
+                .get_subscription_for_org(&bundle.org.id)
+                .await?;
+            if !subscription_allows_access(subscription.as_ref(), Utc::now()) {
+                return Err(anyhow::anyhow!(
+                    "subscription_required: plan activo o trial vigente requerido para scheduler"
+                ));
+            }
         }
         let snapshot = bundle.policy_version.snapshot.clone();
         let analysis = &snapshot.analysis_policy;
@@ -651,6 +666,7 @@ mod tests {
     fn test_config(seed_email: Option<&str>) -> AppConfig {
         let mut config = test_app_config();
         config.scheduler.seed_user_email = seed_email.map(ToOwned::to_owned);
+        config.billing.enforcement_enabled = false;
         config
     }
 
@@ -1054,9 +1070,13 @@ mod tests {
         storage
             .upsert_user_session(&UserSession {
                 id: "s1".to_string(),
+                workos_user_id: Some("workos-s1".to_string()),
                 google_account_email: "a@x.cl".to_string(),
+                gmail_account_email: Some("a@x.cl".to_string()),
                 access_token_encrypted: "x".to_string(),
                 refresh_token_encrypted: None,
+                gmail_access_token_encrypted: None,
+                gmail_refresh_token_encrypted: None,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             })

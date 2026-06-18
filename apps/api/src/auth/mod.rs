@@ -15,9 +15,17 @@ type HmacSha256 = Hmac<Sha256>;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserSession {
     pub id: String,
+    #[serde(default)]
+    pub workos_user_id: Option<String>,
     pub google_account_email: String,
+    #[serde(default)]
+    pub gmail_account_email: Option<String>,
     pub access_token_encrypted: String,
     pub refresh_token_encrypted: Option<String>,
+    #[serde(default)]
+    pub gmail_access_token_encrypted: Option<String>,
+    #[serde(default)]
+    pub gmail_refresh_token_encrypted: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }

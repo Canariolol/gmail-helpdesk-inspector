@@ -6,7 +6,17 @@ import { createServer } from "node:http";
 const port = Number(process.env.PORT ?? 5173);
 const root = join(process.cwd(), "dist");
 const apiProxyTarget = process.env.API_PROXY_TARGET;
-const apiPrefixes = ["/auth", "/analysis-runs", "/threads", "/health"];
+const apiPrefixes = [
+  "/auth",
+  "/gmail",
+  "/analysis-runs",
+  "/threads",
+  "/me",
+  "/public",
+  "/checkout",
+  "/billing",
+  "/health",
+];
 
 const contentTypes = {
   ".css": "text/css; charset=utf-8",

@@ -3,7 +3,7 @@ import { API_BASE_URL } from "../../api/client";
 import { ConsentModal } from "./ConsentModal";
 import { FocusLanding } from "./variants/FocusLanding";
 
-const loginUrl = `${API_BASE_URL}/auth/google/login`;
+const loginUrl = `${API_BASE_URL}/auth/workos/login`;
 
 export function LandingPage() {
   const [showConsent, setShowConsent] = useState(false);

@@ -105,6 +105,80 @@ export interface ThreadDetail {
   messages: EmailMessage[];
 }
 
+// ---- Account / Billing ----
+
+export type BillingPlanId = "inicial" | "pro" | "equipo";
+export type SubscriptionStatus = "pending" | "trialing" | "active" | "past_due" | "cancelled" | "expired";
+
+export interface PlanLimits {
+  mailboxes: number;
+  members: number;
+  runs_per_month: number;
+  candidate_threads_per_month: number;
+  ai_audited_threads_per_month: number;
+  report_recipients: number;
+  retention_days: number;
+}
+
+export interface BillingPlan {
+  id: BillingPlanId;
+  name: string;
+  usd_reference_monthly: number;
+  clp_monthly: number;
+  trial_days: number;
+  limits: PlanLimits;
+  highlighted: boolean;
+}
+
+export interface EntitlementSnapshot {
+  allowed: boolean;
+  reason: string | null;
+  subscription_status: SubscriptionStatus | null;
+  plan: BillingPlan | null;
+  cancel_at_period_end: boolean;
+  current_period_end: string | null;
+  trial_ends_at: string | null;
+}
+
+export interface AccountStatus {
+  account_email: string;
+  workos_user_id: string | null;
+  org_id: string;
+  gmail_connected: boolean;
+  gmail_account_email: string | null;
+  entitlement: EntitlementSnapshot;
+}
+
+export interface CheckoutSession {
+  id: string;
+  checkout_url: string | null;
+  plan_id: BillingPlanId;
+  status: "pending" | "provider_created" | "activated" | "failed";
+  currency_id: "CLP";
+  amount_clp: number;
+  usd_reference_monthly: number;
+  trial_days: number;
+}
+
+export interface CheckoutSessionResponse {
+  session: CheckoutSession;
+}
+
+export interface UsageLedger {
+  org_id: string;
+  period_key: string;
+  runs_created: number;
+  candidate_threads: number;
+  ai_audited_threads: number;
+  updated_at: string;
+}
+
+export interface UsageResponse {
+  period_key: string;
+  usage: UsageLedger;
+  limits: PlanLimits | null;
+}
+
 // ---- Org Config (SaaS setup) ----
 
 export interface OrgInfo {

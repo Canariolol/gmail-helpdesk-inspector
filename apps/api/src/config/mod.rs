@@ -17,6 +17,8 @@ pub struct AppConfig {
     pub encryption_key: String,
     pub session_secret: String,
     pub google: GoogleConfig,
+    pub workos: WorkosConfig,
+    pub billing: BillingConfig,
     pub firestore: FirestoreConfig,
     pub ai: AiConfig,
     pub scheduler: SchedulerConfig,
@@ -30,6 +32,21 @@ pub struct GoogleConfig {
     pub client_secret: String,
     pub redirect_url: String,
     pub gmail_max_threads: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkosConfig {
+    pub client_id: String,
+    pub api_key: String,
+    pub redirect_uri: String,
+    pub cookie_secret: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct BillingConfig {
+    pub mercadopago_access_token: Option<String>,
+    pub mercadopago_webhook_secret: Option<String>,
+    pub enforcement_enabled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -79,12 +96,43 @@ impl AppConfig {
             client_secret: env_or("GOOGLE_CLIENT_SECRET", ""),
             redirect_url: env_or(
                 "GOOGLE_REDIRECT_URL",
-                "http://localhost:8080/auth/google/callback",
+                "http://localhost:8080/gmail/connect/callback",
             ),
             gmail_max_threads: env_or("GMAIL_MAX_THREADS", "50")
                 .parse()
                 .context("invalid GMAIL_MAX_THREADS")?,
         };
+        let workos = WorkosConfig {
+            client_id: env_or("WORKOS_CLIENT_ID", ""),
+            api_key: secret_or_empty("WORKOS_API_KEY", production)?,
+            redirect_uri: env_or(
+                "WORKOS_REDIRECT_URI",
+                "http://localhost:8080/auth/workos/callback",
+            ),
+            cookie_secret: secret_or_dev_default(
+                "WORKOS_COOKIE_SECRET",
+                "development-only-workos-cookie-secret",
+                production,
+            )?,
+        };
+        if production && workos.client_id.trim().is_empty() {
+            return Err(anyhow!(
+                "WORKOS_CLIENT_ID is required when APP_ENV=production"
+            ));
+        }
+        let billing = BillingConfig {
+            mercadopago_access_token: empty_to_none(env::var("MERCADOPAGO_ACCESS_TOKEN").ok()),
+            mercadopago_webhook_secret: empty_to_none(env::var("MERCADOPAGO_WEBHOOK_SECRET").ok()),
+            enforcement_enabled: env::var("BILLING_ENFORCEMENT_ENABLED")
+                .ok()
+                .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
+                .unwrap_or(production),
+        };
+        if production && billing.mercadopago_access_token.is_none() {
+            return Err(anyhow!(
+                "MERCADOPAGO_ACCESS_TOKEN is required when APP_ENV=production"
+            ));
+        }
 
         if app_storage != "memory" {
             require("GCP_PROJECT_ID")?;
@@ -157,6 +205,8 @@ impl AppConfig {
                 production,
             )?,
             google,
+            workos,
+            billing,
             firestore: FirestoreConfig {
                 project_id: env_or("GCP_PROJECT_ID", ""),
                 database_id: env_or("FIRESTORE_DATABASE_ID", "(default)"),
@@ -176,6 +226,16 @@ impl AppConfig {
             report,
             rate_limit,
         })
+    }
+}
+
+fn secret_or_empty(key: &str, production: bool) -> anyhow::Result<String> {
+    match require(key) {
+        Ok(value) => Ok(value),
+        Err(error) if production => Err(anyhow!(
+            "{key} is required when APP_ENV=production: {error}"
+        )),
+        Err(_) => Ok(String::new()),
     }
 }
 
@@ -280,6 +340,17 @@ pub(crate) fn test_app_config() -> AppConfig {
             client_secret: String::new(),
             redirect_url: String::new(),
             gmail_max_threads: 50,
+        },
+        workos: WorkosConfig {
+            client_id: "client_test".to_string(),
+            api_key: "sk_test".to_string(),
+            redirect_uri: "http://localhost:8080/auth/workos/callback".to_string(),
+            cookie_secret: "test-workos-cookie-secret".to_string(),
+        },
+        billing: BillingConfig {
+            mercadopago_access_token: Some("TEST-access-token".to_string()),
+            mercadopago_webhook_secret: Some("test-webhook-secret".to_string()),
+            enforcement_enabled: true,
         },
         firestore: FirestoreConfig {
             project_id: String::new(),
