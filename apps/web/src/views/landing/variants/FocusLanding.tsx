@@ -28,7 +28,7 @@ export function FocusLanding({ onLogin }: VariantProps) {
           <div className="lp-focus-hero-head">
             <span className="lp-focus-kicker">{hero.kicker}</span>
             <h1>
-              {hero.title} <em>{hero.highlight}</em>
+              {hero.title} <em><br />{hero.highlight}</em>
             </h1>
             <p>{hero.subtitle}</p>
             <div className="lp-focus-hero-actions">

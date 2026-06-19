@@ -266,6 +266,48 @@ export interface SetupState {
   missing: string[];
 }
 
+export interface GmailLabel {
+  id: string;
+  name: string;
+  label_type?: string;
+}
+
+export interface GmailSendAs {
+  email: string;
+  display_name?: string;
+  is_primary?: boolean;
+  is_default?: boolean;
+  treat_as_alias?: boolean;
+}
+
+export interface GmailProfile {
+  email_address: string;
+  messages_total?: number;
+  threads_total?: number;
+}
+
+export interface MailboxMetadata {
+  profile?: GmailProfile | null;
+  labels: GmailLabel[];
+  send_as: GmailSendAs[];
+  filters_count: number;
+  synced_at: string;
+}
+
+export interface FilterPreset {
+  id: string;
+  owner_email: string;
+  name: string;
+  include_labels: string[];
+  exclude_labels: string[];
+  ignored_senders: string[];
+  ignored_domains: string[];
+  ignored_keywords: string[];
+  is_default: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface OrgConfig {
   org: OrgInfo;
   membership: MembershipInfo;
@@ -273,6 +315,10 @@ export interface OrgConfig {
   policy_version: PolicyVersionInfo | null;
   draft: PolicyDraft;
   setup_state: SetupState;
+  /** Cuenta interna privilegiada: la UI nunca bloquea por gating de setup. */
+  account_unrestricted?: boolean;
+  /** Metadata de Gmail leída al conectar (etiquetas, alias, perfil). */
+  mailbox_metadata?: MailboxMetadata | null;
 }
 
 export interface PutConfigResponse {

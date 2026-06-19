@@ -10,6 +10,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use crate::analysis::{AnalysisConfig, EmailMessage, is_automated_sender, is_internal_email};
+use crate::mailbox::{GmailLabel, GmailProfile, GmailSendAs, MailboxMetadata};
 
 const PRIMARY_INBOX_LABELS: [&str; 2] = ["INBOX", "CATEGORY_PERSONAL"];
 const EXCLUDED_MESSAGE_LABELS: [&str; 2] = ["SPAM", "TRASH"];
@@ -23,6 +24,9 @@ pub struct GmailClient {
 pub struct GmailThreadData {
     pub id: String,
     pub is_primary_inbox: bool,
+    /// Unión de las etiquetas de Gmail del hilo (INBOX, CATEGORY_*, etiquetas de
+    /// usuario…). Señal para refinar la clasificación.
+    pub label_ids: Vec<String>,
     pub messages: Vec<EmailMessage>,
 }
 
@@ -76,6 +80,57 @@ struct GmailHeader {
 #[derive(Debug, Deserialize)]
 struct GmailBody {
     data: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LabelsListResponse {
+    #[serde(default)]
+    labels: Vec<LabelResource>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LabelResource {
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(rename = "type", default)]
+    label_type: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProfileResponse {
+    #[serde(rename = "emailAddress", default)]
+    email_address: String,
+    #[serde(rename = "messagesTotal", default)]
+    messages_total: u64,
+    #[serde(rename = "threadsTotal", default)]
+    threads_total: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct SendAsListResponse {
+    #[serde(rename = "sendAs", default)]
+    send_as: Vec<SendAsResource>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SendAsResource {
+    #[serde(rename = "sendAsEmail", default)]
+    send_as_email: String,
+    #[serde(rename = "displayName", default)]
+    display_name: String,
+    #[serde(rename = "isPrimary", default)]
+    is_primary: bool,
+    #[serde(rename = "isDefault", default)]
+    is_default: bool,
+    #[serde(rename = "treatAsAlias", default)]
+    treat_as_alias: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct FiltersListResponse {
+    #[serde(default)]
+    filter: Vec<serde_json::Value>,
 }
 
 impl Default for GmailClient {
@@ -136,30 +191,185 @@ impl GmailClient {
             .await?;
 
         let is_primary_inbox = thread_has_all_labels(&response.messages, &PRIMARY_INBOX_LABELS);
+        let label_ids = collect_thread_labels(&response.messages);
         let messages = normalize_visible_messages(response.messages, config)?;
         Ok(GmailThreadData {
             id: response.id,
             is_primary_inbox,
+            label_ids,
             messages,
         })
+    }
+
+    /// Catálogo de etiquetas (system + usuario). Bajo `gmail.readonly`.
+    pub async fn list_labels(&self, access_token: &str) -> anyhow::Result<Vec<GmailLabel>> {
+        let response: LabelsListResponse = self
+            .client
+            .get("https://gmail.googleapis.com/gmail/v1/users/me/labels")
+            .bearer_auth(access_token)
+            .send()
+            .await?
+            .error_for_status()
+            .context("failed to list Gmail labels")?
+            .json()
+            .await?;
+        Ok(response
+            .labels
+            .into_iter()
+            .map(|label| GmailLabel {
+                id: label.id,
+                name: label.name,
+                label_type: label.label_type,
+            })
+            .collect())
+    }
+
+    pub async fn get_profile(&self, access_token: &str) -> anyhow::Result<GmailProfile> {
+        let response: ProfileResponse = self
+            .client
+            .get("https://gmail.googleapis.com/gmail/v1/users/me/profile")
+            .bearer_auth(access_token)
+            .send()
+            .await?
+            .error_for_status()
+            .context("failed to fetch Gmail profile")?
+            .json()
+            .await?;
+        Ok(GmailProfile {
+            email_address: response.email_address,
+            messages_total: response.messages_total,
+            threads_total: response.threads_total,
+        })
+    }
+
+    /// Alias "enviar como" / direcciones de envío. Bajo `gmail.readonly`.
+    pub async fn list_send_as(&self, access_token: &str) -> anyhow::Result<Vec<GmailSendAs>> {
+        let response: SendAsListResponse = self
+            .client
+            .get("https://gmail.googleapis.com/gmail/v1/users/me/settings/sendAs")
+            .bearer_auth(access_token)
+            .send()
+            .await?
+            .error_for_status()
+            .context("failed to list Gmail send-as aliases")?
+            .json()
+            .await?;
+        Ok(response
+            .send_as
+            .into_iter()
+            .map(|item| GmailSendAs {
+                email: item.send_as_email,
+                display_name: item.display_name,
+                is_primary: item.is_primary,
+                is_default: item.is_default,
+                treat_as_alias: item.treat_as_alias,
+            })
+            .collect())
+    }
+
+    pub async fn count_filters(&self, access_token: &str) -> anyhow::Result<u32> {
+        let response: FiltersListResponse = self
+            .client
+            .get("https://gmail.googleapis.com/gmail/v1/users/me/settings/filters")
+            .bearer_auth(access_token)
+            .send()
+            .await?
+            .error_for_status()
+            .context("failed to list Gmail filters")?
+            .json()
+            .await?;
+        Ok(response.filter.len() as u32)
+    }
+
+    /// Lectura best-effort de toda la metadata al conectar. Cada parte tolera su
+    /// propio error para no abortar el login si una llamada de Gmail falla.
+    pub async fn fetch_mailbox_metadata(
+        &self,
+        access_token: &str,
+        now: DateTime<Utc>,
+    ) -> MailboxMetadata {
+        let profile = self.get_profile(access_token).await.ok();
+        let labels = self.list_labels(access_token).await.unwrap_or_default();
+        let send_as = self.list_send_as(access_token).await.unwrap_or_default();
+        let filters_count = self.count_filters(access_token).await.unwrap_or(0);
+        MailboxMetadata {
+            profile,
+            labels,
+            send_as,
+            filters_count,
+            synced_at: now,
+        }
     }
 }
 
 fn build_thread_list_url(config: &AnalysisConfig, max_threads: u32) -> String {
     let query = gmail_thread_search_query(config);
-    format!(
-        "https://gmail.googleapis.com/gmail/v1/users/me/threads?q={}&maxResults={}&includeSpamTrash=false&labelIds=INBOX&labelIds=CATEGORY_PERSONAL",
+    let mut url = format!(
+        "https://gmail.googleapis.com/gmail/v1/users/me/threads?q={}&maxResults={}&includeSpamTrash=false",
         utf8_percent_encode(&query, NON_ALPHANUMERIC),
         max_threads
-    )
+    );
+    // Sin selección de etiquetas se mantiene el comportamiento histórico: bandeja
+    // principal (INBOX + pestaña Principal). Con selección, el filtrado vive en
+    // el parámetro `q` (los operadores label:/category: permiten OR y exclusión,
+    // que labelIds no soporta).
+    if config.include_labels.is_empty() && config.exclude_labels.is_empty() {
+        url.push_str("&labelIds=INBOX&labelIds=CATEGORY_PERSONAL");
+    }
+    url
 }
 
 fn gmail_thread_search_query(config: &AnalysisConfig) -> String {
-    format!(
+    let mut parts = vec![format!(
         "after:{} before:{}",
         config.date_from.replace('-', "/"),
         gmail_end_exclusive(&config.date_to)
-    )
+    )];
+
+    let includes: Vec<String> = config
+        .include_labels
+        .iter()
+        .filter_map(|label| label_query_token(label))
+        .collect();
+    match includes.len() {
+        0 => {}
+        1 => parts.push(includes.into_iter().next().expect("len == 1")),
+        _ => parts.push(format!("({})", includes.join(" OR "))),
+    }
+
+    for label in &config.exclude_labels {
+        if let Some(token) = label_query_token(label) {
+            parts.push(format!("-{token}"));
+        }
+    }
+
+    parts.join(" ")
+}
+
+/// Convierte una etiqueta seleccionada en un operador de búsqueda de Gmail.
+/// Las categorías (`CATEGORY_*`) usan `category:`; las etiquetas de sistema
+/// conocidas usan `in:`/`is:`; el resto usa `label:"<nombre>"` (comillas para
+/// soportar espacios/acentos en etiquetas de usuario).
+fn label_query_token(label: &str) -> Option<String> {
+    let trimmed = label.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let upper = trimmed.to_ascii_uppercase();
+    if let Some(category) = upper.strip_prefix("CATEGORY_") {
+        return Some(format!("category:{}", category.to_ascii_lowercase()));
+    }
+    let token = match upper.as_str() {
+        "INBOX" => "in:inbox".to_string(),
+        "SENT" => "in:sent".to_string(),
+        "SPAM" => "in:spam".to_string(),
+        "TRASH" => "in:trash".to_string(),
+        "IMPORTANT" => "is:important".to_string(),
+        "STARRED" => "is:starred".to_string(),
+        "UNREAD" => "is:unread".to_string(),
+        _ => format!("label:\"{}\"", trimmed.replace('"', "")),
+    };
+    Some(token)
 }
 
 fn gmail_end_exclusive(date_to: &str) -> String {
@@ -189,6 +399,19 @@ fn thread_has_all_labels(messages: &[GmailMessageResponse], labels: &[&str]) -> 
     messages
         .iter()
         .any(|message| message_has_all_labels(message, labels))
+}
+
+/// Unión deduplicada de las etiquetas de todos los mensajes del hilo.
+fn collect_thread_labels(messages: &[GmailMessageResponse]) -> Vec<String> {
+    let mut labels: Vec<String> = Vec::new();
+    for message in messages {
+        for label in &message.label_ids {
+            if !labels.iter().any(|existing| existing == label) {
+                labels.push(label.clone());
+            }
+        }
+    }
+    labels
 }
 
 fn normalize_visible_messages(
@@ -331,7 +554,31 @@ mod tests {
             ignored_senders: vec![],
             ignored_domains: vec![],
             ignored_keywords: vec![],
+            include_labels: vec![],
+            exclude_labels: vec![],
         }
+    }
+
+    #[test]
+    fn query_without_labels_keeps_legacy_inbox_behavior() {
+        let url = build_thread_list_url(&config(), 50);
+        assert!(url.contains("labelIds=INBOX&labelIds=CATEGORY_PERSONAL"));
+    }
+
+    #[test]
+    fn query_includes_and_excludes_selected_labels() {
+        let mut cfg = config();
+        cfg.include_labels = vec!["CATEGORY_PROMOTIONS".to_string(), "Soporte".to_string()];
+        cfg.exclude_labels = vec!["CATEGORY_SOCIAL".to_string()];
+        let query = gmail_thread_search_query(&cfg);
+        assert!(query.contains("category:promotions"));
+        assert!(query.contains("label:\"Soporte\""));
+        assert!(query.contains(" OR "));
+        assert!(query.contains("-category:social"));
+
+        // Con selección de etiquetas no se anexan los labelIds fijos.
+        let url = build_thread_list_url(&cfg, 50);
+        assert!(!url.contains("labelIds=INBOX"));
     }
 
     fn gmail_message(id: &str, labels: Vec<&str>) -> GmailMessageResponse {

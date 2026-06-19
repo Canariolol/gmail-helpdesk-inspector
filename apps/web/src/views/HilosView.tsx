@@ -1,6 +1,6 @@
 import type { EmailThread, ThreadDetail } from "../api/types";
 import { EmptyState } from "../components/common/EmptyState";
-import { ThreadDetailPanel } from "../components/threads/ThreadDetailPanel";
+import { ThreadDetailRail } from "../components/threads/ThreadDetailRail";
 import { ThreadTable } from "../components/threads/ThreadTable";
 import { filterThreads } from "../lib/threads";
 
@@ -11,9 +11,12 @@ type Props = {
   forcedFilter?: "review";
   selectedThreadId: string | null;
   onSelectThread: (id: string) => void;
+  onCloseThread: () => void;
   detail: ThreadDetail | undefined;
   onReview: (payload: unknown) => void;
   savingReview: boolean;
+  reviewError: string | null;
+  reviewSavedAt: number | null;
   hasRun: boolean;
 };
 
@@ -44,15 +47,15 @@ export function HilosView(props: Props) {
           selectedThreadId={props.selectedThreadId}
           onSelect={props.onSelectThread}
         />
-        <aside className="detail-rail">
-          {props.detail ? (
-            <ThreadDetailPanel detail={props.detail} onReview={props.onReview} saving={props.savingReview} />
-          ) : (
-            <div className="card">
-              <EmptyState message="Selecciona un hilo para revisar la trazabilidad." />
-            </div>
-          )}
-        </aside>
+        <ThreadDetailRail
+          detail={props.detail}
+          open={Boolean(props.selectedThreadId)}
+          onClose={props.onCloseThread}
+          onReview={props.onReview}
+          saving={props.savingReview}
+          reviewError={props.reviewError}
+          reviewSavedAt={props.reviewSavedAt}
+        />
       </div>
     </div>
   );

@@ -72,6 +72,9 @@ class AuditThreadRequest(BaseModel):
     thread: EmailThread
     messages: list[EmailMessage]
     policy_context: AuditPolicyContext | None = None
+    # Etiquetas/pestañas de Gmail del hilo (INBOX, CATEGORY_*, etiquetas de
+    # usuario). Señal adicional para la decisión; opcional por compatibilidad.
+    gmail_labels: list[str] = Field(default_factory=list)
 
 
 class AuditThreadResponse(BaseModel):

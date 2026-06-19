@@ -373,6 +373,8 @@ mod tests {
                 ignored_senders: vec![],
                 ignored_domains: vec![],
                 ignored_keywords: vec![],
+                include_labels: vec![],
+                exclude_labels: vec![],
             },
             status: AnalysisStatus::Completed,
             progress_message: String::new(),

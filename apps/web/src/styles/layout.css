@@ -176,15 +176,88 @@
   min-width: 0;
 }
 
-/* Responsive */
+/* El botón de cierre y el backdrop solo existen en modo drawer (pantallas chicas). */
+.detail-rail-close {
+  display: none;
+}
+
+.drawer-backdrop {
+  display: none;
+}
+
+/* Responsive: bajo este ancho la columna lateral ya no cabe, así que la
+   trazabilidad pasa a un drawer deslizante a la derecha (con backdrop) en vez
+   de apilarse debajo de todo el listado de hilos. */
 @media (max-width: 1380px) {
   .split-view {
     grid-template-columns: minmax(0, 1fr);
   }
 
+  .drawer-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(15, 23, 42, 0.45);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 220ms ease;
+    z-index: 40;
+  }
+
+  .drawer-backdrop[data-open="true"] {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
   .detail-rail {
-    position: static;
-    max-height: none;
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    width: min(460px, 94vw);
+    max-height: 100vh;
+    margin: 0;
+    padding: var(--space-4);
+    background: var(--bg);
+    border-left: 1px solid var(--border-strong);
+    box-shadow: -12px 0 32px rgba(15, 23, 42, 0.18);
+    overflow-y: auto;
+    transform: translateX(100%);
+    visibility: hidden;
+    /* Mantiene la visibilidad durante la animación de salida y la oculta (sacándola
+       del orden de tabulación) recién al terminar. */
+    transition: transform 240ms ease, visibility 0s linear 240ms;
+    z-index: 50;
+  }
+
+  .detail-rail[data-open="true"] {
+    transform: translateX(0);
+    visibility: visible;
+    transition: transform 240ms ease;
+  }
+
+  .detail-rail-close {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    align-self: flex-end;
+    position: sticky;
+    top: 0;
+    flex: 0 0 auto;
+    width: 36px;
+    height: 36px;
+    border-radius: var(--radius-pill);
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    color: var(--text);
+  }
+
+  .detail-rail-close:hover {
+    background: var(--primary-soft);
+    color: var(--primary-strong);
   }
 }
 

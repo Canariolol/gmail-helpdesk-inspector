@@ -24,6 +24,9 @@ pub struct AppConfig {
     pub scheduler: SchedulerConfig,
     pub report: ReportConfig,
     pub rate_limit: RateLimitConfig,
+    /// Cuentas internas privilegiadas (correos en minúsculas) con acceso total:
+    /// sin rate limits, sin gating de setup y sin futuros límites de plan.
+    pub internal_full_access_emails: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -174,6 +177,11 @@ impl AppConfig {
                 .context("invalid RATE_LIMIT_ANALYSIS_START_PER_HOUR")?,
         };
 
+        let internal_full_access_emails = env_list("INTERNAL_FULL_ACCESS_EMAILS")
+            .into_iter()
+            .map(|email| email.to_lowercase())
+            .collect();
+
         let api_base_url = env_or("API_BASE_URL", "http://localhost:8080");
         let cookie_secure = env::var("APP_COOKIE_SECURE")
             .ok()
@@ -225,7 +233,20 @@ impl AppConfig {
             scheduler,
             report,
             rate_limit,
+            internal_full_access_emails,
         })
+    }
+
+    /// True si el correo pertenece a una cuenta interna privilegiada (acceso
+    /// total). El bypass aplica a cuotas/gating/consentimiento, nunca al
+    /// aislamiento de sesión ni de propiedad de datos.
+    pub fn is_privileged_account(&self, email: &str) -> bool {
+        let normalized = email.trim().to_lowercase();
+        !normalized.is_empty()
+            && self
+                .internal_full_access_emails
+                .iter()
+                .any(|allowed| allowed == &normalized)
     }
 }
 
@@ -379,6 +400,7 @@ pub(crate) fn test_app_config() -> AppConfig {
             analysis_create_per_hour: 12,
             analysis_start_per_hour: 12,
         },
+        internal_full_access_emails: vec![],
     }
 }
 
@@ -440,5 +462,15 @@ mod tests {
             .unwrap(),
             DEFAULT_SESSION_SECRET
         );
+    }
+
+    #[test]
+    fn privileged_account_matches_case_insensitively_and_ignores_empty() {
+        let mut config = test_app_config();
+        config.internal_full_access_emails = vec!["catherine.trivino@west-ingenieria.cl".to_string()];
+        assert!(config.is_privileged_account("Catherine.Trivino@West-Ingenieria.CL"));
+        assert!(config.is_privileged_account("  catherine.trivino@west-ingenieria.cl  "));
+        assert!(!config.is_privileged_account("someone@else.com"));
+        assert!(!config.is_privileged_account(""));
     }
 }

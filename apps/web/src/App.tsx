@@ -9,6 +9,7 @@ import type {
   CheckoutSessionResponse,
   EmailThread,
   EntitlementSnapshot,
+  FilterPreset,
   OrgConfig,
   ThreadDetail,
   UsageResponse,
@@ -54,6 +55,9 @@ export function App() {
     readPendingCheckout(),
   );
   const [showPlansModal, setShowPlansModal] = useState(false);
+  // Marca de tiempo del último guardado de revisión exitoso; alimenta la
+  // confirmación transitoria del formulario de revisión.
+  const [reviewSavedAt, setReviewSavedAt] = useState<number | null>(null);
 
   const hasPendingCheckout = pendingCheckout !== null;
 
@@ -211,6 +215,7 @@ export function App() {
       queryClient.invalidateQueries({ queryKey: ["analysis-runs"] });
       queryClient.invalidateQueries({ queryKey: ["threads", selectedRunId] });
       queryClient.invalidateQueries({ queryKey: ["thread", selectedThreadId] });
+      setReviewSavedAt(Date.now());
     },
   });
 
@@ -253,6 +258,26 @@ export function App() {
   const cancelSubscription = useMutation({
     mutationFn: () => api<EntitlementSnapshot>("/me/subscription/cancel", { method: "POST" }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["account"] }),
+  });
+
+  const filterPresets = useQuery({
+    queryKey: ["filter-presets"],
+    queryFn: () => api<FilterPreset[]>("/me/filter-presets"),
+    enabled: inShell,
+  });
+
+  const savePreset = useMutation({
+    mutationFn: (payload: unknown) =>
+      api<FilterPreset>("/me/filter-presets", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["filter-presets"] }),
+  });
+
+  const deletePreset = useMutation({
+    mutationFn: (id: string) => api<void>(`/me/filter-presets/${id}`, { method: "DELETE" }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["filter-presets"] }),
   });
 
   const threadItems = threads.data ?? [];
@@ -304,6 +329,18 @@ export function App() {
     clearPendingCheckout();
     setPendingCheckout(null);
     checkout.reset();
+  };
+
+  // Al cambiar o cerrar el hilo limpiamos el estado de la mutación para que no
+  // arrastre un error/éxito previo al abrir otra trazabilidad.
+  const handleSelectThread = (id: string) => {
+    setSelectedThreadId(id);
+    manualReview.reset();
+  };
+
+  const handleCloseThread = () => {
+    setSelectedThreadId(null);
+    manualReview.reset();
   };
 
   if (me.isError) {
@@ -411,10 +448,13 @@ export function App() {
             onThreadFilter={setThreadFilter}
             onMetricFilter={handleMetricFilter}
             selectedThreadId={selectedThreadId}
-            onSelectThread={setSelectedThreadId}
+            onSelectThread={handleSelectThread}
+            onCloseThread={handleCloseThread}
             detail={detail.data}
             onReview={(payload) => manualReview.mutate(payload)}
             savingReview={manualReview.isPending}
+            reviewError={manualReview.error?.message ?? null}
+            reviewSavedAt={reviewSavedAt}
             onAnalyze={handleAnalyze}
             analyzing={createRun.isPending || startRun.isPending}
             onStartRun={() => selectedRun && startRun.mutate(selectedRun.id)}
@@ -422,6 +462,9 @@ export function App() {
             onViewDetails={() => setView("hilos")}
             orgConfig={currentOrgConfig}
             onGoToSetup={handleGoToSetup}
+            filterPresets={filterPresets.data ?? []}
+            onSavePreset={(payload) => savePreset.mutate(payload)}
+            onDeletePreset={(id) => deletePreset.mutate(id)}
             analysisError={createRun.error?.message ?? startRun.error?.message ?? null}
           />
         )}
@@ -432,10 +475,13 @@ export function App() {
             onFilter={setThreadFilter}
             forcedFilter={effectiveView === "revision" ? "review" : undefined}
             selectedThreadId={selectedThreadId}
-            onSelectThread={setSelectedThreadId}
+            onSelectThread={handleSelectThread}
+            onCloseThread={handleCloseThread}
             detail={detail.data}
             onReview={(payload) => manualReview.mutate(payload)}
             savingReview={manualReview.isPending}
+            reviewError={manualReview.error?.message ?? null}
+            reviewSavedAt={reviewSavedAt}
             hasRun={Boolean(selectedRun)}
           />
         )}

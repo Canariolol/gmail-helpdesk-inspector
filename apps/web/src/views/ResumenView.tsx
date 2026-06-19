@@ -1,12 +1,12 @@
 import { AlertTriangle, CheckCheck, CheckCircle2, Clock, Gauge, HelpCircle, Mail, Reply, ShieldCheck, Timer } from "lucide-react";
-import type { AnalysisRun, EmailThread, OrgConfig, ThreadDetail } from "../api/types";
+import type { AnalysisRun, EmailThread, FilterPreset, OrgConfig, ThreadDetail } from "../api/types";
 import { ClassificationBarChart } from "../components/charts/ClassificationBarChart";
 import { CompositionDonut } from "../components/charts/CompositionDonut";
 import { EmptyState } from "../components/common/EmptyState";
 import { MetricCard } from "../components/common/MetricCard";
 import { FilterBar } from "../components/filters/FilterBar";
 import { StatusBanner } from "../components/runs/StatusBanner";
-import { ThreadDetailPanel } from "../components/threads/ThreadDetailPanel";
+import { ThreadDetailRail } from "../components/threads/ThreadDetailRail";
 import { ThreadTable } from "../components/threads/ThreadTable";
 import { formatDuration, formatPercent } from "../lib/format";
 import { filterThreads } from "../lib/threads";
@@ -19,9 +19,12 @@ type Props = {
   onMetricFilter: (filter: string) => void;
   selectedThreadId: string | null;
   onSelectThread: (id: string) => void;
+  onCloseThread: () => void;
   detail: ThreadDetail | undefined;
   onReview: (payload: unknown) => void;
   savingReview: boolean;
+  reviewError: string | null;
+  reviewSavedAt: number | null;
   onAnalyze: (payload: unknown) => void;
   analyzing: boolean;
   onStartRun: () => void;
@@ -29,6 +32,9 @@ type Props = {
   onViewDetails: () => void;
   orgConfig?: OrgConfig | null;
   onGoToSetup?: () => void;
+  filterPresets?: FilterPreset[];
+  onSavePreset?: (payload: unknown) => void;
+  onDeletePreset?: (id: string) => void;
   analysisError?: string | null;
 };
 
@@ -36,7 +42,8 @@ export function ResumenView(props: Props) {
   const { run } = props;
   const visibleThreads = filterThreads(props.threads, props.threadFilter);
   const setupNotReady = props.orgConfig !== null && props.orgConfig !== undefined
-    && !props.orgConfig.setup_state.ready_for_analysis;
+    && !props.orgConfig.setup_state.ready_for_analysis
+    && props.orgConfig.account_unrestricted !== true;
 
   return (
     <div className="view">
@@ -64,6 +71,9 @@ export function ResumenView(props: Props) {
         onAnalyze={props.onAnalyze}
         orgConfig={props.orgConfig}
         onGoToSetup={props.onGoToSetup}
+        filterPresets={props.filterPresets}
+        onSavePreset={props.onSavePreset}
+        onDeletePreset={props.onDeletePreset}
       />
       {props.analysisError && (
         <div className="action-error-banner" role="alert">
@@ -111,15 +121,15 @@ export function ResumenView(props: Props) {
               onSelect={props.onSelectThread}
             />
           </div>
-          <aside className="detail-rail">
-            {props.detail ? (
-              <ThreadDetailPanel detail={props.detail} onReview={props.onReview} saving={props.savingReview} />
-            ) : (
-              <div className="card">
-                <EmptyState message="Selecciona un hilo para revisar la trazabilidad." />
-              </div>
-            )}
-          </aside>
+          <ThreadDetailRail
+            detail={props.detail}
+            open={Boolean(props.selectedThreadId)}
+            onClose={props.onCloseThread}
+            onReview={props.onReview}
+            saving={props.savingReview}
+            reviewError={props.reviewError}
+            reviewSavedAt={props.reviewSavedAt}
+          />
         </div>
       )}
     </div>

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Classification, ThreadDetail } from "../../api/types";
 import { classificationLabels, formatDateTime } from "../../lib/format";
 
@@ -6,11 +6,13 @@ type Props = {
   detail: ThreadDetail;
   onReview: (payload: unknown) => void;
   saving: boolean;
+  reviewError: string | null;
+  reviewSavedAt: number | null;
 };
 
 // El padre monta este formulario con key={thread.id}, así el estado se
 // reinicia al cambiar de hilo sin efectos de sincronización.
-export function ReviewForm({ detail, onReview, saving }: Props) {
+export function ReviewForm({ detail, onReview, saving, reviewError, reviewSavedAt }: Props) {
   const [classification, setClassification] = useState<Classification>(detail.thread.classification);
   const [answered, setAnswered] = useState(detail.thread.is_answered);
   const [valid, setValid] = useState(detail.thread.is_valid_client_request);
@@ -18,6 +20,21 @@ export function ReviewForm({ detail, onReview, saving }: Props) {
   const [firstReply, setFirstReply] = useState(detail.thread.first_internal_reply_message_id ?? "");
   const [lastInternal, setLastInternal] = useState(detail.thread.last_internal_message_id ?? "");
   const [notes, setNotes] = useState("");
+  const [savedFlash, setSavedFlash] = useState(false);
+
+  // reviewSavedAt cambia con cada guardado exitoso. Como el form se remonta por
+  // hilo (key=thread.id), el ref evita un flash falso al abrir un hilo nuevo
+  // después de haber guardado en otro: la primera corrida del efecto se ignora.
+  const firstSavedRun = useRef(true);
+  useEffect(() => {
+    if (firstSavedRun.current) {
+      firstSavedRun.current = false;
+      return;
+    }
+    setSavedFlash(true);
+    const timer = setTimeout(() => setSavedFlash(false), 4000);
+    return () => clearTimeout(timer);
+  }, [reviewSavedAt]);
 
   const clientOptions = detail.messages.filter((message) => message.is_external && !message.is_automated);
   const internalOptions = detail.messages.filter((message) => message.is_internal && !message.is_automated);
@@ -94,8 +111,18 @@ export function ReviewForm({ detail, onReview, saving }: Props) {
         Nota
         <textarea value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="Añadir nota..." />
       </label>
+      {reviewError && (
+        <p className="review-status is-error" role="alert">
+          No se pudo guardar la revisión: {reviewError}
+        </p>
+      )}
+      {savedFlash && !saving && !reviewError && (
+        <p className="review-status is-success" role="status">
+          ✓ Revisión guardada. El estado del hilo se actualizó.
+        </p>
+      )}
       <button type="submit" className="btn-primary" disabled={saving}>
-        Guardar revisión
+        {saving ? "Guardando…" : "Guardar revisión"}
       </button>
     </form>
   );

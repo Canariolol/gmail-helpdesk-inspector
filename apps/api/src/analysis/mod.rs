@@ -50,6 +50,12 @@ pub struct AnalysisConfig {
     pub ignored_senders: Vec<String>,
     pub ignored_domains: Vec<String>,
     pub ignored_keywords: Vec<String>,
+    /// Etiquetas/categorías de Gmail a incluir y excluir en la recuperación.
+    /// Vacías = comportamiento histórico (INBOX + pestaña Principal).
+    #[serde(default)]
+    pub include_labels: Vec<String>,
+    #[serde(default)]
+    pub exclude_labels: Vec<String>,
 }
 
 fn default_time_from() -> String {
@@ -794,26 +800,66 @@ fn percentile(sorted: &[f64], p: f64) -> Option<f64> {
     sorted.get(idx).copied()
 }
 
+/// True si todos los ids de mensaje que la IA referencia existen en el hilo
+/// (evita aplicar una auditoría que inventó ids).
+pub fn ai_message_ids_known(result: &AiAuditResult, known_message_ids: &[String]) -> bool {
+    let known = |id: &Option<String>| {
+        id.as_ref()
+            .map(|id| known_message_ids.contains(id))
+            .unwrap_or(true)
+    };
+    known(&result.first_client_message_id)
+        && known(&result.first_internal_reply_message_id)
+        && known(&result.last_internal_message_id)
+}
+
 pub fn should_auto_apply_ai(result: &AiAuditResult, known_message_ids: &[String]) -> bool {
     if result.confidence < AI_AUTO_APPLY_THRESHOLD || result.manual_review_required {
         return false;
     }
-    let first_client_ok = result
-        .first_client_message_id
-        .as_ref()
-        .map(|id| known_message_ids.contains(id))
-        .unwrap_or(true);
-    let first_reply_ok = result
-        .first_internal_reply_message_id
-        .as_ref()
-        .map(|id| known_message_ids.contains(id))
-        .unwrap_or(true);
-    let last_internal_ok = result
-        .last_internal_message_id
-        .as_ref()
-        .map(|id| known_message_ids.contains(id))
-        .unwrap_or(true);
-    first_client_ok && first_reply_ok && last_internal_ok
+    ai_message_ids_known(result, known_message_ids)
+}
+
+/// Categorías/pestañas de Gmail que rara vez corresponden a una solicitud de
+/// soporte válida; se usan como señal para refinar la clasificación heurística.
+const GMAIL_PROMOTIONS_LABEL: &str = "CATEGORY_PROMOTIONS";
+const GMAIL_SOCIAL_LABEL: &str = "CATEGORY_SOCIAL";
+const GMAIL_FORUMS_LABEL: &str = "CATEGORY_FORUMS";
+
+/// Refina la clasificación usando las etiquetas propias de Gmail. Es
+/// conservador: ante un conflicto con un veredicto "válido" de reglas/heurística
+/// no invierte a ciegas, sino que enruta a revisión manual (y, para Promociones,
+/// marca Newsletter). No toca resultados ya aplicados por IA o revisión manual.
+pub fn refine_classification_with_gmail_labels(
+    thread: &mut EmailThread,
+    gmail_labels: &[String],
+) {
+    if matches!(
+        thread.classification_source,
+        ClassificationSource::Ai | ClassificationSource::Manual
+    ) {
+        return;
+    }
+    let has_label =
+        |needle: &str| gmail_labels.iter().any(|label| label.eq_ignore_ascii_case(needle));
+
+    if thread.is_valid_client_request && has_label(GMAIL_PROMOTIONS_LABEL) {
+        thread.classification = Classification::Newsletter;
+        thread.is_valid_client_request = false;
+        thread.manual_review_required = true;
+        thread.reasons.push(
+            "Gmail ubicó el hilo en la pestaña Promociones; se marca para revisión por posible boletín/promoción."
+                .to_string(),
+        );
+    } else if thread.is_valid_client_request
+        && (has_label(GMAIL_SOCIAL_LABEL) || has_label(GMAIL_FORUMS_LABEL))
+    {
+        thread.manual_review_required = true;
+        thread.reasons.push(
+            "Gmail ubicó el hilo en la pestaña Social/Foros; requiere revisión para confirmar que es una solicitud válida."
+                .to_string(),
+        );
+    }
 }
 
 #[cfg(test)]
@@ -853,6 +899,8 @@ mod tests {
             ignored_senders: vec![],
             ignored_domains: vec![],
             ignored_keywords: vec![],
+            include_labels: vec![],
+            exclude_labels: vec![],
         };
         let thread = classify_thread(
             "run",
@@ -888,6 +936,8 @@ mod tests {
                 ignored_senders: vec![],
                 ignored_domains: vec![],
                 ignored_keywords: vec![],
+                include_labels: vec![],
+                exclude_labels: vec![],
             },
         );
         answered.response_time_minutes = Some(20);
@@ -921,6 +971,8 @@ mod tests {
                 ignored_senders: vec![],
                 ignored_domains: vec![],
                 ignored_keywords: vec![],
+                include_labels: vec![],
+                exclude_labels: vec![],
             },
         );
 
@@ -948,6 +1000,8 @@ mod tests {
                 ignored_senders: vec![],
                 ignored_domains: vec![],
                 ignored_keywords: vec![],
+                include_labels: vec![],
+                exclude_labels: vec![],
             },
         );
 
@@ -957,6 +1011,73 @@ mod tests {
         assert!(thread.manual_review_required);
         assert!(!thread.is_valid_client_request);
         assert_eq!(thread.first_client_message_id, Some("m2".to_string()));
+    }
+
+    #[test]
+    fn gmail_promotions_label_routes_valid_thread_to_review() {
+        let config = AnalysisConfig {
+            date_from: "2026-06-01".to_string(),
+            date_to: "2026-06-12".to_string(),
+            time_from: "00:00".to_string(),
+            time_to: "23:59".to_string(),
+            timezone: "America/Santiago".to_string(),
+            internal_domains: vec!["company.test".to_string()],
+            ignored_senders: vec![],
+            ignored_domains: vec![],
+            ignored_keywords: vec![],
+            include_labels: vec![],
+            exclude_labels: vec![],
+        };
+        let mut thread = classify_thread(
+            "run",
+            "promo",
+            &[
+                msg("m1", "client@example.com", false, 0),
+                msg("m2", "agent@company.test", true, 25),
+            ],
+            &config,
+        );
+        assert_eq!(thread.classification, Classification::ValidClientRequest);
+        assert!(thread.is_valid_client_request);
+
+        refine_classification_with_gmail_labels(
+            &mut thread,
+            &["INBOX".to_string(), "CATEGORY_PROMOTIONS".to_string()],
+        );
+        assert_eq!(thread.classification, Classification::Newsletter);
+        assert!(!thread.is_valid_client_request);
+        assert!(thread.manual_review_required);
+    }
+
+    #[test]
+    fn gmail_labels_do_not_touch_ai_applied_threads() {
+        let config = AnalysisConfig {
+            date_from: "2026-06-01".to_string(),
+            date_to: "2026-06-12".to_string(),
+            time_from: "00:00".to_string(),
+            time_to: "23:59".to_string(),
+            timezone: "America/Santiago".to_string(),
+            internal_domains: vec!["company.test".to_string()],
+            ignored_senders: vec![],
+            ignored_domains: vec![],
+            ignored_keywords: vec![],
+            include_labels: vec![],
+            exclude_labels: vec![],
+        };
+        let mut thread = classify_thread(
+            "run",
+            "promo-ai",
+            &[
+                msg("m1", "client@example.com", false, 0),
+                msg("m2", "agent@company.test", true, 25),
+            ],
+            &config,
+        );
+        thread.classification_source = ClassificationSource::Ai;
+        refine_classification_with_gmail_labels(&mut thread, &["CATEGORY_PROMOTIONS".to_string()]);
+        // La IA manda: no se reclasifica ni se fuerza revisión por la etiqueta.
+        assert_eq!(thread.classification, Classification::ValidClientRequest);
+        assert!(thread.is_valid_client_request);
     }
 
     #[test]

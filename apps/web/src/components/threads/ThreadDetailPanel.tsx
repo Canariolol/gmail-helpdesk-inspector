@@ -1,17 +1,28 @@
 import type { ThreadDetail } from "../../api/types";
 import { formatDateTime, formatDuration, formatReason, threadReceivedAt } from "../../lib/format";
+import { StatusBadge } from "../common/StatusBadge";
 import { ReviewForm } from "./ReviewForm";
 
 type Props = {
   detail: ThreadDetail;
   onReview: (payload: unknown) => void;
   saving: boolean;
+  reviewError: string | null;
+  reviewSavedAt: number | null;
 };
 
-export function ThreadDetailPanel({ detail, onReview, saving }: Props) {
+export function ThreadDetailPanel({ detail, onReview, saving, reviewError, reviewSavedAt }: Props) {
   return (
     <div className="card thread-detail">
-      <h2>{detail.thread.subject}</h2>
+      <div className="thread-detail-head">
+        <h2>{detail.thread.subject}</h2>
+        <div className="thread-detail-tags">
+          <StatusBadge classification={detail.thread.classification} />
+          {detail.thread.manual_override_applied && (
+            <span className="chip tone-teal">Revisión manual aplicada</span>
+          )}
+        </div>
+      </div>
       <div className="trace-summary">
         <span>
           <strong>Recepción</strong>
@@ -44,7 +55,14 @@ export function ThreadDetailPanel({ detail, onReview, saving }: Props) {
           </article>
         ))}
       </div>
-      <ReviewForm key={detail.thread.id} detail={detail} onReview={onReview} saving={saving} />
+      <ReviewForm
+        key={detail.thread.id}
+        detail={detail}
+        onReview={onReview}
+        saving={saving}
+        reviewError={reviewError}
+        reviewSavedAt={reviewSavedAt}
+      />
     </div>
   );
 }
