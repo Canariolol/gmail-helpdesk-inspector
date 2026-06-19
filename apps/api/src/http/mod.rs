@@ -175,23 +175,46 @@ async fn health() -> Json<serde_json::Value> {
     Json(json!({ "ok": true }))
 }
 
-async fn auth_workos_login(State(state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
+/// Limita el `screen_hint` a los valores válidos de AuthKit; cualquier otra cosa se
+/// ignora (deja que WorkOS muestre su pantalla por defecto). Evita reenviar entrada
+/// arbitraria del usuario al proveedor de identidad.
+fn normalize_screen_hint(raw: Option<&str>) -> Option<&'static str> {
+    match raw {
+        Some("sign-up") => Some("sign-up"),
+        Some("sign-in") => Some("sign-in"),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkosLoginQuery {
+    /// "sign-up" lleva a la pantalla de creación de cuenta; "sign-in" a la de ingreso.
+    #[serde(default)]
+    screen_hint: Option<String>,
+}
+
+async fn auth_workos_login(
+    State(state): State<AppState>,
+    Query(query): Query<WorkosLoginQuery>,
+) -> Result<impl IntoResponse, ApiError> {
     if state.config.workos.client_id.trim().is_empty() {
         return Err(ApiError::service_unavailable("WorkOS no está configurado"));
     }
     let oauth_state = random_urlsafe(24);
     let signed_oauth = sign_session_id(&oauth_state, &state.config.workos.cookie_secret)?;
-    let url = url::Url::parse_with_params(
-        "https://api.workos.com/user_management/authorize",
-        &[
-            ("response_type", "code"),
-            ("provider", "authkit"),
-            ("client_id", state.config.workos.client_id.as_str()),
-            ("redirect_uri", state.config.workos.redirect_uri.as_str()),
-            ("state", oauth_state.as_str()),
-        ],
-    )
-    .expect("valid workos auth url");
+    let mut params = vec![
+        ("response_type", "code"),
+        ("provider", "authkit"),
+        ("client_id", state.config.workos.client_id.as_str()),
+        ("redirect_uri", state.config.workos.redirect_uri.as_str()),
+        ("state", oauth_state.as_str()),
+    ];
+    if let Some(hint) = normalize_screen_hint(query.screen_hint.as_deref()) {
+        params.push(("screen_hint", hint));
+    }
+    let url =
+        url::Url::parse_with_params("https://api.workos.com/user_management/authorize", &params)
+            .expect("valid workos auth url");
     let mut headers = HeaderMap::new();
     headers.insert(
         header::SET_COOKIE,
@@ -3469,6 +3492,15 @@ mod tests {
             .map(|n| sample_bucket(&format!("thread-{n}")))
             .collect();
         assert!(buckets.len() > 1, "el hash no distribuye los buckets");
+    }
+
+    #[test]
+    fn screen_hint_whitelist_only_accepts_known_values() {
+        assert_eq!(normalize_screen_hint(Some("sign-up")), Some("sign-up"));
+        assert_eq!(normalize_screen_hint(Some("sign-in")), Some("sign-in"));
+        assert_eq!(normalize_screen_hint(Some("javascript:alert(1)")), None);
+        assert_eq!(normalize_screen_hint(Some("")), None);
+        assert_eq!(normalize_screen_hint(None), None);
     }
 
     fn message(id: &str, from: &str) -> EmailMessage {

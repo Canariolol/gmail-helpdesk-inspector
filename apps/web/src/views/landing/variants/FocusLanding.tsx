@@ -6,9 +6,10 @@ import { Reveal } from "../Reveal";
 
 interface VariantProps {
   onLogin: () => void;
+  onSignup: () => void;
 }
 
-export function FocusLanding({ onLogin }: VariantProps) {
+export function FocusLanding({ onLogin, onSignup }: VariantProps) {
   const hero = HERO.focus;
 
   return (
@@ -18,9 +19,14 @@ export function FocusLanding({ onLogin }: VariantProps) {
           <img src="/logo-192.png" alt="" />
           {BRAND.short}
         </span>
-        <button type="button" className="lp-focus-link" onClick={onLogin}>
-          {hero.cta}
-        </button>
+        <div className="lp-focus-nav-actions">
+          <button type="button" className="lp-focus-link" onClick={onLogin}>
+            {hero.login}
+          </button>
+          <button type="button" className="lp-btn-primary lp-focus-nav-cta" onClick={onSignup}>
+            {hero.cta}
+          </button>
+        </div>
       </header>
 
       <main>
@@ -32,7 +38,7 @@ export function FocusLanding({ onLogin }: VariantProps) {
             </h1>
             <p>{hero.subtitle}</p>
             <div className="lp-focus-hero-actions">
-              <button type="button" className="lp-btn-primary lp-focus-cta" onClick={onLogin}>
+              <button type="button" className="lp-btn-primary lp-focus-cta" onClick={onSignup}>
                 {hero.cta} <ArrowRight size={18} />
               </button>
               <span className="lp-inline-note lp-focus-note">
@@ -104,7 +110,7 @@ export function FocusLanding({ onLogin }: VariantProps) {
 
         <Reveal className="lp-focus-final">
           <h2>Empieza a medir hoy.</h2>
-          <button type="button" className="lp-btn-primary lp-focus-cta" onClick={onLogin}>
+          <button type="button" className="lp-btn-primary lp-focus-cta" onClick={onSignup}>
             {hero.cta} <ArrowRight size={18} />
           </button>
         </Reveal>

@@ -14,6 +14,7 @@ export interface HeroCopy {
   highlight: string;
   subtitle: string;
   cta: string;
+  login: string;
 }
 
 export const HERO: { focus: HeroCopy } = {
@@ -23,6 +24,7 @@ export const HERO: { focus: HeroCopy } = {
     highlight: "de verdad?",
     subtitle: "Convierte tu casilla de Gmail en métricas auditables. Sin reemplazar tu correo.",
     cta: "Crear cuenta",
+    login: "Ingresar",
   },
 };
 

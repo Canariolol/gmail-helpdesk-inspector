@@ -37,6 +37,19 @@
   border-color: var(--primary);
 }
 
+.lp-focus-nav-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+
+/* CTA compacta para la barra de navegación (más chica que la del hero). */
+.lp-focus-nav-cta {
+  padding: 9px 18px;
+  font-size: var(--fs-sm);
+  box-shadow: 0 6px 16px rgba(249, 115, 22, 0.24);
+}
+
 /* Hero apilado dentro del primer viewport --------------------------------- */
 .lp-focus-hero {
   min-height: calc(100vh - 84px);
