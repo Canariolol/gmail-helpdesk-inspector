@@ -78,8 +78,8 @@ function initDraft(config: OrgConfig | null): WizardDraft {
       nonResponsibilityText: "",
       ignoredDomainsText: "google.com\ncalendar.google.com",
       ignoredKeywordsText: "newsletter\nboletín\npromoción",
-      aiEnabled: false,
-      aiConsentChecked: false,
+      aiEnabled: true,
+      aiConsentChecked: true,
       schedulerEnabled: false,
       reportRecipientsText: "",
       reportMode: "metrics_only",
@@ -292,8 +292,6 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
     if (s === 1 && !draft.orgName.trim()) return "El nombre de la organización es requerido.";
     if (s === 2 && splitLines(draft.internalDomainsText).length === 0)
       return "Agrega al menos un dominio interno (sin @). Ej: tuempresa.com";
-    if (s === 4 && draft.aiEnabled && !draft.aiConsentChecked)
-      return "Debes confirmar el consentimiento para activar la auditoría IA.";
     return null;
   }
 
@@ -549,7 +547,7 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
                 <h3 className="wizard-step-title">Auditoría con IA</h3>
                 <p className="wizard-step-desc">
                   La IA clasifica hilos para detectar casos ambiguos que necesitan revisión manual.
-                  Desactivada por defecto.
+                  Viene activada para potenciar la calidad del servicio; puedes desactivarla cuando quieras.
                 </p>
               </div>
               <div className="wizard-ai-card">
@@ -572,29 +570,21 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
                   checked={draft.aiEnabled}
                   onChange={(e) => {
                     set("aiEnabled", e.target.checked);
-                    if (!e.target.checked) set("aiConsentChecked", false);
+                    // Activarla (incl. reactivarla tras un opt-out) confirma el consentimiento.
+                    set("aiConsentChecked", e.target.checked);
                   }}
                 />
-                <span>Activar auditoría IA</span>
+                <span>Auditoría IA activada</span>
               </label>
-              {draft.aiEnabled && (
-                <label className="checkline" style={{ cursor: "pointer", alignItems: "flex-start" }}>
-                  <input
-                    type="checkbox"
-                    style={{ marginTop: 3 }}
-                    checked={draft.aiConsentChecked}
-                    onChange={(e) => set("aiConsentChecked", e.target.checked)}
-                  />
-                  <span style={{ fontWeight: 400, fontSize: "var(--fs-sm)" }}>
-                    Confirmo que fragmentos minimizados de mis hilos de soporte se procesarán mediante el proveedor IA
-                    configurado para clasificación automática. Puedo desactivarlo en cualquier momento.
-                  </span>
-                </label>
-              )}
-              {!draft.aiEnabled && (
+              {draft.aiEnabled ? (
+                <p className="wizard-help" style={{ fontSize: "var(--fs-sm)" }}>
+                  Mientras esté activa, fragmentos minimizados de tus hilos de soporte se procesan mediante el
+                  proveedor IA configurado para clasificación automática. El cambio aplica al próximo análisis.
+                </p>
+              ) : (
                 <p className="wizard-help">
-                  Sin IA activa, los hilos con clasificación incierta irán a revisión manual. Puedes activarla
-                  en cualquier momento; el cambio aplica al próximo análisis.
+                  Desactivaste la auditoría IA. Los hilos con clasificación incierta irán a revisión manual.
+                  Puedes reactivarla cuando quieras; el cambio aplica al próximo análisis.
                 </p>
               )}
             </div>

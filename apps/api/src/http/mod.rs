@@ -51,9 +51,9 @@ use crate::{
     mailbox::FilterPreset,
     policies::{
         AiPolicy, AnalysisPolicy, MailboxPurpose, OrgConfigBundle, OrgConfigResponse,
-        PolicyVersion, ScheduleReportPolicy, normalize_domains, normalize_list,
-        policy_version_from_draft, provision_default_config, retention_expires_at, setup_state,
-        validate_timezone,
+        PolicyVersion, ScheduleReportPolicy, apply_ai_defaults_migration, normalize_domains,
+        normalize_list, policy_version_from_draft, provision_default_config, retention_expires_at,
+        setup_state, validate_timezone,
     },
     scheduler::{
         model::{ScheduleConfig, ScheduleState},
@@ -1665,7 +1665,12 @@ async fn get_or_provision_org_config(
     state: &AppState,
     user_email: &str,
 ) -> Result<OrgConfigBundle, ApiError> {
-    if let Some(bundle) = state.storage.get_org_config_for_user(user_email).await? {
+    if let Some(mut bundle) = state.storage.get_org_config_for_user(user_email).await? {
+        // Migración perezosa al modelo opt-out: enciende una sola vez la IA de orgs
+        // previas que estaban apagadas por el viejo default, persistiendo el cambio.
+        if apply_ai_defaults_migration(&mut bundle.draft.ai_policy, Utc::now()) {
+            state.storage.upsert_org_config(&bundle).await?;
+        }
         return Ok(bundle);
     }
     let mut bundle = provision_default_config(user_email, Utc::now());
@@ -2329,6 +2334,9 @@ async fn process_one_thread(
         );
     }
     let received_human_thread = thread.first_client_message_id.is_some();
+    // Modelo opt-out: la IA está activa por defecto. Un run con snapshot respeta el
+    // flag `enabled` (un opt-out del usuario apaga la IA); sin snapshot (run legacy) se
+    // usa el default activo, coherente con la política por defecto de orgs nuevas.
     let ai_enabled = processing
         .policy_snapshot
         .map(|snapshot| snapshot.ai_policy.enabled)
@@ -3529,7 +3537,9 @@ mod tests {
             body.draft.analysis_policy.internal_domains,
             vec!["example.com"]
         );
-        assert!(!body.draft.ai_policy.enabled);
+        // Modelo opt-out: la IA nace activa con el consentimiento sellado al provisionar.
+        assert!(body.draft.ai_policy.enabled);
+        assert!(body.draft.ai_policy.consent_granted_at.is_some());
         assert_eq!(body.draft.retention_policy.retention_days, 30);
         assert_eq!(body.setup_state.missing, vec!["valid_request_criteria"]);
     }
@@ -3785,7 +3795,8 @@ mod tests {
         let body: serde_json::Value = response_json(response).await;
         assert_eq!(body["account"]["google_account_email"], "alice@example.com");
         assert_eq!(body["account"]["mailbox_connected"], true);
-        assert_eq!(body["privacy"]["ai_enabled"], false);
+        // Modelo opt-out: la org provisionada nace con IA activa por defecto.
+        assert_eq!(body["privacy"]["ai_enabled"], true);
         assert_eq!(body["privacy"]["retention_days"], 30);
         assert_eq!(body["stored_data"]["analysis_runs_count"], 1);
         assert_eq!(body["stored_data"]["threads_count"], 1);
@@ -3931,6 +3942,22 @@ mod tests {
         let mut config = test_app_config();
         config.internal_full_access_emails = vec!["alice@example.com".to_string()];
         let test = seeded_app_with_config(config).await;
+        // La org nace con IA activa; primero la desactivamos para forzar una transición
+        // off→on, que es la que dispara la compuerta de consentimiento.
+        let response = test
+            .app
+            .clone()
+            .oneshot(request(
+                Method::PUT,
+                "/me/org/config",
+                Some(&test.alice_cookie),
+                Some(json!({ "ai_policy": { "enabled": false } })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Re-activar sin consent_confirmed: para la cuenta privilegiada igual queda OK.
         let response = test
             .app
             .oneshot(request(
@@ -3941,7 +3968,6 @@ mod tests {
             ))
             .await
             .unwrap();
-        // Sin consent_confirmed; para la cuenta privilegiada igual queda OK.
         assert_eq!(response.status(), StatusCode::OK);
     }
 
@@ -3969,8 +3995,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn org_config_requires_ai_consent_and_updates_policy_version() {
+    async fn ai_opt_out_is_free_and_reenabling_requires_consent_and_bumps_version() {
         let test = seeded_app().await;
+
+        // Modelo opt-out: desactivar la IA proactivamente siempre se permite.
+        let response = test
+            .app
+            .clone()
+            .oneshot(request(
+                Method::PUT,
+                "/me/org/config",
+                Some(&test.alice_cookie),
+                Some(json!({ "ai_policy": { "enabled": false } })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Re-activar tras un opt-out sí re-confirma consentimiento: sin él, 400.
         let response = test
             .app
             .clone()
@@ -3984,6 +4026,7 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
+        // Con consentimiento explícito + setup completo: OK, sube versión y queda lista.
         let response = test
             .app
             .oneshot(request(
@@ -4005,7 +4048,8 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body: serde_json::Value = response_json(response).await;
-        assert_eq!(body["policy_version"]["version"], 2);
+        // v1 inicial → v2 (opt-out) → v3 (re-activación + setup).
+        assert_eq!(body["policy_version"]["version"], 3);
         assert_eq!(body["setup_state"]["ready_for_analysis"], true);
     }
 

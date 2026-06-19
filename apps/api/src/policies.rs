@@ -152,6 +152,11 @@ pub struct AiPolicy {
     pub max_audit_messages: u32,
     pub max_body_chars_per_message: u32,
     pub allowed_fields: Vec<String>,
+    /// Marca que a esta política ya se le aplicó el default "IA activa" (modelo opt-out).
+    /// Ausente/false en documentos previos al cambio → la migración perezosa los enciende
+    /// una sola vez; una vez en true, un opt-out posterior del usuario se respeta.
+    #[serde(default)]
+    pub ai_defaults_applied: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -296,7 +301,9 @@ pub fn provision_default_config(user_email: &str, now: DateTime<Utc>) -> OrgConf
             default_time_to: "23:59".to_string(),
             max_threads_per_run: 50,
         },
-        ai_policy: default_ai_policy(false, None),
+        // Modelo opt-out: las orgs nuevas nacen con IA activa (consentimiento sellado al
+        // provisionar). El usuario puede desactivarla proactivamente en Configuración.
+        ai_policy: default_ai_policy(true, Some(now)),
         schedule_report_policy: ScheduleReportPolicy {
             scheduler_enabled: false,
             preset: SchedulePreset::Weekdays08Local,
@@ -447,7 +454,24 @@ fn default_ai_policy(enabled: bool, consent_granted_at: Option<DateTime<Utc>>) -
             "snippet".to_string(),
             "body_excerpt".to_string(),
         ],
+        ai_defaults_applied: true,
     }
+}
+
+/// Aplica el default "IA activa" (opt-out) a una política existente. Idempotente:
+/// corre una sola vez por org (marca `ai_defaults_applied`). Enciende la IA solo si
+/// estaba apagada y no había sido migrada; tras esto, un opt-out posterior del usuario
+/// persiste porque el flag ya quedó en true. Devuelve `true` si cambió algo (para persistir).
+pub fn apply_ai_defaults_migration(ai: &mut AiPolicy, now: DateTime<Utc>) -> bool {
+    if ai.ai_defaults_applied {
+        return false;
+    }
+    ai.ai_defaults_applied = true;
+    if !ai.enabled {
+        ai.enabled = true;
+        ai.consent_granted_at = ai.consent_granted_at.or(Some(now));
+    }
+    true
 }
 
 fn suggested_org_name(domain: &str) -> String {
@@ -463,4 +487,39 @@ fn suggested_org_name(domain: &str) -> String {
             }
         })
         .unwrap_or_else(|| "Organización".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_orgs_default_to_ai_enabled() {
+        let bundle = provision_default_config("agente@cliente.cl", Utc::now());
+        assert!(bundle.draft.ai_policy.enabled);
+        assert!(bundle.draft.ai_policy.consent_granted_at.is_some());
+        assert!(bundle.draft.ai_policy.ai_defaults_applied);
+    }
+
+    #[test]
+    fn ai_defaults_migration_enables_legacy_off_orgs_once_and_respects_opt_out() {
+        let now = Utc::now();
+        // Org previa al cambio: IA apagada y sin el flag de migración.
+        let mut ai = default_ai_policy(false, None);
+        ai.ai_defaults_applied = false;
+
+        // Primera carga: la migración la enciende y sella el consentimiento.
+        assert!(apply_ai_defaults_migration(&mut ai, now));
+        assert!(ai.enabled);
+        assert!(ai.consent_granted_at.is_some());
+        assert!(ai.ai_defaults_applied);
+
+        // El usuario decide desactivarla proactivamente (opt-out).
+        ai.enabled = false;
+        ai.consent_granted_at = None;
+
+        // Cargas posteriores NO la vuelven a encender: el opt-out persiste.
+        assert!(!apply_ai_defaults_migration(&mut ai, now));
+        assert!(!ai.enabled);
+    }
 }
