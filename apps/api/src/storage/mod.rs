@@ -8,6 +8,7 @@ use tokio::sync::RwLock;
 use crate::{
     analysis::{AiAuditResult, AnalysisRun, EmailMessage, EmailThread, ManualReview},
     auth::UserSession,
+    mailbox::{FilterPreset, MailboxMetadata},
     policies::{OrgConfigBundle, PolicyVersion},
     scheduler::model::{ScheduleConfig, ScheduleState},
 };
@@ -60,6 +61,19 @@ pub trait StorageRepository: Send + Sync {
         audit: &AiAuditResult,
     ) -> anyhow::Result<()>;
     async fn add_manual_review(&self, run_id: &str, review: &ManualReview) -> anyhow::Result<()>;
+    async fn upsert_mailbox_metadata(
+        &self,
+        owner_email: &str,
+        metadata: &MailboxMetadata,
+    ) -> anyhow::Result<()>;
+    async fn get_mailbox_metadata(
+        &self,
+        owner_email: &str,
+    ) -> anyhow::Result<Option<MailboxMetadata>>;
+    async fn list_filter_presets(&self, owner_email: &str) -> anyhow::Result<Vec<FilterPreset>>;
+    async fn upsert_filter_preset(&self, preset: &FilterPreset) -> anyhow::Result<()>;
+    async fn delete_filter_preset(&self, owner_email: &str, preset_id: &str)
+    -> anyhow::Result<()>;
 }
 
 #[derive(Default, Clone)]
@@ -79,6 +93,8 @@ struct MemoryInner {
     schedule_states: HashMap<String, ScheduleState>,
     org_configs: HashMap<String, OrgConfigBundle>,
     policy_versions: HashMap<String, PolicyVersion>,
+    mailbox_metadata: HashMap<String, MailboxMetadata>,
+    filter_presets: HashMap<String, FilterPreset>,
 }
 
 #[async_trait]
@@ -364,6 +380,73 @@ impl StorageRepository for MemoryStorage {
         });
         Ok(())
     }
+
+    async fn upsert_mailbox_metadata(
+        &self,
+        owner_email: &str,
+        metadata: &MailboxMetadata,
+    ) -> anyhow::Result<()> {
+        self.inner
+            .write()
+            .await
+            .mailbox_metadata
+            .insert(owner_email.trim().to_lowercase(), metadata.clone());
+        Ok(())
+    }
+
+    async fn get_mailbox_metadata(
+        &self,
+        owner_email: &str,
+    ) -> anyhow::Result<Option<MailboxMetadata>> {
+        Ok(self
+            .inner
+            .read()
+            .await
+            .mailbox_metadata
+            .get(&owner_email.trim().to_lowercase())
+            .cloned())
+    }
+
+    async fn list_filter_presets(&self, owner_email: &str) -> anyhow::Result<Vec<FilterPreset>> {
+        let owner = owner_email.trim().to_lowercase();
+        let mut presets: Vec<FilterPreset> = self
+            .inner
+            .read()
+            .await
+            .filter_presets
+            .values()
+            .filter(|preset| preset.owner_email.trim().to_lowercase() == owner)
+            .cloned()
+            .collect();
+        presets.sort_by_key(|preset| preset.created_at);
+        Ok(presets)
+    }
+
+    async fn upsert_filter_preset(&self, preset: &FilterPreset) -> anyhow::Result<()> {
+        self.inner
+            .write()
+            .await
+            .filter_presets
+            .insert(preset.id.clone(), preset.clone());
+        Ok(())
+    }
+
+    async fn delete_filter_preset(
+        &self,
+        owner_email: &str,
+        preset_id: &str,
+    ) -> anyhow::Result<()> {
+        let owner = owner_email.trim().to_lowercase();
+        let mut inner = self.inner.write().await;
+        if inner
+            .filter_presets
+            .get(preset_id)
+            .is_some_and(|preset| preset.owner_email.trim().to_lowercase() == owner)
+        {
+            inner.filter_presets.remove(preset_id);
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -474,6 +557,46 @@ mod tests {
                 .await
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn filter_presets_round_trip_and_scope_by_owner() {
+        let storage = MemoryStorage::default();
+        let now = Utc::now();
+        let preset = FilterPreset {
+            id: "p1".to_string(),
+            owner_email: "a@x.cl".to_string(),
+            name: "Soporte".to_string(),
+            include_labels: vec!["CATEGORY_PERSONAL".to_string()],
+            exclude_labels: vec![],
+            ignored_senders: vec![],
+            ignored_domains: vec![],
+            ignored_keywords: vec![],
+            is_default: true,
+            created_at: now,
+            updated_at: now,
+        };
+        storage.upsert_filter_preset(&preset).await.unwrap();
+
+        let mine = storage.list_filter_presets("a@x.cl").await.unwrap();
+        assert_eq!(mine.len(), 1);
+        assert_eq!(mine[0].name, "Soporte");
+        assert!(
+            storage
+                .list_filter_presets("b@x.cl")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        storage.delete_filter_preset("a@x.cl", "p1").await.unwrap();
+        assert!(
+            storage
+                .list_filter_presets("a@x.cl")
+                .await
+                .unwrap()
+                .is_empty()
         );
     }
 }

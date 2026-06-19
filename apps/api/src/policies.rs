@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::mailbox::MailboxMetadata;
+
 pub const GMAIL_READONLY_SCOPE: &str = "https://www.googleapis.com/auth/gmail.readonly";
 pub const POLICY_SCHEMA_VERSION: u32 = 1;
 
@@ -127,6 +129,12 @@ pub struct AnalysisPolicy {
     pub ignored_senders: Vec<String>,
     pub ignored_domains: Vec<String>,
     pub ignored_keywords: Vec<String>,
+    /// Etiquetas/categorías de Gmail a incluir y excluir en la recuperación de
+    /// hilos. Vacías = comportamiento histórico (INBOX + pestaña Principal).
+    #[serde(default)]
+    pub include_labels: Vec<String>,
+    #[serde(default)]
+    pub exclude_labels: Vec<String>,
     pub default_time_from: String,
     pub default_time_to: String,
     pub max_threads_per_run: u32,
@@ -207,10 +215,22 @@ pub struct OrgConfigResponse {
     pub draft: PolicyDraft,
     pub policy_version: PolicyVersion,
     pub setup_state: SetupState,
+    /// Cuenta interna privilegiada: la UI nunca debe bloquear acciones por
+    /// gating de setup ni por límites para estas cuentas.
+    #[serde(default)]
+    pub account_unrestricted: bool,
+    /// Metadata de Gmail leída al conectar (etiquetas, alias, perfil). Opcional:
+    /// puede no estar todavía si la sincronización en segundo plano no terminó.
+    #[serde(default)]
+    pub mailbox_metadata: Option<MailboxMetadata>,
 }
 
 impl OrgConfigBundle {
-    pub fn response(&self) -> OrgConfigResponse {
+    pub fn response(
+        &self,
+        account_unrestricted: bool,
+        mailbox_metadata: Option<MailboxMetadata>,
+    ) -> OrgConfigResponse {
         OrgConfigResponse {
             org: self.org.clone(),
             membership: self.membership.clone(),
@@ -218,6 +238,8 @@ impl OrgConfigBundle {
             draft: self.draft.clone(),
             policy_version: self.policy_version.clone(),
             setup_state: setup_state(&self.draft),
+            account_unrestricted,
+            mailbox_metadata,
         }
     }
 }
@@ -268,6 +290,8 @@ pub fn provision_default_config(user_email: &str, now: DateTime<Utc>) -> OrgConf
             ignored_senders: vec![],
             ignored_domains: vec![],
             ignored_keywords: vec![],
+            include_labels: vec![],
+            exclude_labels: vec![],
             default_time_from: "00:00".to_string(),
             default_time_to: "23:59".to_string(),
             max_threads_per_run: 50,

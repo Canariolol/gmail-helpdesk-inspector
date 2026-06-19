@@ -15,7 +15,7 @@ use axum::{
         IntoResponse, Redirect, Sse,
         sse::{Event, KeepAlive},
     },
-    routing::{get, patch, post},
+    routing::{delete, get, patch, post, put},
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
@@ -32,7 +32,8 @@ use crate::{
     analysis::{
         AiAuditResult, AnalysisConfig, AnalysisMetrics, AnalysisRun, AnalysisStatus,
         ClassificationSource, EmailMessage, EmailThread, ManualReview, TriggerType,
-        calculate_metrics, classify_thread, message_is_inside_analysis_window,
+        ai_message_ids_known, calculate_metrics, classify_thread,
+        message_is_inside_analysis_window, refine_classification_with_gmail_labels,
         should_auto_apply_ai,
     },
     auth::{
@@ -41,6 +42,7 @@ use crate::{
     },
     config::AppConfig,
     gmail::GmailClient,
+    mailbox::FilterPreset,
     policies::{
         AiPolicy, AnalysisPolicy, MailboxPurpose, OrgConfigBundle, OrgConfigResponse,
         PolicyVersion, ScheduleReportPolicy, normalize_domains, normalize_list,
@@ -121,6 +123,14 @@ pub fn router(state: AppState) -> Router {
         .route("/me/operations/status", get(get_operations_status))
         .route("/me/operations/history", get(get_operations_history))
         .route("/me/org/config", get(get_org_config).put(update_org_config))
+        .route(
+            "/me/filter-presets",
+            get(list_filter_presets_handler).post(create_filter_preset),
+        )
+        .route(
+            "/me/filter-presets/{id}",
+            put(update_filter_preset_handler).delete(delete_filter_preset_handler),
+        )
         .route(
             "/analysis-runs",
             post(create_analysis_run).get(list_analysis_runs),
@@ -244,6 +254,22 @@ async fn auth_google_callback(
         updated_at: now,
     };
     state.storage.upsert_user_session(&session).await?;
+
+    // Best-effort: lee metadata de la cuenta (etiquetas, alias, perfil, filtros)
+    // AL CONECTAR, en segundo plano para no demorar el redirect ni romper el login
+    // si una llamada de Gmail falla.
+    {
+        let gmail = state.gmail.clone();
+        let storage = state.storage.clone();
+        let access_token = token.access_token.clone();
+        let owner = session.google_account_email.clone();
+        tokio::spawn(async move {
+            let metadata = gmail.fetch_mailbox_metadata(&access_token, now).await;
+            if let Err(error) = storage.upsert_mailbox_metadata(&owner, &metadata).await {
+                tracing::warn!(?error, "no se pudo guardar metadata de Gmail al conectar");
+            }
+        });
+    }
 
     let signed = sign_session_id(&session.id, &state.config.session_secret)?;
     let mut headers = HeaderMap::new();
@@ -661,7 +687,139 @@ async fn get_org_config(
 ) -> Result<Json<OrgConfigResponse>, ApiError> {
     let session = require_session(&state, &headers).await?;
     let bundle = get_or_provision_org_config(&state, &session.google_account_email).await?;
-    Ok(Json(bundle.response()))
+    let unrestricted = state
+        .config
+        .is_privileged_account(&session.google_account_email);
+    let metadata = state
+        .storage
+        .get_mailbox_metadata(&session.google_account_email)
+        .await
+        .unwrap_or(None);
+    Ok(Json(bundle.response(unrestricted, metadata)))
+}
+
+#[derive(Debug, Deserialize)]
+struct FilterPresetRequest {
+    name: String,
+    #[serde(default)]
+    include_labels: Vec<String>,
+    #[serde(default)]
+    exclude_labels: Vec<String>,
+    #[serde(default)]
+    ignored_senders: Vec<String>,
+    #[serde(default)]
+    ignored_domains: Vec<String>,
+    #[serde(default)]
+    ignored_keywords: Vec<String>,
+    #[serde(default)]
+    is_default: bool,
+}
+
+async fn list_filter_presets_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<FilterPreset>>, ApiError> {
+    let session = require_session(&state, &headers).await?;
+    Ok(Json(
+        state
+            .storage
+            .list_filter_presets(&session.google_account_email)
+            .await?,
+    ))
+}
+
+async fn create_filter_preset(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<FilterPresetRequest>,
+) -> Result<Json<FilterPreset>, ApiError> {
+    let session = require_session(&state, &headers).await?;
+    let name = request.name.trim().to_string();
+    if name.is_empty() {
+        return Err(ApiError::bad_request("el preset necesita un nombre"));
+    }
+    let now = Utc::now();
+    let preset = FilterPreset {
+        id: Uuid::new_v4().to_string(),
+        owner_email: session.google_account_email.clone(),
+        name,
+        include_labels: normalize_text_list(request.include_labels),
+        exclude_labels: normalize_text_list(request.exclude_labels),
+        ignored_senders: normalize_list(request.ignored_senders),
+        ignored_domains: normalize_domains(request.ignored_domains),
+        ignored_keywords: normalize_text_list(request.ignored_keywords),
+        is_default: request.is_default,
+        created_at: now,
+        updated_at: now,
+    };
+    if preset.is_default {
+        clear_other_default_presets(&state, &session.google_account_email, &preset.id).await?;
+    }
+    state.storage.upsert_filter_preset(&preset).await?;
+    Ok(Json(preset))
+}
+
+async fn update_filter_preset_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(request): Json<FilterPresetRequest>,
+) -> Result<Json<FilterPreset>, ApiError> {
+    let session = require_session(&state, &headers).await?;
+    let mut preset = state
+        .storage
+        .list_filter_presets(&session.google_account_email)
+        .await?
+        .into_iter()
+        .find(|preset| preset.id == id)
+        .ok_or(ApiError::not_found("preset no encontrado"))?;
+    let name = request.name.trim().to_string();
+    if name.is_empty() {
+        return Err(ApiError::bad_request("el preset necesita un nombre"));
+    }
+    preset.name = name;
+    preset.include_labels = normalize_text_list(request.include_labels);
+    preset.exclude_labels = normalize_text_list(request.exclude_labels);
+    preset.ignored_senders = normalize_list(request.ignored_senders);
+    preset.ignored_domains = normalize_domains(request.ignored_domains);
+    preset.ignored_keywords = normalize_text_list(request.ignored_keywords);
+    preset.is_default = request.is_default;
+    preset.updated_at = Utc::now();
+    if preset.is_default {
+        clear_other_default_presets(&state, &session.google_account_email, &preset.id).await?;
+    }
+    state.storage.upsert_filter_preset(&preset).await?;
+    Ok(Json(preset))
+}
+
+async fn delete_filter_preset_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let session = require_session(&state, &headers).await?;
+    state
+        .storage
+        .delete_filter_preset(&session.google_account_email, &id)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Garantiza un solo preset por defecto: desmarca el resto del usuario.
+async fn clear_other_default_presets(
+    state: &AppState,
+    owner_email: &str,
+    keep_id: &str,
+) -> Result<(), ApiError> {
+    let presets = state.storage.list_filter_presets(owner_email).await?;
+    for mut preset in presets {
+        if preset.id != keep_id && preset.is_default {
+            preset.is_default = false;
+            preset.updated_at = Utc::now();
+            state.storage.upsert_filter_preset(&preset).await?;
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -698,6 +856,8 @@ struct AnalysisPolicyUpdateRequest {
     ignored_senders: Option<Vec<String>>,
     ignored_domains: Option<Vec<String>>,
     ignored_keywords: Option<Vec<String>>,
+    include_labels: Option<Vec<String>>,
+    exclude_labels: Option<Vec<String>>,
     default_time_from: Option<String>,
     default_time_to: Option<String>,
     max_threads_per_run: Option<u32>,
@@ -740,7 +900,10 @@ async fn update_org_config(
 ) -> Result<Json<UpdateOrgConfigResponse>, ApiError> {
     let session = require_session(&state, &headers).await?;
     let mut bundle = get_or_provision_org_config(&state, &session.google_account_email).await?;
-    apply_org_config_update(&mut bundle, request)?;
+    let unrestricted = state
+        .config
+        .is_privileged_account(&session.google_account_email);
+    apply_org_config_update(&mut bundle, request, unrestricted)?;
     let now = Utc::now();
     bundle.org.updated_at = now;
     bundle.draft.updated_at = now;
@@ -791,6 +954,7 @@ async fn sync_schedule_config_from_policy(
 fn apply_org_config_update(
     bundle: &mut OrgConfigBundle,
     request: OrgConfigUpdateRequest,
+    bypass_ai_consent: bool,
 ) -> Result<(), ApiError> {
     if let Some(org) = request.org {
         if let Some(name) = org.name.map(|value| value.trim().to_string())
@@ -824,7 +988,7 @@ fn apply_org_config_update(
         apply_analysis_policy_update(&mut bundle.draft.analysis_policy, policy)?;
     }
     if let Some(policy) = request.ai_policy {
-        apply_ai_policy_update(&mut bundle.draft.ai_policy, policy)?;
+        apply_ai_policy_update(&mut bundle.draft.ai_policy, policy, bypass_ai_consent)?;
     }
     if let Some(policy) = request.schedule_report_policy {
         apply_schedule_report_policy_update(&mut bundle.draft.schedule_report_policy, policy)?;
@@ -874,6 +1038,12 @@ fn apply_analysis_policy_update(
     if let Some(values) = update.ignored_keywords {
         current.ignored_keywords = normalize_text_list(values);
     }
+    if let Some(values) = update.include_labels {
+        current.include_labels = normalize_text_list(values);
+    }
+    if let Some(values) = update.exclude_labels {
+        current.exclude_labels = normalize_text_list(values);
+    }
     if let Some(value) = update.default_time_from {
         current.default_time_from = validate_time(&value)?;
     }
@@ -889,6 +1059,7 @@ fn apply_analysis_policy_update(
 fn apply_ai_policy_update(
     current: &mut AiPolicy,
     update: AiPolicyUpdateRequest,
+    bypass_consent: bool,
 ) -> Result<(), ApiError> {
     if let Some(threshold) = update.auto_apply_threshold {
         validate_threshold(threshold, "auto_apply_threshold")?;
@@ -905,7 +1076,7 @@ fn apply_ai_policy_update(
         current.max_body_chars_per_message = value.clamp(80, 2000);
     }
     if let Some(enabled) = update.enabled {
-        if enabled && !current.enabled && update.consent_confirmed != Some(true) {
+        if enabled && !current.enabled && !bypass_consent && update.consent_confirmed != Some(true) {
             return Err(ApiError::bad_request(
                 "para activar IA debes confirmar consentimiento explícito",
             ));
@@ -1013,6 +1184,10 @@ struct CreateAnalysisRunRequest {
     #[serde(default)]
     ignored_keywords: Vec<String>,
     #[serde(default)]
+    include_labels: Vec<String>,
+    #[serde(default)]
+    exclude_labels: Vec<String>,
+    #[serde(default)]
     policy_version_id: Option<String>,
 }
 
@@ -1074,6 +1249,8 @@ fn build_legacy_run(
             ignored_senders: request.ignored_senders,
             ignored_domains: request.ignored_domains,
             ignored_keywords: request.ignored_keywords,
+            include_labels: request.include_labels,
+            exclude_labels: request.exclude_labels,
         },
         status: AnalysisStatus::Pending,
         progress_message: "Listo para analizar".to_string(),
@@ -1103,13 +1280,25 @@ async fn build_policy_run(
         bundle.policy_version.clone()
     };
     let current_setup = setup_state(&bundle.draft);
-    if !current_setup.ready_for_analysis {
+    if !current_setup.ready_for_analysis && !state.config.is_privileged_account(user_email) {
         return Err(ApiError::bad_request(
             "completa la configuración antes de crear análisis desde policy",
         ));
     }
     let snapshot = policy_version.snapshot.clone();
     let analysis = &snapshot.analysis_policy;
+    // La selección de etiquetas del request (por-run) tiene prioridad; si viene
+    // vacía, se usa la persistida en la política.
+    let include_labels = if request.include_labels.is_empty() {
+        analysis.include_labels.clone()
+    } else {
+        request.include_labels.clone()
+    };
+    let exclude_labels = if request.exclude_labels.is_empty() {
+        analysis.exclude_labels.clone()
+    } else {
+        request.exclude_labels.clone()
+    };
     Ok(AnalysisRun {
         id: Uuid::new_v4().to_string(),
         user_email: user_email.to_string(),
@@ -1136,6 +1325,8 @@ async fn build_policy_run(
             ignored_senders: analysis.ignored_senders.clone(),
             ignored_domains: analysis.ignored_domains.clone(),
             ignored_keywords: analysis.ignored_keywords.clone(),
+            include_labels,
+            exclude_labels,
         },
         status: AnalysisStatus::Pending,
         progress_message: "Listo para analizar".to_string(),
@@ -1590,6 +1781,8 @@ async fn process_one_thread(
     }
 
     let mut thread = classify_thread(run_id, &data.id, &data.messages, config);
+    // Señal extra: refina el veredicto heurístico con las pestañas/categorías de Gmail.
+    refine_classification_with_gmail_labels(&mut thread, &data.label_ids);
     let received_human_thread = thread.first_client_message_id.is_some();
     let ai_enabled = processing
         .policy_snapshot
@@ -1603,19 +1796,29 @@ async fn process_one_thread(
 
     let mut outcome = ThreadOutcome::default();
     if should_audit {
-        let (max_messages, max_body_chars, auto_apply_threshold) = processing
-            .policy_snapshot
-            .map(|snapshot| {
-                (
-                    snapshot.ai_policy.max_audit_messages as usize,
-                    snapshot.ai_policy.max_body_chars_per_message as usize,
-                    snapshot.ai_policy.auto_apply_threshold,
-                )
-            })
-            .unwrap_or((14, 280, state.config.ai.apply_confidence_threshold));
+        let (max_messages, max_body_chars, auto_apply_threshold, manual_review_threshold) =
+            processing
+                .policy_snapshot
+                .map(|snapshot| {
+                    (
+                        snapshot.ai_policy.max_audit_messages as usize,
+                        snapshot.ai_policy.max_body_chars_per_message as usize,
+                        snapshot.ai_policy.auto_apply_threshold,
+                        snapshot.ai_policy.manual_review_threshold,
+                    )
+                })
+                .unwrap_or((14, 280, state.config.ai.apply_confidence_threshold, 0.72));
         let audit_messages =
             audit_messages_for_thread(&thread, &data.messages, max_messages, max_body_chars);
-        match audit_thread(state, &thread, &audit_messages, processing.policy_snapshot).await {
+        match audit_thread(
+            state,
+            &thread,
+            &audit_messages,
+            processing.policy_snapshot,
+            &data.label_ids,
+        )
+        .await
+        {
             Ok(mut audit) => {
                 audit.policy_version_id = processing.policy_version_id.map(ToOwned::to_owned);
                 if let Some(snapshot) = processing.policy_snapshot {
@@ -1639,6 +1842,7 @@ async fn process_one_thread(
                 if should_auto_apply_ai(&audit, &known_ids)
                     && audit.confidence >= auto_apply_threshold
                 {
+                    // Alta confianza: la IA reemplaza la heurística y queda aplicada.
                     thread.classification = audit.classification.clone();
                     thread.classification_source = ClassificationSource::Ai;
                     thread.classification_confidence = audit.confidence;
@@ -1653,7 +1857,28 @@ async fn process_one_thread(
                     thread.reasons.push(
                         "La auditoría IA se aplicó automáticamente por alta confianza.".to_string(),
                     );
+                } else if ai_message_ids_known(&audit, &known_ids)
+                    && audit.confidence >= manual_review_threshold
+                {
+                    // Confianza media: adoptamos la lectura de la IA pero la dejamos
+                    // marcada para confirmación manual.
+                    thread.classification = audit.classification.clone();
+                    thread.classification_source = ClassificationSource::Ai;
+                    thread.classification_confidence = audit.confidence;
+                    thread.is_valid_client_request = audit.is_valid_client_request;
+                    thread.is_answered = audit.is_answered;
+                    thread.first_client_message_id = audit.first_client_message_id.clone();
+                    thread.first_internal_reply_message_id =
+                        audit.first_internal_reply_message_id.clone();
+                    thread.last_internal_message_id = audit.last_internal_message_id.clone();
+                    apply_trace_dates(&mut thread, &data.messages);
+                    thread.manual_review_required = true;
+                    thread.reasons.push(
+                        "La auditoría IA sugiere un cambio con confianza media; requiere confirmación manual."
+                            .to_string(),
+                    );
                 } else {
+                    // Baja confianza: se conserva la heurística y se marca para revisión.
                     thread.manual_review_required = true;
                     thread
                         .reasons
@@ -1773,11 +1998,13 @@ async fn audit_thread(
     thread: &EmailThread,
     messages: &[EmailMessage],
     policy_snapshot: Option<&crate::policies::PolicySnapshot>,
+    gmail_labels: &[String],
 ) -> anyhow::Result<AiAuditResult> {
     #[derive(Serialize)]
     struct AuditRequest<'a> {
         thread: &'a EmailThread,
         messages: &'a [EmailMessage],
+        gmail_labels: &'a [String],
         #[serde(skip_serializing_if = "Option::is_none")]
         policy_context: Option<AiWorkerPolicyContext<'a>>,
     }
@@ -1821,6 +2048,7 @@ async fn audit_thread(
         .json(&AuditRequest {
             thread,
             messages,
+            gmail_labels,
             policy_context,
         });
     if let Some(audience) = &state.config.ai.worker_audience {
@@ -1872,6 +2100,10 @@ async fn enforce_rate_limit(
     action: &str,
     limit: usize,
 ) -> Result<(), ApiError> {
+    // Las cuentas internas privilegiadas no consumen cuota.
+    if state.config.is_privileged_account(user_email) {
+        return Ok(());
+    }
     let key = format!("{}:{}", action, user_email.trim().to_lowercase());
     if state.rate_limiter.check(key, limit).await {
         Ok(())
@@ -2155,6 +2387,8 @@ mod tests {
                 ignored_senders: vec![],
                 ignored_domains: vec![],
                 ignored_keywords: vec![],
+                include_labels: vec![],
+                exclude_labels: vec![],
             },
             status: AnalysisStatus::Completed,
             progress_message: "done".to_string(),
@@ -2515,6 +2749,76 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn privileged_account_bypasses_rate_limit() {
+        let mut config = test_app_config();
+        config.rate_limit.analysis_create_per_hour = 1;
+        config.internal_full_access_emails = vec!["alice@example.com".to_string()];
+        let test = seeded_app_with_config(config).await;
+        let payload = json!({
+            "date_from": "2026-06-01",
+            "date_to": "2026-06-02",
+            "internal_domains": ["example.com"]
+        });
+        // Tres veces sobre un límite de 1/hora: la cuenta privilegiada nunca 429.
+        for _ in 0..3 {
+            let response = test
+                .app
+                .clone()
+                .oneshot(request(
+                    Method::POST,
+                    "/analysis-runs",
+                    Some(&test.alice_cookie),
+                    Some(payload.clone()),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+    }
+
+    #[tokio::test]
+    async fn privileged_account_enables_ai_without_consent() {
+        let mut config = test_app_config();
+        config.internal_full_access_emails = vec!["alice@example.com".to_string()];
+        let test = seeded_app_with_config(config).await;
+        let response = test
+            .app
+            .oneshot(request(
+                Method::PUT,
+                "/me/org/config",
+                Some(&test.alice_cookie),
+                Some(json!({ "ai_policy": { "enabled": true } })),
+            ))
+            .await
+            .unwrap();
+        // Sin consent_confirmed; para la cuenta privilegiada igual queda OK.
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn privileged_account_bypasses_setup_gating() {
+        let mut config = test_app_config();
+        config.internal_full_access_emails = vec!["alice@example.com".to_string()];
+        let test = seeded_app_with_config(config).await;
+        // Payload de policy (sin campos legacy) con setup incompleto
+        // (valid_request_criteria vacío): no-privilegiado daría 400, privilegiado OK.
+        let response = test
+            .app
+            .oneshot(request(
+                Method::POST,
+                "/analysis-runs",
+                Some(&test.alice_cookie),
+                Some(json!({
+                    "date_from": "2026-06-01",
+                    "date_to": "2026-06-02"
+                })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]

@@ -4,6 +4,7 @@ mod config;
 mod firestore;
 mod gmail;
 mod http;
+mod mailbox;
 mod policies;
 mod report;
 mod scheduler;
@@ -72,6 +73,7 @@ pub fn build_app_from_state(state: AppState) -> Router {
             Method::POST,
             Method::PUT,
             Method::PATCH,
+            Method::DELETE,
             Method::OPTIONS,
         ])
         .allow_headers([

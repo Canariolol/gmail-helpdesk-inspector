@@ -17,6 +17,7 @@ use crate::{
     analysis::{AiAuditResult, AnalysisRun, EmailMessage, EmailThread, ManualReview},
     auth::UserSession,
     config::{FirestoreConfig, ServiceAccountKey},
+    mailbox::{FilterPreset, MailboxMetadata},
     policies::{OrgConfigBundle, PolicyVersion, hash_owner_email},
     scheduler::model::{ScheduleConfig, ScheduleState},
     storage::StorageRepository,
@@ -215,6 +216,23 @@ impl FirestoreStorage {
                 serde_json::from_value(value).map_err(Into::into)
             })
             .collect()
+    }
+
+    async fn delete(&self, path: &str) -> anyhow::Result<()> {
+        let token = self.token().await?;
+        let response = self
+            .client
+            .delete(format!("{}/{}", self.root(), path))
+            .bearer_auth(token)
+            .send()
+            .await?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(());
+        }
+        response
+            .error_for_status()
+            .with_context(|| format!("failed to delete Firestore document {path}"))?;
+        Ok(())
     }
 }
 
@@ -475,6 +493,62 @@ impl StorageRepository for FirestoreStorage {
         .await?;
         self.put(&path, &thread).await?;
         Ok(())
+    }
+
+    async fn upsert_mailbox_metadata(
+        &self,
+        owner_email: &str,
+        metadata: &MailboxMetadata,
+    ) -> anyhow::Result<()> {
+        self.put(
+            &format!("mailboxMetadata/{}", hash_owner_email(owner_email)),
+            metadata,
+        )
+        .await
+    }
+
+    async fn get_mailbox_metadata(
+        &self,
+        owner_email: &str,
+    ) -> anyhow::Result<Option<MailboxMetadata>> {
+        self.get(&format!("mailboxMetadata/{}", hash_owner_email(owner_email)))
+            .await
+    }
+
+    async fn list_filter_presets(&self, owner_email: &str) -> anyhow::Result<Vec<FilterPreset>> {
+        let mut presets: Vec<FilterPreset> = self
+            .list(
+                &format!("ownerProfiles/{}", hash_owner_email(owner_email)),
+                "filterPresets",
+            )
+            .await?;
+        presets.retain(|preset| preset.owner_email.eq_ignore_ascii_case(owner_email));
+        presets.sort_by_key(|preset| preset.created_at);
+        Ok(presets)
+    }
+
+    async fn upsert_filter_preset(&self, preset: &FilterPreset) -> anyhow::Result<()> {
+        self.put(
+            &format!(
+                "ownerProfiles/{}/filterPresets/{}",
+                hash_owner_email(&preset.owner_email),
+                preset.id
+            ),
+            preset,
+        )
+        .await
+    }
+
+    async fn delete_filter_preset(
+        &self,
+        owner_email: &str,
+        preset_id: &str,
+    ) -> anyhow::Result<()> {
+        self.delete(&format!(
+            "ownerProfiles/{}/filterPresets/{preset_id}",
+            hash_owner_email(owner_email)
+        ))
+        .await
     }
 }
 

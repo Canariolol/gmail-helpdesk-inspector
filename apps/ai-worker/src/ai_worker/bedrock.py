@@ -77,6 +77,10 @@ Classification guidance:
 - "misc": clearly not a request this configured helpdesk owns.
 - "ambiguous": evidence is insufficient or policy ownership is genuinely unclear.
 
+Gmail label hints (field "gmail_labels", use as supporting evidence, not the sole criterion):
+- CATEGORY_PROMOTIONS strongly suggests promotions/newsletter; CATEGORY_SOCIAL and CATEGORY_FORUMS suggest social/forum notifications rather than a support request.
+- CATEGORY_PERSONAL, INBOX and IMPORTANT are neutral and do not by themselves indicate a valid request.
+
 Answer guidance:
 - is_answered=true only if a real HUMAN internal/responder reply after the client's relevant message exists.
 - Automated acknowledgements and ticket auto-replies do NOT count as answered.
@@ -119,6 +123,7 @@ def build_user_prompt(payload: AuditThreadRequest) -> str:
         {
             "thread_id": payload.thread.gmail_thread_id,
             "subject": payload.thread.subject,
+            "gmail_labels": payload.gmail_labels,
             "automatic_classification": {
                 "classification": payload.thread.classification,
                 "classification_source": payload.thread.classification_source,
