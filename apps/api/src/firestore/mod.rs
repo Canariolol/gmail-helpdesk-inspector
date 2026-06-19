@@ -591,8 +591,11 @@ impl StorageRepository for FirestoreStorage {
         &self,
         owner_email: &str,
     ) -> anyhow::Result<Option<MailboxMetadata>> {
-        self.get(&format!("mailboxMetadata/{}", hash_owner_email(owner_email)))
-            .await
+        self.get(&format!(
+            "mailboxMetadata/{}",
+            hash_owner_email(owner_email)
+        ))
+        .await
     }
 
     async fn list_filter_presets(&self, owner_email: &str) -> anyhow::Result<Vec<FilterPreset>> {
@@ -619,11 +622,7 @@ impl StorageRepository for FirestoreStorage {
         .await
     }
 
-    async fn delete_filter_preset(
-        &self,
-        owner_email: &str,
-        preset_id: &str,
-    ) -> anyhow::Result<()> {
+    async fn delete_filter_preset(&self, owner_email: &str, preset_id: &str) -> anyhow::Result<()> {
         self.delete(&format!(
             "ownerProfiles/{}/filterPresets/{preset_id}",
             hash_owner_email(owner_email)

@@ -32,10 +32,10 @@ use uuid::Uuid;
 use crate::{
     analysis::{
         AiAuditResult, AnalysisConfig, AnalysisMetrics, AnalysisRun, AnalysisStatus,
-        ClassificationSource, EmailMessage, EmailThread, ManualReview, TriggerType,
+        Classification, ClassificationSource, EmailMessage, EmailThread, ManualReview, TriggerType,
         ai_message_ids_known, calculate_metrics, classify_thread,
         message_is_inside_analysis_window, refine_classification_with_gmail_labels,
-        should_auto_apply_ai,
+        refine_classification_with_policy_hints, should_auto_apply_ai,
     },
     auth::{
         GoogleTokenResponse, UserSession, clear_oauth_cookie, clear_session_cookie, decrypt_token,
@@ -2187,7 +2187,6 @@ pub(crate) async fn execute_analysis(
     let mut ai_input_tokens = 0u64;
     let mut ai_output_tokens = 0u64;
     let mut ai_audited_threads = 0u32;
-    let excluded_sample = excluded_sample_ids(&thread_ids);
 
     // Process threads with bounded concurrency: each thread's Gmail fetch, local
     // classification, AI audit and storage writes are independent, so we run up to
@@ -2203,7 +2202,6 @@ pub(crate) async fn execute_analysis(
         let config_ref = &config;
         let policy_ref = policy_snapshot.as_ref();
         let policy_version_id_ref = policy_version_id.as_deref();
-        let excluded_ref = &excluded_sample;
         let run_id_ref = run_id.as_str();
         let mut task_stream = stream::iter(thread_ids.into_iter().map(|thread_id| async move {
             process_one_thread(
@@ -2212,7 +2210,6 @@ pub(crate) async fn execute_analysis(
                 run_id_ref,
                 config_ref,
                 ThreadProcessingContext {
-                    excluded_sample: excluded_ref,
                     policy_snapshot: policy_ref,
                     policy_version_id: policy_version_id_ref,
                 },
@@ -2280,7 +2277,6 @@ struct ThreadOutcome {
 }
 
 struct ThreadProcessingContext<'a> {
-    excluded_sample: &'a [String],
     policy_snapshot: Option<&'a crate::policies::PolicySnapshot>,
     policy_version_id: Option<&'a str>,
 }
@@ -2317,16 +2313,38 @@ async fn process_one_thread(
     let mut thread = classify_thread(run_id, &data.id, &data.messages, config);
     // Señal extra: refina el veredicto heurístico con las pestañas/categorías de Gmail.
     refine_classification_with_gmail_labels(&mut thread, &data.label_ids);
+    // Señal extra: enruta a revisión los hilos cuyo asunto/remitente coincide con una
+    // regla de no-responsabilidad configurada (antes solo alimentaban a la IA).
+    if let Some(snapshot) = processing.policy_snapshot {
+        let request_sender = thread
+            .first_client_message_id
+            .as_ref()
+            .and_then(|id| data.messages.iter().find(|message| &message.id == id))
+            .map(|message| message.from_email.as_str())
+            .unwrap_or("");
+        refine_classification_with_policy_hints(
+            &mut thread,
+            request_sender,
+            &snapshot.analysis_policy.non_responsibility_rules,
+        );
+    }
     let received_human_thread = thread.first_client_message_id.is_some();
     let ai_enabled = processing
         .policy_snapshot
         .map(|snapshot| snapshot.ai_policy.enabled)
         .unwrap_or(true);
+    // Muestreo estratificado determinístico (por hash del id, reproducible): auditamos
+    // siempre los ambiguos, una fracción mayor de los válidos "limpios" y una menor del
+    // resto, para cazar inconsistencias válido/no-válido sin disparar el costo de IA.
+    let sample_rate = match thread.classification {
+        Classification::Ambiguous => AUDIT_SAMPLE_RATE_AMBIGUOUS,
+        Classification::ValidClientRequest => AUDIT_SAMPLE_RATE_VALID,
+        _ => AUDIT_SAMPLE_RATE_OTHER,
+    };
+    let in_audit_sample = sample_bucket(&thread.gmail_thread_id) < sample_rate;
     let should_audit = ai_enabled
         && received_human_thread
-        && (thread.is_valid_client_request
-            || thread.manual_review_required
-            || processing.excluded_sample.contains(&thread.gmail_thread_id));
+        && (thread.is_valid_client_request || thread.manual_review_required || in_audit_sample);
 
     let mut outcome = ThreadOutcome::default();
     if should_audit {
@@ -2621,12 +2639,24 @@ async fn recalculate_run_metrics(state: &AppState, run_id: &str) -> anyhow::Resu
     state.storage.update_analysis_run(&run).await
 }
 
-fn excluded_sample_ids(ids: &[String]) -> Vec<String> {
-    ids.iter()
-        .enumerate()
-        .filter(|(index, _)| index % 10 == 0)
-        .map(|(_, id)| id.clone())
-        .collect()
+/// Porcentaje de hilos de cada estrato que se auditan con IA además de los que ya se
+/// auditan siempre (válidos y marcados para revisión). Estratificado para gastar el
+/// presupuesto de IA donde más sirve: los ambiguos/dudosos.
+const AUDIT_SAMPLE_RATE_AMBIGUOUS: u8 = 100;
+const AUDIT_SAMPLE_RATE_VALID: u8 = 20;
+const AUDIT_SAMPLE_RATE_OTHER: u8 = 5;
+
+/// Asigna un bucket estable 0..100 a un hilo a partir de su id (FNV-1a). Determinístico:
+/// el mismo hilo cae siempre en el mismo bucket, así el muestreo es reproducible.
+fn sample_bucket(thread_id: &str) -> u8 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = FNV_OFFSET;
+    for byte in thread_id.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    (hash % 100) as u8
 }
 
 async fn enforce_rate_limit(
@@ -3416,6 +3446,21 @@ mod tests {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    #[test]
+    fn sample_bucket_is_deterministic_and_bounded() {
+        // Determinístico: el mismo id cae siempre en el mismo bucket.
+        assert_eq!(sample_bucket("thread-123"), sample_bucket("thread-123"));
+        // Siempre dentro de 0..100, para comparar contra los porcentajes de muestreo.
+        for id in ["a", "thread-xyz", "", "9f2c-4d", "AAAAAAAAAAAA"] {
+            assert!(sample_bucket(id) < 100, "bucket fuera de rango para {id:?}");
+        }
+        // Ids distintos no colapsan todos al mismo bucket (reparte el muestreo).
+        let buckets: std::collections::HashSet<u8> = (0..50)
+            .map(|n| sample_bucket(&format!("thread-{n}")))
+            .collect();
+        assert!(buckets.len() > 1, "el hash no distribuye los buckets");
     }
 
     fn message(id: &str, from: &str) -> EmailMessage {

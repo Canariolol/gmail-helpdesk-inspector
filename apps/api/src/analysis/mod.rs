@@ -6,6 +6,10 @@ use crate::policies::PolicySnapshot;
 
 pub const AI_AUTO_APPLY_THRESHOLD: f64 = 0.92;
 
+/// Un hilo largo pero resuelto (o respondido) dentro de esta ventana se considera
+/// bien atendido y no "sospechoso": 8 horas ≈ una jornada laboral.
+const SUSPICIOUS_QUICK_RESOLUTION_MINUTES: i64 = 8 * 60;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AnalysisStatus {
@@ -468,7 +472,16 @@ pub fn classify_thread(
         );
     }
 
-    let suspicious = messages.len() >= 8 || messages.iter().filter(|m| m.is_external).count() >= 4;
+    // "Forma atípica": muchos mensajes o muchas idas y vueltas externas. Pero un hilo
+    // largo que igualmente se resolvió con prontitud (respuesta o cierre interno dentro de
+    // SUSPICIOUS_QUICK_RESOLUTION_MINUTES) refleja una conversación sana, no un caso confuso:
+    // no lo marcamos sospechoso para no enviar a revisión hilos ya atendidos bien.
+    let long_shape = messages.len() >= 8 || messages.iter().filter(|m| m.is_external).count() >= 4;
+    let handled_promptly = resolution_minutes
+        .or(response_minutes)
+        .map(|minutes| (0..=SUSPICIOUS_QUICK_RESOLUTION_MINUTES).contains(&minutes))
+        .unwrap_or(false);
+    let suspicious = long_shape && !handled_promptly;
 
     reasons.push("El primer mensaje relevante viene de un remitente externo humano.".to_string());
     if first_reply.is_some() {
@@ -673,7 +686,13 @@ pub fn is_automated_sender(email: &str, headers: &serde_json::Value) -> bool {
         || headers
             .get("auto-submitted")
             .and_then(|v| v.as_str())
-            .map(|value| value.to_lowercase() != "no")
+            .map(|value| {
+                // RFC 3834: solo los tokens "auto-*" (auto-generated, auto-replied,
+                // auto-notified) indican correo automático. El valor "no" y otros valores
+                // no canónicos (p. ej. "yes", "true", "1") que algunas plataformas setean por
+                // error ya NO marcan el mensaje como automático: reduce falsos `Automated`.
+                value.trim().to_lowercase().starts_with("auto-")
+            })
             .unwrap_or(false)
 }
 
@@ -830,18 +849,18 @@ const GMAIL_FORUMS_LABEL: &str = "CATEGORY_FORUMS";
 /// conservador: ante un conflicto con un veredicto "válido" de reglas/heurística
 /// no invierte a ciegas, sino que enruta a revisión manual (y, para Promociones,
 /// marca Newsletter). No toca resultados ya aplicados por IA o revisión manual.
-pub fn refine_classification_with_gmail_labels(
-    thread: &mut EmailThread,
-    gmail_labels: &[String],
-) {
+pub fn refine_classification_with_gmail_labels(thread: &mut EmailThread, gmail_labels: &[String]) {
     if matches!(
         thread.classification_source,
         ClassificationSource::Ai | ClassificationSource::Manual
     ) {
         return;
     }
-    let has_label =
-        |needle: &str| gmail_labels.iter().any(|label| label.eq_ignore_ascii_case(needle));
+    let has_label = |needle: &str| {
+        gmail_labels
+            .iter()
+            .any(|label| label.eq_ignore_ascii_case(needle))
+    };
 
     if thread.is_valid_client_request && has_label(GMAIL_PROMOTIONS_LABEL) {
         thread.classification = Classification::Newsletter;
@@ -857,6 +876,123 @@ pub fn refine_classification_with_gmail_labels(
         thread.manual_review_required = true;
         thread.reasons.push(
             "Gmail ubicó el hilo en la pestaña Social/Foros; requiere revisión para confirmar que es una solicitud válida."
+                .to_string(),
+        );
+    }
+}
+
+/// Palabras demasiado genéricas para distinguir una regla de no-responsabilidad;
+/// se descartan al extraer los términos significativos de cada regla.
+const RULE_STOPWORDS: &[&str] = &[
+    "para",
+    "con",
+    "los",
+    "las",
+    "una",
+    "unos",
+    "unas",
+    "del",
+    "que",
+    "son",
+    "este",
+    "esta",
+    "esto",
+    "estos",
+    "estas",
+    "como",
+    "por",
+    "sobre",
+    "pero",
+    "nuestra",
+    "nuestro",
+    "nuestros",
+    "nuestras",
+    "responsabilidad",
+    "responsabilidades",
+    "tema",
+    "temas",
+    "asunto",
+    "asuntos",
+    "correo",
+    "correos",
+    "mensaje",
+    "mensajes",
+    "cliente",
+    "clientes",
+    "solicitud",
+    "solicitudes",
+    "atendemos",
+    "atender",
+    "corresponde",
+    "nosotros",
+    "ellos",
+    "todo",
+    "toda",
+    "todos",
+    "todas",
+];
+
+/// Extrae los términos distintivos de una regla de texto libre: palabras de 4+
+/// caracteres que no sean genéricas, en minúsculas y sin duplicados.
+fn significant_terms(text: &str) -> std::collections::BTreeSet<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|word| word.chars().count() >= 4)
+        .map(|word| word.to_lowercase())
+        .filter(|word| !RULE_STOPWORDS.contains(&word.as_str()))
+        .collect()
+}
+
+/// Una regla "coincide claramente" con el texto del hilo cuando: si tiene un solo
+/// término distintivo, ese término aparece como palabra; si tiene varios, al menos
+/// dos términos distintos coinciden (exige dos señales para reducir falsos positivos).
+fn rule_matches_haystack(rule: &str, haystack_words: &std::collections::HashSet<&str>) -> bool {
+    let terms = significant_terms(rule);
+    if terms.is_empty() {
+        return false;
+    }
+    let hits = terms
+        .iter()
+        .filter(|term| haystack_words.contains(term.as_str()))
+        .count();
+    let required = if terms.len() == 1 { 1 } else { 2 };
+    hits >= required
+}
+
+/// Refina la clasificación heurística usando las reglas de no-responsabilidad de la
+/// política (que hoy solo alimentaban a la IA). Conservadora: solo enruta a revisión
+/// manual los hilos hoy considerados válidos y aún sin marcar cuando su asunto o
+/// remitente coincide claramente con una regla. Nunca invierte la clasificación ni la
+/// validez, y no toca resultados ya aplicados por IA o revisión manual.
+pub fn refine_classification_with_policy_hints(
+    thread: &mut EmailThread,
+    request_sender_email: &str,
+    non_responsibility_rules: &[String],
+) {
+    if matches!(
+        thread.classification_source,
+        ClassificationSource::Ai | ClassificationSource::Manual
+    ) {
+        return;
+    }
+    if !thread.is_valid_client_request || thread.manual_review_required {
+        return;
+    }
+    let haystack_owned = format!(
+        "{} {}",
+        thread.subject.to_lowercase(),
+        request_sender_email.to_lowercase()
+    );
+    let haystack_words: std::collections::HashSet<&str> = haystack_owned
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect();
+    let matched = non_responsibility_rules
+        .iter()
+        .any(|rule| rule_matches_haystack(rule, &haystack_words));
+    if matched {
+        thread.manual_review_required = true;
+        thread.reasons.push(
+            "El asunto o remitente coincide con una regla de no-responsabilidad configurada; se marca para revisión."
                 .to_string(),
         );
     }
@@ -1122,5 +1258,143 @@ mod tests {
             "agente@otra-west-ingenieria.cl",
             &["@west-ingenieria.cl".to_string()]
         ));
+    }
+
+    #[test]
+    fn auto_submitted_only_flags_canonical_auto_tokens() {
+        let canonical = serde_json::json!({ "auto-submitted": "auto-generated" });
+        assert!(is_automated_sender("agente@cliente.cl", &canonical));
+
+        let replied = serde_json::json!({ "auto-submitted": "Auto-Replied" });
+        assert!(is_automated_sender("agente@cliente.cl", &replied));
+
+        // "no" y valores no canónicos no deben marcar el correo como automático.
+        let explicit_no = serde_json::json!({ "auto-submitted": "no" });
+        assert!(!is_automated_sender("persona@cliente.cl", &explicit_no));
+
+        let non_canonical = serde_json::json!({ "auto-submitted": "yes" });
+        assert!(!is_automated_sender("persona@cliente.cl", &non_canonical));
+    }
+
+    #[test]
+    fn no_reply_local_parts_are_still_automated() {
+        let headers = serde_json::json!({});
+        assert!(is_automated_sender("no-reply@plataforma.cl", &headers));
+        assert!(is_automated_sender("noreply@plataforma.cl", &headers));
+        assert!(!is_automated_sender("soporte@plataforma.cl", &headers));
+    }
+
+    fn long_thread_config() -> AnalysisConfig {
+        AnalysisConfig {
+            date_from: "2026-06-01".to_string(),
+            date_to: "2026-06-12".to_string(),
+            time_from: "00:00".to_string(),
+            time_to: "23:59".to_string(),
+            timezone: "America/Santiago".to_string(),
+            internal_domains: vec!["company.test".to_string()],
+            ignored_senders: vec![],
+            ignored_domains: vec![],
+            ignored_keywords: vec![],
+            include_labels: vec![],
+            exclude_labels: vec![],
+        }
+    }
+
+    #[test]
+    fn long_but_quickly_resolved_thread_is_not_suspicious() {
+        // Cuatro mensajes externos (forma "larga") pero cerrado en 30 min: bien atendido.
+        let thread = classify_thread(
+            "run",
+            "long-fast",
+            &[
+                msg("c1", "client@example.com", false, 0),
+                msg("c2", "client@example.com", false, 5),
+                msg("c3", "client@example.com", false, 10),
+                msg("c4", "client@example.com", false, 15),
+                msg("a1", "agent@company.test", true, 30),
+            ],
+            &long_thread_config(),
+        );
+        assert_eq!(thread.classification, Classification::ValidClientRequest);
+        assert!(thread.is_valid_client_request);
+        assert!(!thread.manual_review_required);
+        assert_eq!(thread.classification_confidence, 0.86);
+    }
+
+    #[test]
+    fn long_and_slowly_resolved_thread_stays_suspicious() {
+        // Misma forma larga pero la respuesta interna llega 10 h después: caso atípico.
+        let slow_reply_minutes = SUSPICIOUS_QUICK_RESOLUTION_MINUTES + 120;
+        let thread = classify_thread(
+            "run",
+            "long-slow",
+            &[
+                msg("c1", "client@example.com", false, 0),
+                msg("c2", "client@example.com", false, 5),
+                msg("c3", "client@example.com", false, 10),
+                msg("c4", "client@example.com", false, 15),
+                msg("a1", "agent@company.test", true, slow_reply_minutes),
+            ],
+            &long_thread_config(),
+        );
+        assert_eq!(thread.classification, Classification::ValidClientRequest);
+        assert!(thread.is_valid_client_request);
+        assert!(thread.manual_review_required);
+        assert_eq!(thread.classification_confidence, 0.72);
+    }
+
+    fn valid_thread_with_subject(subject: &str) -> EmailThread {
+        let mut thread = classify_thread(
+            "run",
+            "hint",
+            &[
+                msg("m1", "client@example.com", false, 0),
+                msg("m2", "agent@company.test", true, 20),
+            ],
+            &long_thread_config(),
+        );
+        assert_eq!(thread.classification, Classification::ValidClientRequest);
+        assert!(!thread.manual_review_required);
+        thread.subject = subject.to_string();
+        thread
+    }
+
+    #[test]
+    fn policy_hint_routes_matching_valid_thread_to_review() {
+        let rules = vec!["Soporte de hardware de impresoras".to_string()];
+        let mut thread =
+            valid_thread_with_subject("Falla de hardware en las impresoras del piso 3");
+        refine_classification_with_policy_hints(&mut thread, "client@example.com", &rules);
+        // No invierte la clasificación: solo la enruta a revisión manual.
+        assert_eq!(thread.classification, Classification::ValidClientRequest);
+        assert!(thread.is_valid_client_request);
+        assert!(thread.manual_review_required);
+    }
+
+    #[test]
+    fn policy_hint_needs_two_distinct_terms_for_multiword_rule() {
+        let rules = vec!["Soporte de hardware de impresoras".to_string()];
+        // Solo coincide un término distintivo ("hardware"): no es coincidencia clara.
+        let mut thread = valid_thread_with_subject("Consulta sobre el hardware contratado");
+        refine_classification_with_policy_hints(&mut thread, "client@example.com", &rules);
+        assert!(!thread.manual_review_required);
+    }
+
+    #[test]
+    fn policy_hint_ignores_non_matching_thread() {
+        let rules = vec!["Soporte de hardware de impresoras".to_string()];
+        let mut thread = valid_thread_with_subject("Consulta general sobre el servicio contratado");
+        refine_classification_with_policy_hints(&mut thread, "client@example.com", &rules);
+        assert!(!thread.manual_review_required);
+    }
+
+    #[test]
+    fn policy_hint_does_not_touch_ai_threads() {
+        let rules = vec!["Soporte de hardware de impresoras".to_string()];
+        let mut thread =
+            valid_thread_with_subject("Falla de hardware en las impresoras del piso 3");
+        thread.classification_source = ClassificationSource::Ai;
+        refine_classification_with_policy_hints(&mut thread, "client@example.com", &rules);
+        assert!(!thread.manual_review_required);
     }
 }

@@ -467,7 +467,8 @@ mod tests {
     #[test]
     fn privileged_account_matches_case_insensitively_and_ignores_empty() {
         let mut config = test_app_config();
-        config.internal_full_access_emails = vec!["catherine.trivino@west-ingenieria.cl".to_string()];
+        config.internal_full_access_emails =
+            vec!["catherine.trivino@west-ingenieria.cl".to_string()];
         assert!(config.is_privileged_account("Catherine.Trivino@West-Ingenieria.CL"));
         assert!(config.is_privileged_account("  catherine.trivino@west-ingenieria.cl  "));
         assert!(!config.is_privileged_account("someone@else.com"));
