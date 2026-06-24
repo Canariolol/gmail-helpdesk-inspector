@@ -32,10 +32,11 @@ use uuid::Uuid;
 use crate::{
     analysis::{
         AiAuditResult, AnalysisConfig, AnalysisMetrics, AnalysisRun, AnalysisStatus,
-        Classification, ClassificationSource, EmailMessage, EmailThread, ManualReview, TriggerType,
-        ai_message_ids_known, calculate_metrics, classify_thread,
-        message_is_inside_analysis_window, refine_classification_with_gmail_labels,
-        refine_classification_with_policy_hints, should_auto_apply_ai,
+        Classification, ClassificationSource, EmailMessage, EmailThread, ManualReview,
+        ManualReviewOverride, TriggerType, ai_message_ids_known, apply_manual_review_override,
+        calculate_metrics, classify_thread, message_fingerprint, message_is_inside_analysis_window,
+        refine_classification_with_gmail_labels, refine_classification_with_policy_hints,
+        should_auto_apply_ai,
     },
     auth::{
         GoogleTokenResponse, UserSession, clear_oauth_cookie, clear_session_cookie, decrypt_token,
@@ -162,8 +163,19 @@ pub fn router(state: AppState) -> Router {
         .route("/analysis-runs/{id}/events", get(analysis_events))
         .route("/analysis-runs/{id}/metrics", get(get_metrics))
         .route("/analysis-runs/{id}/threads", get(list_threads))
-        .route("/threads/{thread_id}", get(get_thread))
-        .route("/threads/{thread_id}/manual-review", patch(manual_review))
+        .route(
+            "/analysis-runs/{run_id}/threads/{thread_id}",
+            get(get_thread_for_run),
+        )
+        .route(
+            "/analysis-runs/{run_id}/threads/{thread_id}/manual-review",
+            patch(manual_review_for_run),
+        )
+        .route("/threads/{thread_id}", get(get_thread_legacy))
+        .route(
+            "/threads/{thread_id}/manual-review",
+            patch(manual_review_legacy),
+        )
         .route(
             "/internal/scheduled-analysis",
             post(internal::scheduled_analysis),
@@ -2079,14 +2091,32 @@ fn decode_page_token(token: Option<&str>) -> Result<usize, ApiError> {
         .map_err(|_| ApiError::bad_request("page_token inválido"))
 }
 
-async fn get_thread(
+async fn get_thread_for_run(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((run_id, thread_id)): Path<(String, String)>,
+) -> Result<Json<ThreadDetailResponse>, ApiError> {
+    let session = require_session(&state, &headers).await?;
+    require_entitlement(&state, &session).await?;
+    let thread = require_owned_thread(&state, &run_id, &thread_id, &session).await?;
+    thread_detail_response(&state, thread).await
+}
+
+async fn get_thread_legacy(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(thread_id): Path<String>,
 ) -> Result<Json<ThreadDetailResponse>, ApiError> {
     let session = require_session(&state, &headers).await?;
     require_entitlement(&state, &session).await?;
-    let mut thread = require_owned_thread(&state, &thread_id, &session).await?;
+    let thread = require_unique_owned_thread(&state, &thread_id, &session).await?;
+    thread_detail_response(&state, thread).await
+}
+
+async fn thread_detail_response(
+    state: &AppState,
+    mut thread: EmailThread,
+) -> Result<Json<ThreadDetailResponse>, ApiError> {
     let messages = state
         .storage
         .list_messages(&thread.analysis_run_id, &thread.id)
@@ -2106,7 +2136,6 @@ struct ThreadDetailResponse {
 #[derive(Debug, Deserialize)]
 struct ManualReviewRequest {
     new_classification: crate::analysis::Classification,
-    is_valid_client_request: bool,
     is_answered: bool,
     first_client_message_id: Option<String>,
     first_internal_reply_message_id: Option<String>,
@@ -2114,7 +2143,19 @@ struct ManualReviewRequest {
     notes: Option<String>,
 }
 
-async fn manual_review(
+async fn manual_review_for_run(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((run_id, thread_id)): Path<(String, String)>,
+    Json(request): Json<ManualReviewRequest>,
+) -> Result<Json<AnalysisRun>, ApiError> {
+    let session = require_session(&state, &headers).await?;
+    require_entitlement(&state, &session).await?;
+    let thread = require_owned_thread(&state, &run_id, &thread_id, &session).await?;
+    apply_manual_review_request(&state, &session, thread, request).await
+}
+
+async fn manual_review_legacy(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(thread_id): Path<String>,
@@ -2122,7 +2163,16 @@ async fn manual_review(
 ) -> Result<Json<AnalysisRun>, ApiError> {
     let session = require_session(&state, &headers).await?;
     require_entitlement(&state, &session).await?;
-    let thread = require_owned_thread(&state, &thread_id, &session).await?;
+    let thread = require_unique_owned_thread(&state, &thread_id, &session).await?;
+    apply_manual_review_request(&state, &session, thread, request).await
+}
+
+async fn apply_manual_review_request(
+    state: &AppState,
+    session: &UserSession,
+    thread: EmailThread,
+    request: ManualReviewRequest,
+) -> Result<Json<AnalysisRun>, ApiError> {
     let messages = state
         .storage
         .list_messages(&thread.analysis_run_id, &thread.id)
@@ -2148,12 +2198,19 @@ async fn manual_review(
     let resolution_time_minutes = first_client_message_at
         .zip(last_internal_message_at)
         .map(|(client, last)| (last - client).num_minutes());
+    // La validez se deriva de la clasificación elegida: ya no es un control
+    // independiente (la casilla "Solicitud válida" se eliminó del formulario).
+    // Así clasificación e is_valid_client_request no pueden quedar desincronizados.
+    let is_valid_client_request = matches!(
+        request.new_classification,
+        crate::analysis::Classification::ValidClientRequest
+    );
     let review = ManualReview {
         id: Uuid::new_v4().to_string(),
         email_thread_id: thread.id.clone(),
-        reviewer_label: session.google_account_email,
+        reviewer_label: session.google_account_email.clone(),
         new_classification: request.new_classification,
-        is_valid_client_request: request.is_valid_client_request,
+        is_valid_client_request,
         is_answered: request.is_answered,
         first_client_message_id: request.first_client_message_id,
         first_internal_reply_message_id: request.first_internal_reply_message_id,
@@ -2170,7 +2227,24 @@ async fn manual_review(
         .storage
         .add_manual_review(&thread.analysis_run_id, &review)
         .await?;
-    recalculate_run_metrics(&state, &thread.analysis_run_id).await?;
+    state
+        .storage
+        .upsert_manual_review_override(&ManualReviewOverride {
+            owner_email: session.google_account_email.clone(),
+            gmail_thread_id: thread.gmail_thread_id.clone(),
+            source_run_id: thread.analysis_run_id.clone(),
+            message_fingerprint: message_fingerprint(&messages),
+            reviewer_label: session.google_account_email.clone(),
+            classification: review.new_classification.clone(),
+            is_answered: review.is_answered,
+            first_client_message_id: review.first_client_message_id.clone(),
+            first_internal_reply_message_id: review.first_internal_reply_message_id.clone(),
+            last_internal_message_id: review.last_internal_message_id.clone(),
+            notes: review.notes.clone(),
+            created_at: review.created_at,
+        })
+        .await?;
+    recalculate_run_metrics(state, &thread.analysis_run_id).await?;
     let run = state
         .storage
         .get_analysis_run(&thread.analysis_run_id)
@@ -2222,6 +2296,7 @@ pub(crate) async fn execute_analysis(
     let config = run.config.clone();
     let policy_snapshot = run.policy_snapshot.clone();
     let policy_version_id = run.policy_version_id.clone();
+    let owner_email = run.user_email.clone();
     let run_id = run.id.clone();
     let total = run.total_candidate_threads;
     {
@@ -2231,6 +2306,7 @@ pub(crate) async fn execute_analysis(
         let policy_ref = policy_snapshot.as_ref();
         let policy_version_id_ref = policy_version_id.as_deref();
         let run_id_ref = run_id.as_str();
+        let owner_email_ref = owner_email.as_str();
         let mut task_stream = stream::iter(thread_ids.into_iter().map(|thread_id| async move {
             process_one_thread(
                 state_ref,
@@ -2240,6 +2316,7 @@ pub(crate) async fn execute_analysis(
                 ThreadProcessingContext {
                     policy_snapshot: policy_ref,
                     policy_version_id: policy_version_id_ref,
+                    owner_email: owner_email_ref,
                 },
                 thread_id,
             )
@@ -2307,6 +2384,7 @@ struct ThreadOutcome {
 struct ThreadProcessingContext<'a> {
     policy_snapshot: Option<&'a crate::policies::PolicySnapshot>,
     policy_version_id: Option<&'a str>,
+    owner_email: &'a str,
 }
 
 async fn process_one_thread(
@@ -2355,6 +2433,25 @@ async fn process_one_thread(
             request_sender,
             &snapshot.analysis_policy.non_responsibility_rules,
         );
+    }
+    if let Some(review) = state
+        .storage
+        .get_manual_review_override(processing.owner_email, &thread.gmail_thread_id)
+        .await?
+        && review.message_fingerprint == message_fingerprint(&data.messages)
+    {
+        apply_manual_review_override(&mut thread, &data.messages, &review);
+        let sanitized = data
+            .messages
+            .iter()
+            .cloned()
+            .map(|mut message| {
+                message.body_text = None;
+                message
+            })
+            .collect::<Vec<_>>();
+        state.storage.upsert_thread(&thread, &sanitized).await?;
+        return Ok(ThreadOutcome::default());
     }
     let received_human_thread = thread.first_client_message_id.is_some();
     // Modelo opt-out: la IA está activa por defecto. Un run con snapshot respeta el
@@ -3102,18 +3199,42 @@ async fn require_owned_run(
 
 async fn require_owned_thread(
     state: &AppState,
+    run_id: &str,
     thread_id: &str,
     session: &UserSession,
 ) -> Result<EmailThread, ApiError> {
-    let thread = state
-        .storage
-        .get_thread(thread_id)
-        .await?
-        .ok_or(ApiError::not_found("thread not found"))?;
-    require_owned_run(state, &thread.analysis_run_id, session)
+    require_owned_run(state, run_id, session)
         .await
         .map_err(|_| ApiError::not_found("thread not found"))?;
+    let thread = state
+        .storage
+        .get_thread(run_id, thread_id)
+        .await?
+        .ok_or(ApiError::not_found("thread not found"))?;
     Ok(thread)
+}
+
+async fn require_unique_owned_thread(
+    state: &AppState,
+    thread_id: &str,
+    session: &UserSession,
+) -> Result<EmailThread, ApiError> {
+    let mut owned = Vec::new();
+    for thread in state.storage.find_threads_by_id(thread_id).await? {
+        if require_owned_run(state, &thread.analysis_run_id, session)
+            .await
+            .is_ok()
+        {
+            owned.push(thread);
+        }
+    }
+    match owned.len() {
+        0 => Err(ApiError::not_found("thread not found")),
+        1 => Ok(owned.remove(0)),
+        _ => Err(ApiError::conflict(
+            "thread_id aparece en varios análisis; usa la ruta con run_id",
+        )),
+    }
 }
 
 async fn require_session(state: &AppState, headers: &HeaderMap) -> Result<UserSession, ApiError> {
@@ -3293,6 +3414,7 @@ mod tests {
 
     struct TestApp {
         app: axum::Router,
+        storage: MemoryStorage,
         alice_cookie: String,
         bob_cookie: String,
     }
@@ -3353,7 +3475,8 @@ mod tests {
         let alice_cookie = signed_cookie("alice-session", &config.session_secret);
         let bob_cookie = signed_cookie("bob-session", &config.session_secret);
         TestApp {
-            app: crate::build_app(config, Arc::new(storage)),
+            app: crate::build_app(config, Arc::new(storage.clone())),
+            storage,
             alice_cookie,
             bob_cookie,
         }
@@ -3474,6 +3597,7 @@ mod tests {
             manual_review_required: true,
             manual_override_applied: false,
             reasons: vec!["test".to_string()],
+            notes: None,
             created_at: now,
             updated_at: now,
         }
@@ -4220,6 +4344,169 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ambiguous_manual_reviews_increment_valid_and_decrement_ambiguous() {
+        let test = seeded_app().await;
+        let mut original = test
+            .storage
+            .get_thread("run-alice", "thread-alice")
+            .await
+            .unwrap()
+            .expect("seeded thread");
+        original.manual_review_required = false;
+        test.storage
+            .upsert_thread(&original, &[message("msg-a", "cliente@example.com")])
+            .await
+            .unwrap();
+
+        let mut template = original;
+        template.classification = Classification::Ambiguous;
+        template.is_valid_client_request = false;
+        template.manual_review_required = true;
+
+        for index in 0..4 {
+            let mut thread = template.clone();
+            thread.id = format!("ambiguous-{index}");
+            thread.gmail_thread_id = format!("gmail-ambiguous-{index}");
+            thread.first_client_message_id = Some(format!("message-{index}"));
+            test.storage
+                .upsert_thread(
+                    &thread,
+                    &[message(&format!("message-{index}"), "cliente@example.com")],
+                )
+                .await
+                .unwrap();
+        }
+
+        let baseline_threads = test.storage.list_threads("run-alice").await.unwrap();
+        let baseline = calculate_metrics(&baseline_threads, 17, 9);
+        assert_eq!(baseline.total_threads, 5);
+        assert_eq!(baseline.valid_requests, 1);
+        assert_eq!(baseline.ambiguous, 4);
+        assert_eq!(baseline.pending_review, 4);
+
+        let mut last_run = None;
+        for index in 0..4 {
+            let response = test
+                .app
+                .clone()
+                .oneshot(request(
+                    Method::PATCH,
+                    &format!("/threads/ambiguous-{index}/manual-review"),
+                    Some(&test.alice_cookie),
+                    Some(json!({
+                        "new_classification": "valid_client_request",
+                        // Compatibilidad con clientes antiguos: este valor
+                        // contradictorio debe ignorarse.
+                        "is_valid_client_request": false,
+                        "is_answered": false,
+                        "first_client_message_id": format!("message-{index}"),
+                        "first_internal_reply_message_id": null,
+                        "last_internal_message_id": null,
+                        "notes": format!("ticket válido {index}")
+                    })),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let run: serde_json::Value = response_json(response).await;
+            assert_eq!(run["metrics"]["valid_requests"], json!(index + 2));
+            assert_eq!(run["metrics"]["ambiguous"], json!(3 - index));
+            assert_eq!(run["metrics"]["pending_review"], json!(3 - index));
+            last_run = Some(run);
+        }
+
+        let run = last_run.expect("last updated run");
+        assert_eq!(run["metrics"]["total_threads"], json!(5));
+        assert_eq!(run["metrics"]["valid_requests"], json!(5));
+        assert_eq!(run["metrics"]["ambiguous"], json!(0));
+        assert_eq!(run["metrics"]["pending_review"], json!(0));
+        assert_eq!(run["metrics"]["ai_input_tokens"], json!(0));
+        assert_eq!(run["metrics"]["ai_output_tokens"], json!(0));
+    }
+
+    #[tokio::test]
+    async fn duplicate_gmail_thread_ids_are_scoped_by_run() {
+        let test = seeded_app().await;
+        let second_run = run("run-alice-new", "alice@example.com");
+        test.storage.create_analysis_run(&second_run).await.unwrap();
+        let mut duplicate = thread("thread-alice", "run-alice-new");
+        duplicate.classification = Classification::Ambiguous;
+        duplicate.is_valid_client_request = false;
+        duplicate.manual_review_required = true;
+        test.storage
+            .upsert_thread(&duplicate, &[message("msg-new", "cliente@example.com")])
+            .await
+            .unwrap();
+
+        let response = test
+            .app
+            .clone()
+            .oneshot(request(
+                Method::GET,
+                "/threads/thread-alice",
+                Some(&test.alice_cookie),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+
+        let response = test
+            .app
+            .clone()
+            .oneshot(request(
+                Method::PATCH,
+                "/analysis-runs/run-alice-new/threads/thread-alice/manual-review",
+                Some(&test.alice_cookie),
+                Some(json!({
+                    "new_classification": "misc",
+                    "is_answered": false,
+                    "first_client_message_id": "msg-new",
+                    "first_internal_reply_message_id": null,
+                    "last_internal_message_id": null,
+                    "notes": "revisión del run nuevo"
+                })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let original = test
+            .storage
+            .get_thread("run-alice", "thread-alice")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(original.classification, Classification::ValidClientRequest);
+        assert!(!original.manual_override_applied);
+
+        let reviewed = test
+            .storage
+            .get_thread("run-alice-new", "thread-alice")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reviewed.classification, Classification::Misc);
+        assert!(!reviewed.manual_review_required);
+        assert!(reviewed.manual_override_applied);
+
+        let response = test
+            .app
+            .oneshot(request(
+                Method::GET,
+                "/analysis-runs/run-alice-new/threads/thread-alice",
+                Some(&test.alice_cookie),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let detail: serde_json::Value = response_json(response).await;
+        assert_eq!(detail["thread"]["analysis_run_id"], json!("run-alice-new"));
+        assert_eq!(detail["thread"]["classification"], json!("misc"));
+    }
+
+    #[tokio::test]
     async fn owner_can_read_threads_and_apply_manual_review() {
         let test = seeded_app().await;
         let response = test
@@ -4237,6 +4524,7 @@ mod tests {
 
         let response = test
             .app
+            .clone()
             .oneshot(request(
                 Method::PATCH,
                 "/threads/thread-alice/manual-review",
@@ -4244,7 +4532,9 @@ mod tests {
                 Some(json!({
                     "reviewer_label": "spoofed-admin@example.com",
                     "new_classification": "misc",
-                    "is_valid_client_request": false,
+                    // El cliente manda true a propósito: el servidor debe ignorarlo y
+                    // derivar la validez de la clasificación ("misc" => no es válida).
+                    "is_valid_client_request": true,
                     "is_answered": false,
                     "first_client_message_id": null,
                     "first_internal_reply_message_id": null,
@@ -4255,5 +4545,31 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+
+        // El PATCH devuelve el run recalculado: el hilo, antes válido, ya no cuenta
+        // como válido y pasa a Ignorados. Así la métrica de "Válidos" se descuenta
+        // al reclasificar (en vez de quedarse igual como antes).
+        let run: serde_json::Value = response_json(response).await;
+        assert_eq!(run["metrics"]["valid_requests"], json!(0));
+        assert_eq!(run["metrics"]["ignored"], json!(1));
+
+        // Al releer el hilo, la nota debe haber persistido y la validez debe
+        // haberse derivado de la clasificación (misc => is_valid = false), de modo
+        // que un hilo ignorado deja de contar como válido en las métricas.
+        let response = test
+            .app
+            .oneshot(request(
+                Method::GET,
+                "/threads/thread-alice",
+                Some(&test.alice_cookie),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let detail: serde_json::Value = response_json(response).await;
+        assert_eq!(detail["thread"]["notes"], json!("confirmed ignored"));
+        assert_eq!(detail["thread"]["is_valid_client_request"], json!(false));
+        assert_eq!(detail["thread"]["classification"], json!("misc"));
     }
 }

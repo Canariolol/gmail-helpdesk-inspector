@@ -37,13 +37,13 @@ export function Sidebar({ view, onNavigate, email, reviewCount, onLogout, availa
       .filter(Boolean)
       .slice(0, 2)
       .map((part) => part[0]?.toUpperCase())
-      .join("") || "GI";
+      .join("") || "MH";
 
   return (
     <aside className="sidebar">
       <div className="sidebar-brand">
-        <img src="/logo-192.png" alt="Gmail Inspector" />
-        <strong>Gmail Inspector</strong>
+        <img src="/logo-192.png" alt="Mira" />
+        <strong>Mira</strong>
         <span>Análisis de correos</span>
       </div>
       <nav className="sidebar-nav" aria-label="Navegación principal">

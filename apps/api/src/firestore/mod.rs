@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fs,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -14,15 +15,26 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::{
-    analysis::{AiAuditResult, AnalysisRun, EmailMessage, EmailThread, ManualReview},
+    analysis::{
+        AiAuditResult, AnalysisRun, EmailMessage, EmailThread, ManualReview, ManualReviewOverride,
+        apply_manual_review_override, calculate_metrics, message_fingerprint,
+        reconcile_legacy_thread_classification,
+    },
     auth::UserSession,
     billing::{Account, CheckoutSession, Subscription, UsageLedger},
     config::{FirestoreConfig, ServiceAccountKey},
     mailbox::{FilterPreset, MailboxMetadata},
     policies::{OrgConfigBundle, PolicyVersion, hash_owner_email},
     scheduler::model::{ScheduleConfig, ScheduleState},
-    storage::StorageRepository,
+    storage::{
+        ManualReviewInheritanceMigrationResult, ManualReviewMetricsMigrationResult,
+        StorageRepository,
+    },
 };
+
+const MANUAL_REVIEW_METRICS_MIGRATION_PATH: &str = "systemMigrations/manual-review-metrics-v1";
+const MANUAL_REVIEW_INHERITANCE_MIGRATION_PATH: &str =
+    "systemMigrations/manual-review-inheritance-v2";
 
 pub struct FirestoreStorage {
     client: Client,
@@ -47,6 +59,8 @@ struct FirestoreDocument {
 struct FirestoreListResponse {
     #[serde(default)]
     documents: Vec<FirestoreDocument>,
+    #[serde(default, rename = "nextPageToken")]
+    next_page_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -54,6 +68,15 @@ struct TokenResponse {
     access_token: String,
     #[serde(default)]
     expires_in: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MigrationMarker {
+    version: String,
+    completed_at: chrono::DateTime<Utc>,
+    scanned_runs: u64,
+    updated_runs: u64,
+    updated_threads: u64,
 }
 
 impl FirestoreStorage {
@@ -198,25 +221,30 @@ impl FirestoreStorage {
         } else {
             format!("{}/{}/{}", self.root(), parent, collection)
         };
-        let response: FirestoreListResponse = self
-            .client
-            .get(url)
-            .bearer_auth(token)
-            .query(&[("pageSize", "300")])
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        response
-            .documents
-            .into_iter()
-            .map(|doc| {
+        let mut values = Vec::new();
+        let mut page_token: Option<String> = None;
+        loop {
+            let mut request = self
+                .client
+                .get(&url)
+                .bearer_auth(&token)
+                .query(&[("pageSize", "300")]);
+            if let Some(page_token) = page_token.as_deref() {
+                request = request.query(&[("pageToken", page_token)]);
+            }
+            let response: FirestoreListResponse =
+                request.send().await?.error_for_status()?.json().await?;
+            for doc in response.documents {
                 let _ = &doc.name;
                 let value = firestore_fields_to_json(doc.fields)?;
-                serde_json::from_value(value).map_err(Into::into)
-            })
-            .collect()
+                values.push(serde_json::from_value(value)?);
+            }
+            page_token = response.next_page_token.filter(|token| !token.is_empty());
+            if page_token.is_none() {
+                break;
+            }
+        }
+        Ok(values)
     }
 
     async fn delete(&self, path: &str) -> anyhow::Result<()> {
@@ -497,17 +525,27 @@ impl StorageRepository for FirestoreStorage {
         Ok(threads)
     }
 
-    async fn get_thread(&self, thread_id: &str) -> anyhow::Result<Option<EmailThread>> {
+    async fn get_thread(
+        &self,
+        run_id: &str,
+        thread_id: &str,
+    ) -> anyhow::Result<Option<EmailThread>> {
+        self.get(&format!("analysisRuns/{run_id}/threads/{thread_id}"))
+            .await
+    }
+
+    async fn find_threads_by_id(&self, thread_id: &str) -> anyhow::Result<Vec<EmailThread>> {
         let runs: Vec<AnalysisRun> = self.list("", "analysisRuns").await?;
+        let mut matches = Vec::new();
         for run in runs {
             if let Some(thread) = self
                 .get(&format!("analysisRuns/{}/threads/{thread_id}", run.id))
                 .await?
             {
-                return Ok(Some(thread));
+                matches.push(thread);
             }
         }
-        Ok(None)
+        Ok(matches)
     }
 
     async fn list_messages(
@@ -551,9 +589,13 @@ impl StorageRepository for FirestoreStorage {
             .get::<EmailThread>(&path)
             .await?
             .ok_or_else(|| anyhow!("thread not found"))?;
+        let is_valid_client_request = matches!(
+            review.new_classification,
+            crate::analysis::Classification::ValidClientRequest
+        );
         thread.classification = review.new_classification.clone();
         thread.classification_source = crate::analysis::ClassificationSource::Manual;
-        thread.is_valid_client_request = review.is_valid_client_request;
+        thread.is_valid_client_request = is_valid_client_request;
         thread.is_answered = review.is_answered;
         thread.first_client_message_id = review.first_client_message_id.clone();
         thread.first_internal_reply_message_id = review.first_internal_reply_message_id.clone();
@@ -563,16 +605,248 @@ impl StorageRepository for FirestoreStorage {
         thread.last_internal_message_at = review.last_internal_message_at;
         thread.response_time_minutes = review.response_time_minutes;
         thread.resolution_time_minutes = review.resolution_time_minutes;
+        thread.notes = review.notes.clone();
         thread.manual_review_required = false;
         thread.manual_override_applied = true;
         thread.updated_at = Utc::now();
+        let mut canonical_review = review.clone();
+        canonical_review.is_valid_client_request = is_valid_client_request;
         self.put(
             &format!("analysisRuns/{run_id}/manualReviews/{}", review.id),
-            review,
+            &canonical_review,
         )
         .await?;
         self.put(&path, &thread).await?;
         Ok(())
+    }
+
+    async fn upsert_manual_review_override(
+        &self,
+        review: &ManualReviewOverride,
+    ) -> anyhow::Result<()> {
+        self.put(
+            &format!(
+                "ownerProfiles/{}/manualReviewOverrides/{}",
+                hash_owner_email(&review.owner_email),
+                review.gmail_thread_id
+            ),
+            review,
+        )
+        .await
+    }
+
+    async fn get_manual_review_override(
+        &self,
+        owner_email: &str,
+        gmail_thread_id: &str,
+    ) -> anyhow::Result<Option<ManualReviewOverride>> {
+        self.get(&format!(
+            "ownerProfiles/{}/manualReviewOverrides/{gmail_thread_id}",
+            hash_owner_email(owner_email)
+        ))
+        .await
+    }
+
+    async fn reconcile_manual_review_metrics_v1(
+        &self,
+    ) -> anyhow::Result<ManualReviewMetricsMigrationResult> {
+        if self
+            .get::<MigrationMarker>(MANUAL_REVIEW_METRICS_MIGRATION_PATH)
+            .await?
+            .is_some()
+        {
+            return Ok(ManualReviewMetricsMigrationResult {
+                already_applied: true,
+                ..Default::default()
+            });
+        }
+
+        let mut runs: Vec<AnalysisRun> = self.list("", "analysisRuns").await?;
+        let mut result = ManualReviewMetricsMigrationResult {
+            scanned_runs: runs.len() as u64,
+            ..Default::default()
+        };
+
+        for run in &mut runs {
+            let mut threads = self.list_threads(&run.id).await?;
+            let mut thread_changed = false;
+            for thread in &mut threads {
+                if reconcile_legacy_thread_classification(thread) {
+                    self.put(
+                        &format!("analysisRuns/{}/threads/{}", run.id, thread.id),
+                        thread,
+                    )
+                    .await?;
+                    thread_changed = true;
+                    result.updated_threads += 1;
+                }
+            }
+
+            let metrics = calculate_metrics(
+                &threads,
+                run.metrics.ai_input_tokens,
+                run.metrics.ai_output_tokens,
+            );
+            if thread_changed || run.metrics != metrics {
+                run.metrics = metrics;
+                self.update_analysis_run(run).await?;
+                result.updated_runs += 1;
+            }
+        }
+
+        self.put(
+            MANUAL_REVIEW_METRICS_MIGRATION_PATH,
+            &MigrationMarker {
+                version: "manual-review-metrics-v1".to_string(),
+                completed_at: Utc::now(),
+                scanned_runs: result.scanned_runs,
+                updated_runs: result.updated_runs,
+                updated_threads: result.updated_threads,
+            },
+        )
+        .await?;
+
+        Ok(result)
+    }
+
+    async fn reconcile_manual_review_inheritance_v2(
+        &self,
+    ) -> anyhow::Result<ManualReviewInheritanceMigrationResult> {
+        if self
+            .get::<MigrationMarker>(MANUAL_REVIEW_INHERITANCE_MIGRATION_PATH)
+            .await?
+            .is_some()
+        {
+            return Ok(ManualReviewInheritanceMigrationResult {
+                already_applied: true,
+                ..Default::default()
+            });
+        }
+
+        let mut runs: Vec<AnalysisRun> = self.list("", "analysisRuns").await?;
+        let mut result = ManualReviewInheritanceMigrationResult {
+            scanned_runs: runs.len() as u64,
+            ..Default::default()
+        };
+        let mut overrides: HashMap<String, ManualReviewOverride> = HashMap::new();
+
+        for run in &runs {
+            let reviews: Vec<ManualReview> = self
+                .list(&format!("analysisRuns/{}", run.id), "manualReviews")
+                .await?;
+            for review in reviews {
+                let messages = self.list_messages(&run.id, &review.email_thread_id).await?;
+                let inherited = ManualReviewOverride {
+                    owner_email: run.user_email.clone(),
+                    gmail_thread_id: review.email_thread_id.clone(),
+                    source_run_id: run.id.clone(),
+                    message_fingerprint: message_fingerprint(&messages),
+                    reviewer_label: review.reviewer_label,
+                    classification: review.new_classification,
+                    is_answered: review.is_answered,
+                    first_client_message_id: review.first_client_message_id,
+                    first_internal_reply_message_id: review.first_internal_reply_message_id,
+                    last_internal_message_id: review.last_internal_message_id,
+                    notes: review.notes,
+                    created_at: review.created_at,
+                };
+                let key = format!(
+                    "{}:{}",
+                    inherited.owner_email.trim().to_ascii_lowercase(),
+                    inherited.gmail_thread_id
+                );
+                if overrides
+                    .get(&key)
+                    .is_none_or(|existing| existing.created_at < inherited.created_at)
+                {
+                    overrides.insert(key, inherited);
+                }
+            }
+        }
+
+        for review in overrides.values() {
+            self.upsert_manual_review_override(review).await?;
+            result.created_overrides += 1;
+        }
+
+        let mut latest_by_owner: HashMap<String, AnalysisRun> = HashMap::new();
+        for run in &runs {
+            if run.status != crate::analysis::AnalysisStatus::Completed {
+                continue;
+            }
+            let owner = run.user_email.trim().to_ascii_lowercase();
+            if latest_by_owner
+                .get(&owner)
+                .is_none_or(|current| current.created_at < run.created_at)
+            {
+                latest_by_owner.insert(owner, run.clone());
+            }
+        }
+
+        for run in &mut runs {
+            let mut threads = self.list_threads(&run.id).await?;
+            let is_latest = latest_by_owner
+                .get(&run.user_email.trim().to_ascii_lowercase())
+                .is_some_and(|latest| latest.id == run.id);
+            let mut run_changed = false;
+            if is_latest {
+                for thread in &mut threads {
+                    let key = format!(
+                        "{}:{}",
+                        run.user_email.trim().to_ascii_lowercase(),
+                        thread.gmail_thread_id
+                    );
+                    let Some(review) = overrides.get(&key) else {
+                        continue;
+                    };
+                    let messages = self.list_messages(&run.id, &thread.id).await?;
+                    if review.message_fingerprint != message_fingerprint(&messages) {
+                        continue;
+                    }
+                    let changed = thread.classification != review.classification
+                        || thread.classification_source
+                            != crate::analysis::ClassificationSource::Manual
+                        || thread.manual_review_required
+                        || !thread.manual_override_applied
+                        || thread.notes != review.notes;
+                    if changed {
+                        apply_manual_review_override(thread, &messages, review);
+                        self.put(
+                            &format!("analysisRuns/{}/threads/{}", run.id, thread.id),
+                            thread,
+                        )
+                        .await?;
+                        result.updated_threads += 1;
+                        run_changed = true;
+                    }
+                }
+            }
+
+            let metrics = calculate_metrics(
+                &threads,
+                run.metrics.ai_input_tokens,
+                run.metrics.ai_output_tokens,
+            );
+            if run_changed || run.metrics != metrics {
+                run.metrics = metrics;
+                self.update_analysis_run(run).await?;
+                result.updated_runs += 1;
+            }
+        }
+
+        self.put(
+            MANUAL_REVIEW_INHERITANCE_MIGRATION_PATH,
+            &MigrationMarker {
+                version: "manual-review-inheritance-v2".to_string(),
+                completed_at: Utc::now(),
+                scanned_runs: result.scanned_runs,
+                updated_runs: result.updated_runs,
+                updated_threads: result.updated_threads,
+            },
+        )
+        .await?;
+
+        Ok(result)
     }
 
     async fn upsert_mailbox_metadata(

@@ -745,6 +745,7 @@ mod tests {
             manual_review_required: true,
             manual_override_applied: false,
             reasons: vec!["Confianza baja".to_string()],
+            notes: None,
             created_at: now,
             updated_at: now,
         }

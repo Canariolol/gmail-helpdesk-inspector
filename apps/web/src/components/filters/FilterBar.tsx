@@ -1,14 +1,15 @@
-import { AlertTriangle, CheckCircle2, Save, Sparkles, Trash2 } from "lucide-react";
+import { CheckCircle2, Save, Sparkles, Tags, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import type { FilterPreset, GmailLabel, OrgConfig } from "../../api/types";
+import type { FilterPreset, OrgConfig } from "../../api/types";
 import { split } from "../../lib/format";
+import { LabelPickerModal } from "./LabelPickerModal";
+import { INBOX_TOKEN, tokenDisplayName } from "./labels";
 import { RangeField } from "./RangeField";
 
 type Props = {
   loading: boolean;
   onAnalyze: (payload: unknown) => void;
   orgConfig?: OrgConfig | null;
-  onGoToSetup?: () => void;
   filterPresets?: FilterPreset[];
   onSavePreset?: (payload: unknown) => void;
   onDeletePreset?: (id: string) => void;
@@ -26,21 +27,10 @@ function todayInHelpdeskTz(): string {
   }).format(new Date());
 }
 
-// Token que el backend traduce a operador de búsqueda de Gmail: las etiquetas de
-// usuario se referencian por nombre; las de sistema (INBOX, CATEGORY_*) por id.
-function labelToken(label: GmailLabel): string {
-  return label.label_type === "user" ? label.name : label.id;
-}
-
-function selectedValues(select: HTMLSelectElement): string[] {
-  return Array.from(select.selectedOptions).map((option) => option.value);
-}
-
 export function FilterBar({
   loading,
   onAnalyze,
   orgConfig,
-  onGoToSetup,
   filterPresets = [],
   onSavePreset,
   onDeletePreset,
@@ -51,9 +41,12 @@ export function FilterBar({
   const [timeFrom, setTimeFrom] = useState("00:00");
   const [timeTo, setTimeTo] = useState("23:59");
 
-  // Selección de etiquetas de Gmail (incluir / excluir) para la recuperación.
+  // Selección de etiquetas de Gmail a incluir en la recuperación.
   const [includeLabels, setIncludeLabels] = useState<string[]>([]);
+  // Exclusión negativa: se conserva para round-trip de presets antiguos; la UI
+  // nueva trabaja solo con inclusión.
   const [excludeLabels, setExcludeLabels] = useState<string[]>([]);
+  const [labelModalOpen, setLabelModalOpen] = useState(false);
 
   // Presets guardados
   const [presetName, setPresetName] = useState("");
@@ -92,6 +85,18 @@ export function FilterBar({
     if (fallback) applyPreset(fallback);
     appliedDefault.current = true;
   }, [filterPresets]);
+
+  // INBOX va incluida por defecto cuando llega la metadata del buzón, salvo que
+  // exista un preset por defecto (ese manda). El usuario puede quitarla luego.
+  const seededInbox = useRef(false);
+  useEffect(() => {
+    if (seededInbox.current || labels.length === 0) return;
+    seededInbox.current = true;
+    if (filterPresets.some((preset) => preset.is_default)) return;
+    if (labels.some((label) => label.id.toUpperCase() === INBOX_TOKEN)) {
+      setIncludeLabels((current) => (current.length === 0 ? [INBOX_TOKEN] : current));
+    }
+  }, [labels, filterPresets]);
 
   function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
@@ -162,39 +167,31 @@ export function FilterBar({
       />
 
       {labels.length > 0 && (
-        <>
-          <div className="field">
-            <span className="field-label">Bandejas/etiquetas a incluir</span>
-            <select
-              multiple
-              className="label-multiselect"
-              value={includeLabels}
-              onChange={(event) => setIncludeLabels(selectedValues(event.target))}
-            >
-              {labels.map((label) => (
-                <option key={`inc-${label.id}`} value={labelToken(label)}>
-                  {label.name}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="field">
-            <span className="field-label">Etiquetas a excluir</span>
-            <select
-              multiple
-              className="label-multiselect"
-              value={excludeLabels}
-              onChange={(event) => setExcludeLabels(selectedValues(event.target))}
-            >
-              {labels.map((label) => (
-                <option key={`exc-${label.id}`} value={labelToken(label)}>
-                  {label.name}
-                </option>
-              ))}
-            </select>
-          </div>
-        </>
+        <div className="field">
+          <span className="field-label">Bandejas y etiquetas</span>
+          <button
+            type="button"
+            className="label-picker-trigger"
+            onClick={() => setLabelModalOpen(true)}
+          >
+            <Tags size={16} />
+            <span className="lp-trigger-text">
+              {includeLabels.length === 0
+                ? "Recibidos (por defecto)"
+                : includeLabels.map((token) => tokenDisplayName(token, labels)).join(", ")}
+            </span>
+            <span className="lp-trigger-count">{includeLabels.length}</span>
+          </button>
+        </div>
       )}
+
+      <LabelPickerModal
+        open={labelModalOpen}
+        labels={labels}
+        includedTokens={includeLabels}
+        onChange={setIncludeLabels}
+        onClose={() => setLabelModalOpen(false)}
+      />
 
       {(filterPresets.length > 0 || onSavePreset) && (
         <div className="field filter-presets">
@@ -261,32 +258,6 @@ export function FilterBar({
             {" · "}
             {orgConfig.mailbox.workspace_domain}
           </span>
-        </div>
-      )}
-
-      {isNotReady && (
-        <div className="filter-bar-setup-prompt">
-          <AlertTriangle size={14} />
-          <span>Completa la configuración antes de analizar.</span>
-          {onGoToSetup && (
-            <button
-              type="button"
-              onClick={onGoToSetup}
-              style={{
-                marginLeft: "auto",
-                fontSize: "var(--fs-sm)",
-                fontWeight: 700,
-                color: "var(--chip-amber-fg)",
-                textDecoration: "underline",
-                background: "none",
-                border: 0,
-                padding: 0,
-                cursor: "pointer",
-              }}
-            >
-              Configurar →
-            </button>
-          )}
         </div>
       )}
 

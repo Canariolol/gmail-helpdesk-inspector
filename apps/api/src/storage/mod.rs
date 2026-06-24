@@ -6,13 +6,34 @@ use chrono::Utc;
 use tokio::sync::RwLock;
 
 use crate::{
-    analysis::{AiAuditResult, AnalysisRun, EmailMessage, EmailThread, ManualReview},
+    analysis::{
+        AiAuditResult, AnalysisRun, EmailMessage, EmailThread, ManualReview, ManualReviewOverride,
+        apply_manual_review_override, calculate_metrics, message_fingerprint,
+        reconcile_legacy_thread_classification,
+    },
     auth::UserSession,
     billing::{Account, CheckoutSession, Subscription, UsageLedger},
     mailbox::{FilterPreset, MailboxMetadata},
     policies::{OrgConfigBundle, PolicyVersion},
     scheduler::model::{ScheduleConfig, ScheduleState},
 };
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ManualReviewMetricsMigrationResult {
+    pub already_applied: bool,
+    pub scanned_runs: u64,
+    pub updated_runs: u64,
+    pub updated_threads: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ManualReviewInheritanceMigrationResult {
+    pub already_applied: bool,
+    pub scanned_runs: u64,
+    pub created_overrides: u64,
+    pub updated_runs: u64,
+    pub updated_threads: u64,
+}
 
 #[async_trait]
 pub trait StorageRepository: Send + Sync {
@@ -73,7 +94,12 @@ pub trait StorageRepository: Send + Sync {
         messages: &[EmailMessage],
     ) -> anyhow::Result<()>;
     async fn list_threads(&self, run_id: &str) -> anyhow::Result<Vec<EmailThread>>;
-    async fn get_thread(&self, thread_id: &str) -> anyhow::Result<Option<EmailThread>>;
+    async fn get_thread(
+        &self,
+        run_id: &str,
+        thread_id: &str,
+    ) -> anyhow::Result<Option<EmailThread>>;
+    async fn find_threads_by_id(&self, thread_id: &str) -> anyhow::Result<Vec<EmailThread>>;
     async fn list_messages(
         &self,
         run_id: &str,
@@ -86,6 +112,21 @@ pub trait StorageRepository: Send + Sync {
         audit: &AiAuditResult,
     ) -> anyhow::Result<()>;
     async fn add_manual_review(&self, run_id: &str, review: &ManualReview) -> anyhow::Result<()>;
+    async fn upsert_manual_review_override(
+        &self,
+        review: &ManualReviewOverride,
+    ) -> anyhow::Result<()>;
+    async fn get_manual_review_override(
+        &self,
+        owner_email: &str,
+        gmail_thread_id: &str,
+    ) -> anyhow::Result<Option<ManualReviewOverride>>;
+    async fn reconcile_manual_review_metrics_v1(
+        &self,
+    ) -> anyhow::Result<ManualReviewMetricsMigrationResult>;
+    async fn reconcile_manual_review_inheritance_v2(
+        &self,
+    ) -> anyhow::Result<ManualReviewInheritanceMigrationResult>;
     async fn upsert_mailbox_metadata(
         &self,
         owner_email: &str,
@@ -113,7 +154,7 @@ struct MemoryInner {
     threads: HashMap<String, EmailThread>,
     messages: HashMap<String, Vec<EmailMessage>>,
     audits: HashMap<String, Vec<AiAuditResult>>,
-    reviews: Vec<ManualReview>,
+    reviews: Vec<(String, ManualReview)>,
     schedule_configs: HashMap<String, ScheduleConfig>,
     schedule_states: HashMap<String, ScheduleState>,
     org_configs: HashMap<String, OrgConfigBundle>,
@@ -123,6 +164,20 @@ struct MemoryInner {
     usage_ledgers: HashMap<String, UsageLedger>,
     mailbox_metadata: HashMap<String, MailboxMetadata>,
     filter_presets: HashMap<String, FilterPreset>,
+    manual_review_overrides: HashMap<String, ManualReviewOverride>,
+    manual_review_metrics_v1_applied: bool,
+    manual_review_inheritance_v2_applied: bool,
+}
+
+fn thread_storage_key(run_id: &str, thread_id: &str) -> String {
+    format!("{run_id}:{thread_id}")
+}
+
+fn override_storage_key(owner_email: &str, gmail_thread_id: &str) -> String {
+    format!(
+        "{}:{gmail_thread_id}",
+        owner_email.trim().to_ascii_lowercase()
+    )
 }
 
 #[async_trait]
@@ -409,9 +464,12 @@ impl StorageRepository for MemoryStorage {
         messages: &[EmailMessage],
     ) -> anyhow::Result<()> {
         let mut inner = self.inner.write().await;
-        inner.threads.insert(thread.id.clone(), thread.clone());
+        inner.threads.insert(
+            thread_storage_key(&thread.analysis_run_id, &thread.id),
+            thread.clone(),
+        );
         inner.messages.insert(
-            format!("{}:{}", thread.analysis_run_id, thread.id),
+            thread_storage_key(&thread.analysis_run_id, &thread.id),
             messages.to_vec(),
         );
         Ok(())
@@ -429,7 +487,7 @@ impl StorageRepository for MemoryStorage {
             if thread.first_message_at.is_none() {
                 thread.first_message_at = inner
                     .messages
-                    .get(&format!("{run_id}:{}", thread.id))
+                    .get(&thread_storage_key(run_id, &thread.id))
                     .and_then(|messages| messages.iter().map(|message| message.date).min());
             }
         }
@@ -442,8 +500,30 @@ impl StorageRepository for MemoryStorage {
         Ok(threads)
     }
 
-    async fn get_thread(&self, thread_id: &str) -> anyhow::Result<Option<EmailThread>> {
-        Ok(self.inner.read().await.threads.get(thread_id).cloned())
+    async fn get_thread(
+        &self,
+        run_id: &str,
+        thread_id: &str,
+    ) -> anyhow::Result<Option<EmailThread>> {
+        Ok(self
+            .inner
+            .read()
+            .await
+            .threads
+            .get(&thread_storage_key(run_id, thread_id))
+            .cloned())
+    }
+
+    async fn find_threads_by_id(&self, thread_id: &str) -> anyhow::Result<Vec<EmailThread>> {
+        Ok(self
+            .inner
+            .read()
+            .await
+            .threads
+            .values()
+            .filter(|thread| thread.id == thread_id)
+            .cloned()
+            .collect())
     }
 
     async fn list_messages(
@@ -456,7 +536,7 @@ impl StorageRepository for MemoryStorage {
             .read()
             .await
             .messages
-            .get(&format!("{run_id}:{thread_id}"))
+            .get(&thread_storage_key(run_id, thread_id))
             .cloned()
             .unwrap_or_default())
     }
@@ -471,7 +551,7 @@ impl StorageRepository for MemoryStorage {
             .write()
             .await
             .audits
-            .entry(thread_id.to_string())
+            .entry(thread_storage_key(_run_id, thread_id))
             .or_default()
             .push(audit.clone());
         Ok(())
@@ -484,14 +564,18 @@ impl StorageRepository for MemoryStorage {
         }
         let thread = inner
             .threads
-            .get_mut(&review.email_thread_id)
+            .get_mut(&thread_storage_key(run_id, &review.email_thread_id))
             .ok_or_else(|| anyhow!("thread not found"))?;
         if thread.analysis_run_id != run_id {
             return Err(anyhow!("thread does not belong to run"));
         }
+        let is_valid_client_request = matches!(
+            review.new_classification,
+            crate::analysis::Classification::ValidClientRequest
+        );
         thread.classification = review.new_classification.clone();
         thread.classification_source = crate::analysis::ClassificationSource::Manual;
-        thread.is_valid_client_request = review.is_valid_client_request;
+        thread.is_valid_client_request = is_valid_client_request;
         thread.is_answered = review.is_answered;
         thread.first_client_message_id = review.first_client_message_id.clone();
         thread.first_internal_reply_message_id = review.first_internal_reply_message_id.clone();
@@ -501,28 +585,251 @@ impl StorageRepository for MemoryStorage {
         thread.last_internal_message_at = review.last_internal_message_at;
         thread.response_time_minutes = review.response_time_minutes;
         thread.resolution_time_minutes = review.resolution_time_minutes;
+        thread.notes = review.notes.clone();
         thread.manual_review_required = false;
         thread.manual_override_applied = true;
         thread.updated_at = Utc::now();
-        inner.reviews.push(ManualReview {
-            id: review.id.clone(),
-            email_thread_id: review.email_thread_id.clone(),
-            reviewer_label: review.reviewer_label.clone(),
-            new_classification: review.new_classification.clone(),
-            is_valid_client_request: review.is_valid_client_request,
-            is_answered: review.is_answered,
-            first_client_message_id: review.first_client_message_id.clone(),
-            first_internal_reply_message_id: review.first_internal_reply_message_id.clone(),
-            last_internal_message_id: review.last_internal_message_id.clone(),
-            first_client_message_at: review.first_client_message_at,
-            first_internal_reply_at: review.first_internal_reply_at,
-            last_internal_message_at: review.last_internal_message_at,
-            response_time_minutes: review.response_time_minutes,
-            resolution_time_minutes: review.resolution_time_minutes,
-            notes: review.notes.clone(),
-            created_at: review.created_at,
-        });
+        inner.reviews.push((
+            run_id.to_string(),
+            ManualReview {
+                id: review.id.clone(),
+                email_thread_id: review.email_thread_id.clone(),
+                reviewer_label: review.reviewer_label.clone(),
+                new_classification: review.new_classification.clone(),
+                is_valid_client_request,
+                is_answered: review.is_answered,
+                first_client_message_id: review.first_client_message_id.clone(),
+                first_internal_reply_message_id: review.first_internal_reply_message_id.clone(),
+                last_internal_message_id: review.last_internal_message_id.clone(),
+                first_client_message_at: review.first_client_message_at,
+                first_internal_reply_at: review.first_internal_reply_at,
+                last_internal_message_at: review.last_internal_message_at,
+                response_time_minutes: review.response_time_minutes,
+                resolution_time_minutes: review.resolution_time_minutes,
+                notes: review.notes.clone(),
+                created_at: review.created_at,
+            },
+        ));
         Ok(())
+    }
+
+    async fn upsert_manual_review_override(
+        &self,
+        review: &ManualReviewOverride,
+    ) -> anyhow::Result<()> {
+        self.inner.write().await.manual_review_overrides.insert(
+            override_storage_key(&review.owner_email, &review.gmail_thread_id),
+            review.clone(),
+        );
+        Ok(())
+    }
+
+    async fn get_manual_review_override(
+        &self,
+        owner_email: &str,
+        gmail_thread_id: &str,
+    ) -> anyhow::Result<Option<ManualReviewOverride>> {
+        Ok(self
+            .inner
+            .read()
+            .await
+            .manual_review_overrides
+            .get(&override_storage_key(owner_email, gmail_thread_id))
+            .cloned())
+    }
+
+    async fn reconcile_manual_review_metrics_v1(
+        &self,
+    ) -> anyhow::Result<ManualReviewMetricsMigrationResult> {
+        let mut inner = self.inner.write().await;
+        if inner.manual_review_metrics_v1_applied {
+            return Ok(ManualReviewMetricsMigrationResult {
+                already_applied: true,
+                ..Default::default()
+            });
+        }
+
+        let run_ids: Vec<String> = inner.runs.keys().cloned().collect();
+        let mut result = ManualReviewMetricsMigrationResult {
+            scanned_runs: run_ids.len() as u64,
+            ..Default::default()
+        };
+
+        for run_id in run_ids {
+            let thread_ids: Vec<String> = inner
+                .threads
+                .values()
+                .filter(|thread| thread.analysis_run_id == run_id)
+                .map(|thread| thread.id.clone())
+                .collect();
+
+            let mut thread_changed = false;
+            for thread_id in thread_ids {
+                if let Some(thread) = inner
+                    .threads
+                    .get_mut(&thread_storage_key(&run_id, &thread_id))
+                    && reconcile_legacy_thread_classification(thread)
+                {
+                    thread_changed = true;
+                    result.updated_threads += 1;
+                }
+            }
+
+            let threads: Vec<EmailThread> = inner
+                .threads
+                .values()
+                .filter(|thread| thread.analysis_run_id == run_id)
+                .cloned()
+                .collect();
+            if let Some(run) = inner.runs.get_mut(&run_id) {
+                let metrics = calculate_metrics(
+                    &threads,
+                    run.metrics.ai_input_tokens,
+                    run.metrics.ai_output_tokens,
+                );
+                if thread_changed || run.metrics != metrics {
+                    run.metrics = metrics;
+                    result.updated_runs += 1;
+                }
+            }
+        }
+
+        inner.manual_review_metrics_v1_applied = true;
+        Ok(result)
+    }
+
+    async fn reconcile_manual_review_inheritance_v2(
+        &self,
+    ) -> anyhow::Result<ManualReviewInheritanceMigrationResult> {
+        let mut inner = self.inner.write().await;
+        if inner.manual_review_inheritance_v2_applied {
+            return Ok(ManualReviewInheritanceMigrationResult {
+                already_applied: true,
+                ..Default::default()
+            });
+        }
+
+        let mut result = ManualReviewInheritanceMigrationResult {
+            scanned_runs: inner.runs.len() as u64,
+            ..Default::default()
+        };
+        let reviews = inner.reviews.clone();
+        for (run_id, review) in reviews {
+            let Some(run) = inner.runs.get(&run_id) else {
+                continue;
+            };
+            let messages = inner
+                .messages
+                .get(&thread_storage_key(&run_id, &review.email_thread_id))
+                .cloned()
+                .unwrap_or_default();
+            let inherited = ManualReviewOverride {
+                owner_email: run.user_email.clone(),
+                gmail_thread_id: review.email_thread_id.clone(),
+                source_run_id: run_id,
+                message_fingerprint: message_fingerprint(&messages),
+                reviewer_label: review.reviewer_label,
+                classification: review.new_classification,
+                is_answered: review.is_answered,
+                first_client_message_id: review.first_client_message_id,
+                first_internal_reply_message_id: review.first_internal_reply_message_id,
+                last_internal_message_id: review.last_internal_message_id,
+                notes: review.notes,
+                created_at: review.created_at,
+            };
+            let key = override_storage_key(&inherited.owner_email, &inherited.gmail_thread_id);
+            let should_replace = inner
+                .manual_review_overrides
+                .get(&key)
+                .is_none_or(|existing| existing.created_at < inherited.created_at);
+            if should_replace {
+                inner.manual_review_overrides.insert(key, inherited);
+                result.created_overrides += 1;
+            }
+        }
+
+        let mut latest_by_owner: HashMap<String, AnalysisRun> = HashMap::new();
+        for run in inner.runs.values() {
+            if run.status != crate::analysis::AnalysisStatus::Completed {
+                continue;
+            }
+            let owner = run.user_email.trim().to_ascii_lowercase();
+            if latest_by_owner
+                .get(&owner)
+                .is_none_or(|current| current.created_at < run.created_at)
+            {
+                latest_by_owner.insert(owner, run.clone());
+            }
+        }
+
+        let runs = inner.runs.values().cloned().collect::<Vec<_>>();
+        for run in &runs {
+            let thread_keys = inner
+                .threads
+                .iter()
+                .filter(|(_, thread)| thread.analysis_run_id == run.id)
+                .map(|(key, _)| key.clone())
+                .collect::<Vec<_>>();
+            let mut run_changed = false;
+            let is_latest = latest_by_owner
+                .get(&run.user_email.trim().to_ascii_lowercase())
+                .is_some_and(|latest| latest.id == run.id);
+            if is_latest {
+                for thread_key in &thread_keys {
+                    let Some(snapshot) = inner.threads.get(thread_key).cloned() else {
+                        continue;
+                    };
+                    let Some(review) = inner
+                        .manual_review_overrides
+                        .get(&override_storage_key(
+                            &run.user_email,
+                            &snapshot.gmail_thread_id,
+                        ))
+                        .cloned()
+                    else {
+                        continue;
+                    };
+                    let messages = inner.messages.get(thread_key).cloned().unwrap_or_default();
+                    if review.message_fingerprint != message_fingerprint(&messages) {
+                        continue;
+                    }
+                    let changed = snapshot.classification != review.classification
+                        || snapshot.classification_source
+                            != crate::analysis::ClassificationSource::Manual
+                        || snapshot.manual_review_required
+                        || !snapshot.manual_override_applied
+                        || snapshot.notes != review.notes;
+                    if changed {
+                        if let Some(thread) = inner.threads.get_mut(thread_key) {
+                            apply_manual_review_override(thread, &messages, &review);
+                        }
+                        result.updated_threads += 1;
+                        run_changed = true;
+                    }
+                }
+            }
+
+            let threads = inner
+                .threads
+                .values()
+                .filter(|thread| thread.analysis_run_id == run.id)
+                .cloned()
+                .collect::<Vec<_>>();
+            if let Some(stored_run) = inner.runs.get_mut(&run.id) {
+                let metrics = calculate_metrics(
+                    &threads,
+                    stored_run.metrics.ai_input_tokens,
+                    stored_run.metrics.ai_output_tokens,
+                );
+                if run_changed || stored_run.metrics != metrics {
+                    stored_run.metrics = metrics;
+                    result.updated_runs += 1;
+                }
+            }
+        }
+
+        inner.manual_review_inheritance_v2_applied = true;
+        Ok(result)
     }
 
     async fn upsert_mailbox_metadata(
@@ -594,6 +901,9 @@ mod tests {
     use chrono::{Duration, Utc};
 
     use super::*;
+    use crate::analysis::{
+        AnalysisConfig, AnalysisMetrics, AnalysisStatus, Classification, ClassificationSource,
+    };
     use crate::scheduler::model::ScheduleRunStatus;
 
     fn session(id: &str, email: &str, refresh: Option<&str>, age_minutes: i64) -> UserSession {
@@ -653,6 +963,329 @@ mod tests {
             .await
             .unwrap();
         assert!(found.is_none());
+    }
+
+    #[tokio::test]
+    async fn manual_review_metrics_migration_reconciles_once_and_preserves_tokens() {
+        let storage = MemoryStorage::default();
+        let now = Utc::now();
+        let metrics = AnalysisMetrics {
+            ai_input_tokens: 77,
+            ai_output_tokens: 33,
+            ..Default::default()
+        };
+        storage
+            .create_analysis_run(&AnalysisRun {
+                id: "legacy-run".to_string(),
+                user_email: "owner@example.com".to_string(),
+                org_id: None,
+                mailbox_id: None,
+                trigger_type: None,
+                policy_version_id: None,
+                policy_hash: None,
+                policy_snapshot: None,
+                gmail_scope_snapshot: vec![],
+                retention_expires_at: None,
+                data_minimization_mode: None,
+                config: AnalysisConfig {
+                    date_from: "2026-06-01".to_string(),
+                    date_to: "2026-06-02".to_string(),
+                    time_from: "00:00".to_string(),
+                    time_to: "23:59".to_string(),
+                    timezone: "America/Santiago".to_string(),
+                    internal_domains: vec!["example.com".to_string()],
+                    ignored_senders: vec![],
+                    ignored_domains: vec![],
+                    ignored_keywords: vec![],
+                    include_labels: vec![],
+                    exclude_labels: vec![],
+                },
+                status: AnalysisStatus::Completed,
+                progress_message: "done".to_string(),
+                processed_threads: 2,
+                total_candidate_threads: 2,
+                metrics,
+                created_at: now,
+                completed_at: Some(now),
+                error_message: None,
+            })
+            .await
+            .unwrap();
+
+        let legacy_thread =
+            |id: &str, classification: Classification, is_valid_client_request: bool| EmailThread {
+                id: id.to_string(),
+                analysis_run_id: "legacy-run".to_string(),
+                gmail_thread_id: format!("gmail-{id}"),
+                subject: "Legacy".to_string(),
+                normalized_subject: "legacy".to_string(),
+                classification,
+                classification_source: ClassificationSource::Manual,
+                classification_confidence: 1.0,
+                is_valid_client_request,
+                is_answered: false,
+                first_message_at: Some(now),
+                first_client_message_id: None,
+                first_internal_reply_message_id: None,
+                last_internal_message_id: None,
+                first_client_message_at: Some(now),
+                first_internal_reply_at: None,
+                last_internal_message_at: None,
+                response_time_minutes: None,
+                resolution_time_minutes: None,
+                manual_review_required: false,
+                manual_override_applied: true,
+                reasons: vec![],
+                notes: Some("nota histórica".to_string()),
+                created_at: now,
+                updated_at: now,
+            };
+        storage
+            .upsert_thread(
+                &legacy_thread("ambiguous-valid", Classification::Ambiguous, true),
+                &[],
+            )
+            .await
+            .unwrap();
+        storage
+            .upsert_thread(
+                &legacy_thread("misc-valid", Classification::Misc, true),
+                &[],
+            )
+            .await
+            .unwrap();
+
+        let first = storage.reconcile_manual_review_metrics_v1().await.unwrap();
+        assert!(!first.already_applied);
+        assert_eq!(first.scanned_runs, 1);
+        assert_eq!(first.updated_runs, 1);
+        assert_eq!(first.updated_threads, 2);
+
+        let threads = storage.list_threads("legacy-run").await.unwrap();
+        let promoted = threads
+            .iter()
+            .find(|thread| thread.id == "ambiguous-valid")
+            .unwrap();
+        assert_eq!(promoted.classification, Classification::ValidClientRequest);
+        assert!(promoted.is_valid_client_request);
+        assert!(!promoted.manual_review_required);
+        let demoted = threads
+            .iter()
+            .find(|thread| thread.id == "misc-valid")
+            .unwrap();
+        assert_eq!(demoted.classification, Classification::Misc);
+        assert!(!demoted.is_valid_client_request);
+
+        let run = storage
+            .get_analysis_run("legacy-run")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.metrics.total_threads, 2);
+        assert_eq!(run.metrics.valid_requests, 1);
+        assert_eq!(run.metrics.ambiguous, 0);
+        assert_eq!(run.metrics.ignored, 1);
+        assert_eq!(run.metrics.ai_input_tokens, 77);
+        assert_eq!(run.metrics.ai_output_tokens, 33);
+
+        let second = storage.reconcile_manual_review_metrics_v1().await.unwrap();
+        assert!(second.already_applied);
+        assert_eq!(second.scanned_runs, 0);
+        assert_eq!(second.updated_runs, 0);
+        assert_eq!(second.updated_threads, 0);
+    }
+
+    #[tokio::test]
+    async fn manual_review_inheritance_only_applies_to_unchanged_latest_threads() {
+        let storage = MemoryStorage::default();
+        let now = Utc::now();
+        let make_run = |id: &str, created_at| AnalysisRun {
+            id: id.to_string(),
+            user_email: "owner@example.com".to_string(),
+            org_id: None,
+            mailbox_id: None,
+            trigger_type: None,
+            policy_version_id: None,
+            policy_hash: None,
+            policy_snapshot: None,
+            gmail_scope_snapshot: vec![],
+            retention_expires_at: None,
+            data_minimization_mode: None,
+            config: AnalysisConfig {
+                date_from: "2026-06-01".to_string(),
+                date_to: "2026-06-02".to_string(),
+                time_from: "00:00".to_string(),
+                time_to: "23:59".to_string(),
+                timezone: "America/Santiago".to_string(),
+                internal_domains: vec!["example.com".to_string()],
+                ignored_senders: vec![],
+                ignored_domains: vec![],
+                ignored_keywords: vec![],
+                include_labels: vec![],
+                exclude_labels: vec![],
+            },
+            status: AnalysisStatus::Completed,
+            progress_message: "done".to_string(),
+            processed_threads: 2,
+            total_candidate_threads: 2,
+            metrics: AnalysisMetrics {
+                ai_input_tokens: 21,
+                ai_output_tokens: 8,
+                ..Default::default()
+            },
+            created_at,
+            completed_at: Some(created_at),
+            error_message: None,
+        };
+        storage
+            .create_analysis_run(&make_run("old-run", now - Duration::hours(1)))
+            .await
+            .unwrap();
+        storage
+            .create_analysis_run(&make_run("new-run", now))
+            .await
+            .unwrap();
+
+        let make_thread = |run_id: &str, id: &str| EmailThread {
+            id: id.to_string(),
+            analysis_run_id: run_id.to_string(),
+            gmail_thread_id: id.to_string(),
+            subject: id.to_string(),
+            normalized_subject: id.to_string(),
+            classification: Classification::Ambiguous,
+            classification_source: ClassificationSource::Ai,
+            classification_confidence: 0.8,
+            is_valid_client_request: false,
+            is_answered: false,
+            first_message_at: Some(now),
+            first_client_message_id: Some(format!("{id}-client")),
+            first_internal_reply_message_id: None,
+            last_internal_message_id: None,
+            first_client_message_at: Some(now),
+            first_internal_reply_at: None,
+            last_internal_message_at: None,
+            response_time_minutes: None,
+            resolution_time_minutes: None,
+            manual_review_required: true,
+            manual_override_applied: false,
+            reasons: vec![],
+            notes: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let make_message = |id: &str| EmailMessage {
+            id: id.to_string(),
+            gmail_message_id: id.to_string(),
+            from_email: "client@example.net".to_string(),
+            from_name: None,
+            to_emails: vec!["support@example.com".to_string()],
+            cc_emails: vec![],
+            date: now,
+            subject: "Ayuda".to_string(),
+            snippet: "Ayuda".to_string(),
+            headers: serde_json::json!({}),
+            is_internal: false,
+            is_external: true,
+            is_automated: false,
+            body_text: None,
+        };
+
+        for run_id in ["old-run", "new-run"] {
+            storage
+                .upsert_thread(
+                    &make_thread(run_id, "unchanged"),
+                    &[make_message("unchanged-client")],
+                )
+                .await
+                .unwrap();
+        }
+        storage
+            .upsert_thread(
+                &make_thread("old-run", "changed"),
+                &[make_message("changed-client")],
+            )
+            .await
+            .unwrap();
+        storage
+            .upsert_thread(
+                &make_thread("new-run", "changed"),
+                &[
+                    make_message("changed-client"),
+                    make_message("changed-new-message"),
+                ],
+            )
+            .await
+            .unwrap();
+
+        for thread_id in ["unchanged", "changed"] {
+            storage
+                .add_manual_review(
+                    "old-run",
+                    &ManualReview {
+                        id: format!("review-{thread_id}"),
+                        email_thread_id: thread_id.to_string(),
+                        reviewer_label: "owner@example.com".to_string(),
+                        new_classification: Classification::ValidClientRequest,
+                        is_valid_client_request: true,
+                        is_answered: false,
+                        first_client_message_id: Some(format!("{thread_id}-client")),
+                        first_internal_reply_message_id: None,
+                        last_internal_message_id: None,
+                        first_client_message_at: Some(now),
+                        first_internal_reply_at: None,
+                        last_internal_message_at: None,
+                        response_time_minutes: None,
+                        resolution_time_minutes: None,
+                        notes: Some("confirmado".to_string()),
+                        created_at: now,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+
+        let migration = storage
+            .reconcile_manual_review_inheritance_v2()
+            .await
+            .unwrap();
+        assert!(!migration.already_applied);
+        assert_eq!(migration.created_overrides, 2);
+        assert_eq!(migration.updated_threads, 1);
+
+        let unchanged = storage
+            .get_thread("new-run", "unchanged")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.classification, Classification::ValidClientRequest);
+        assert_eq!(
+            unchanged.classification_source,
+            ClassificationSource::Manual
+        );
+        assert!(!unchanged.manual_review_required);
+        assert!(unchanged.manual_override_applied);
+
+        let changed = storage
+            .get_thread("new-run", "changed")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(changed.classification, Classification::Ambiguous);
+        assert!(changed.manual_review_required);
+        assert!(!changed.manual_override_applied);
+
+        let run = storage.get_analysis_run("new-run").await.unwrap().unwrap();
+        assert_eq!(run.metrics.valid_requests, 1);
+        assert_eq!(run.metrics.ambiguous, 1);
+        assert_eq!(run.metrics.pending_review, 1);
+        assert_eq!(run.metrics.ai_input_tokens, 21);
+        assert_eq!(run.metrics.ai_output_tokens, 8);
+
+        let second = storage
+            .reconcile_manual_review_inheritance_v2()
+            .await
+            .unwrap();
+        assert!(second.already_applied);
     }
 
     #[tokio::test]

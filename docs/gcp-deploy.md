@@ -40,6 +40,15 @@ gcloud run deploy "$WEB_SERVICE" \
   --image "${IMAGE_BASE}/web:latest" \
   --region "$GCP_REGION"
 
+## Si agrego env vars
+
+### CORRECTO: agrega/modifica sin borrar el resto (WorkOS, Google, etc. quedan intactos)
+gcloud run services update ghmi-api --region us-central1 \
+--update-env-vars "NUEVA_VAR=valor" --update-secrets "NUEVA=secreto:latest"
+
+### PELIGRO: --set-env-vars REEMPLAZA TODO el entorno → borra WorkOS y todo lo demás
+
+
 
 # Despliegue en GCP
 

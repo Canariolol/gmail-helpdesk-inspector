@@ -25,6 +25,7 @@ export interface Metrics {
   unanswered: number;
   ignored: number;
   ambiguous: number;
+  pending_review: number;
   manual_overrides: number;
   avg_first_response_minutes: number | null;
   median_first_response_minutes: number | null;
@@ -83,6 +84,7 @@ export interface EmailThread {
   manual_review_required: boolean;
   manual_override_applied: boolean;
   reasons: string[];
+  notes: string | null;
   created_at: string;
 }
 

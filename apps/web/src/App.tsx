@@ -45,6 +45,15 @@ const GMAIL_CONNECT_URL = `${API_BASE_URL}/gmail/connect/login`;
 const DATA_VIEWS: AppView[] = ["resumen", "hilos", "revision", "anteriores", "reportes"];
 const BLOCKED_VIEWS: AppView[] = ["cuenta", "configuracion", "privacidad", "ayuda"];
 
+type ManualReviewPayload = {
+  new_classification: EmailThread["classification"];
+  is_answered: boolean;
+  first_client_message_id: string | null;
+  first_internal_reply_message_id: string | null;
+  last_internal_message_id: string | null;
+  notes: string | null;
+};
+
 export function App() {
   const queryClient = useQueryClient();
   const [view, setView] = useState<AppView>("resumen");
@@ -178,9 +187,12 @@ export function App() {
   });
 
   const detail = useQuery({
-    queryKey: ["thread", selectedThreadId],
-    queryFn: () => api<ThreadDetail>(`/threads/${selectedThreadId}`),
-    enabled: Boolean(selectedThreadId) && appUnlocked,
+    queryKey: ["thread", selectedRunId, selectedThreadId],
+    queryFn: () =>
+      api<ThreadDetail>(
+        `/analysis-runs/${selectedRunId}/threads/${selectedThreadId}`,
+      ),
+    enabled: Boolean(selectedRunId && selectedThreadId) && appUnlocked,
   });
 
   const createRun = useMutation({
@@ -206,15 +218,70 @@ export function App() {
   });
 
   const manualReview = useMutation({
-    mutationFn: (payload: unknown) =>
-      api<AnalysisRun>(`/threads/${selectedThreadId}/manual-review`, {
+    mutationFn: (payload: ManualReviewPayload) =>
+      api<AnalysisRun>(
+        `/analysis-runs/${selectedRunId}/threads/${selectedThreadId}/manual-review`,
+        {
         method: "PATCH",
         body: JSON.stringify(payload),
-      }),
-    onSuccess: () => {
+        },
+      ),
+    onSuccess: (updatedRun, payload) => {
+      queryClient.setQueryData<AnalysisRun[]>(["analysis-runs"], (current) =>
+        current?.map((run) => (run.id === updatedRun.id ? updatedRun : run)),
+      );
+      queryClient.setQueryData<EmailThread[]>(
+        ["threads", selectedRunId],
+        (current) =>
+          current?.map((thread) =>
+            thread.id === selectedThreadId
+              ? {
+                  ...thread,
+                  classification: payload.new_classification,
+                  classification_source: "manual",
+                  is_valid_client_request:
+                    payload.new_classification === "valid_client_request",
+                  is_answered: payload.is_answered,
+                  first_client_message_id: payload.first_client_message_id,
+                  first_internal_reply_message_id:
+                    payload.first_internal_reply_message_id,
+                  last_internal_message_id: payload.last_internal_message_id,
+                  manual_review_required: false,
+                  manual_override_applied: true,
+                  notes: payload.notes,
+                }
+              : thread,
+          ),
+      );
+      queryClient.setQueryData<ThreadDetail>(
+        ["thread", selectedRunId, selectedThreadId],
+        (current) =>
+          current
+            ? {
+                ...current,
+                thread: {
+                  ...current.thread,
+                  classification: payload.new_classification,
+                  classification_source: "manual",
+                  is_valid_client_request:
+                    payload.new_classification === "valid_client_request",
+                  is_answered: payload.is_answered,
+                  first_client_message_id: payload.first_client_message_id,
+                  first_internal_reply_message_id:
+                    payload.first_internal_reply_message_id,
+                  last_internal_message_id: payload.last_internal_message_id,
+                  manual_review_required: false,
+                  manual_override_applied: true,
+                  notes: payload.notes,
+                },
+              }
+            : current,
+      );
       queryClient.invalidateQueries({ queryKey: ["analysis-runs"] });
       queryClient.invalidateQueries({ queryKey: ["threads", selectedRunId] });
-      queryClient.invalidateQueries({ queryKey: ["thread", selectedThreadId] });
+      queryClient.invalidateQueries({
+        queryKey: ["thread", selectedRunId, selectedThreadId],
+      });
       setReviewSavedAt(Date.now());
     },
   });
@@ -298,11 +365,6 @@ export function App() {
     setSelectedRunId(id);
     setSelectedThreadId(null);
     setView("resumen");
-  };
-
-  const handleMetricFilter = (filter: string) => {
-    setThreadFilter(filter);
-    setView("hilos");
   };
 
   const handleLogout = () => {
@@ -446,12 +508,11 @@ export function App() {
             threads={threadItems}
             threadFilter={threadFilter}
             onThreadFilter={setThreadFilter}
-            onMetricFilter={handleMetricFilter}
             selectedThreadId={selectedThreadId}
             onSelectThread={handleSelectThread}
             onCloseThread={handleCloseThread}
             detail={detail.data}
-            onReview={(payload) => manualReview.mutate(payload)}
+            onReview={(payload) => manualReview.mutate(payload as ManualReviewPayload)}
             savingReview={manualReview.isPending}
             reviewError={manualReview.error?.message ?? null}
             reviewSavedAt={reviewSavedAt}
@@ -459,7 +520,6 @@ export function App() {
             analyzing={createRun.isPending || startRun.isPending}
             onStartRun={() => selectedRun && startRun.mutate(selectedRun.id)}
             startingRun={startRun.isPending}
-            onViewDetails={() => setView("hilos")}
             orgConfig={currentOrgConfig}
             onGoToSetup={handleGoToSetup}
             filterPresets={filterPresets.data ?? []}
@@ -478,7 +538,7 @@ export function App() {
             onSelectThread={handleSelectThread}
             onCloseThread={handleCloseThread}
             detail={detail.data}
-            onReview={(payload) => manualReview.mutate(payload)}
+            onReview={(payload) => manualReview.mutate(payload as ManualReviewPayload)}
             savingReview={manualReview.isPending}
             reviewError={manualReview.error?.message ?? null}
             reviewSavedAt={reviewSavedAt}

@@ -2,8 +2,8 @@ import { FileSearch, Plug, ShieldCheck, Sparkles } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
 export const BRAND = {
-  name: "Gmail Helpdesk Inspector",
-  short: "Helpdesk Inspector",
+  name: "Mira Helpdesk",
+  short: "Mira",
   // La cuenta se crea con WorkOS; Gmail se conecta después, aparte.
   betaTag: "Beta privada · sin reemplazar tu correo",
 };
@@ -71,18 +71,18 @@ export interface Step {
 export const STEPS: Step[] = [
   {
     n: 1,
-    title: "Crea tu cuenta",
-    body: "Cuenta segura con WorkOS. Eliges plan mensual o activas la prueba de 30 días del plan Pro.",
+    title: "Conecta tu correo",
+    body: "Enlazas tu casilla de soporte en un par de clics. Mira lee los hilos para medir",
   },
   {
     n: 2,
-    title: "Conecta tu Gmail",
-    body: "Recién aquí autorizas Gmail, con acceso de solo lectura. No tocamos tu bandeja.",
+    title: "Ajústalo a tu manera",
+    body: "Eliges qué cuenta como solicitud, qué ignorar, etc. Todo es configurable.",
   },
   {
     n: 3,
-    title: "Lee tus métricas",
-    body: "Reportes con trazabilidad al hilo real y una cola clara de casos ambiguos.",
+    title: "Métricas automáticas",
+    body: "Mira te enviará un informe recurrente con tus KPIs y también puedes realizar el análisis de forma proactiva",
   },
 ];
 

@@ -1,4 +1,5 @@
 import { AlertTriangle, CheckCheck, CheckCircle2, Clock, Gauge, HelpCircle, Mail, Reply, ShieldCheck, Timer } from "lucide-react";
+import { useRef } from "react";
 import type { AnalysisRun, EmailThread, FilterPreset, OrgConfig, ThreadDetail } from "../api/types";
 import { ClassificationBarChart } from "../components/charts/ClassificationBarChart";
 import { CompositionDonut } from "../components/charts/CompositionDonut";
@@ -16,7 +17,6 @@ type Props = {
   threads: EmailThread[];
   threadFilter: string;
   onThreadFilter: (filter: string) => void;
-  onMetricFilter: (filter: string) => void;
   selectedThreadId: string | null;
   onSelectThread: (id: string) => void;
   onCloseThread: () => void;
@@ -29,7 +29,6 @@ type Props = {
   analyzing: boolean;
   onStartRun: () => void;
   startingRun: boolean;
-  onViewDetails: () => void;
   orgConfig?: OrgConfig | null;
   onGoToSetup?: () => void;
   filterPresets?: FilterPreset[];
@@ -41,9 +40,24 @@ type Props = {
 export function ResumenView(props: Props) {
   const { run } = props;
   const visibleThreads = filterThreads(props.threads, props.threadFilter);
+  const threadsSectionRef = useRef<HTMLDivElement>(null);
   const setupNotReady = props.orgConfig !== null && props.orgConfig !== undefined
     && !props.orgConfig.setup_state.ready_for_analysis
     && props.orgConfig.account_unrestricted !== true;
+
+  // Aplica un filtro y baja a "Hilos auditables" sin abandonar Resumen. Cierra
+  // cualquier detalle abierto para no mostrar un hilo fuera del nuevo filtro.
+  const focusThreads = (filter: string) => {
+    props.onThreadFilter(filter);
+    if (props.selectedThreadId) {
+      props.onCloseThread();
+    }
+    const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    threadsSectionRef.current?.scrollIntoView({
+      behavior: prefersReducedMotion ? "auto" : "smooth",
+      block: "start",
+    });
+  };
 
   return (
     <div className="view">
@@ -70,7 +84,6 @@ export function ResumenView(props: Props) {
         loading={props.analyzing}
         onAnalyze={props.onAnalyze}
         orgConfig={props.orgConfig}
-        onGoToSetup={props.onGoToSetup}
         filterPresets={props.filterPresets}
         onSavePreset={props.onSavePreset}
         onDeletePreset={props.onDeletePreset}
@@ -94,32 +107,34 @@ export function ResumenView(props: Props) {
       ) : (
         <div className="split-view">
           <div className="view-col">
-            <StatusBanner run={run} onStart={props.onStartRun} starting={props.startingRun} onViewDetails={props.onViewDetails} />
+            <StatusBanner run={run} onStart={props.onStartRun} starting={props.startingRun} onViewDetails={() => focusThreads("all")} />
             <div className="metric-grid primary">
-              <MetricCard icon={Mail} label="Total analizados" value={run.metrics.total_threads} tone="blue" onClick={() => props.onMetricFilter("all")} />
-              <MetricCard icon={CheckCircle2} label="Válidos" value={run.metrics.valid_requests} tone="mint" onClick={() => props.onMetricFilter("valid_client_request")} />
-              <MetricCard icon={Reply} label="Respondidos" value={run.metrics.answered} tone="teal" onClick={() => props.onMetricFilter("answered")} />
-              <MetricCard icon={Clock} label="Sin respuesta" value={run.metrics.unanswered} tone="orange" onClick={() => props.onMetricFilter("unanswered")} />
-              <MetricCard icon={HelpCircle} label="Ambiguos" value={run.metrics.ambiguous} tone="amber" onClick={() => props.onMetricFilter("review")} />
+              <MetricCard icon={Mail} label="Total analizados" value={run.metrics.total_threads} tone="blue" onClick={() => focusThreads("all")} />
+              <MetricCard icon={CheckCircle2} label="Válidos" value={run.metrics.valid_requests} tone="mint" onClick={() => focusThreads("valid_client_request")} />
+              <MetricCard icon={Reply} label="Respondidos" value={run.metrics.answered} tone="teal" onClick={() => focusThreads("answered")} />
+              <MetricCard icon={Clock} label="Sin respuesta" value={run.metrics.unanswered} tone="orange" onClick={() => focusThreads("unanswered")} />
+              <MetricCard icon={HelpCircle} label="Pendientes de revisión" value={run.metrics.pending_review} tone="amber" onClick={() => focusThreads("review")} />
               <MetricCard icon={ShieldCheck} label="Confianza" value={formatPercent(run.metrics.report_confidence)} tone="purple" />
             </div>
             <div className="metric-grid times">
-              <MetricCard icon={Timer} label="T. medio respuesta" value={formatDuration(run.metrics.avg_first_response_minutes)} tone="gray" onClick={() => props.onMetricFilter("answered")} />
-              <MetricCard icon={Gauge} label="P90 respuesta" value={formatDuration(run.metrics.p90_first_response_minutes)} tone="gray" onClick={() => props.onMetricFilter("answered")} />
-              <MetricCard icon={CheckCheck} label="Cierre medio" value={formatDuration(run.metrics.avg_resolution_minutes)} tone="gray" onClick={() => props.onMetricFilter("answered")} />
+              <MetricCard icon={Timer} label="T. medio respuesta" value={formatDuration(run.metrics.avg_first_response_minutes)} tone="gray" onClick={() => focusThreads("answered")} />
+              <MetricCard icon={Gauge} label="P90 respuesta" value={formatDuration(run.metrics.p90_first_response_minutes)} tone="gray" onClick={() => focusThreads("answered")} />
+              <MetricCard icon={CheckCheck} label="Cierre medio" value={formatDuration(run.metrics.avg_resolution_minutes)} tone="gray" onClick={() => focusThreads("answered")} />
             </div>
             <div className="charts-row">
               <ClassificationBarChart metrics={run.metrics} />
               <CompositionDonut metrics={run.metrics} />
             </div>
-            <ThreadTable
-              title="Hilos auditables"
-              threads={visibleThreads}
-              filter={props.threadFilter}
-              onFilter={props.onThreadFilter}
-              selectedThreadId={props.selectedThreadId}
-              onSelect={props.onSelectThread}
-            />
+            <div ref={threadsSectionRef} className="threads-anchor">
+              <ThreadTable
+                title="Hilos auditables"
+                threads={visibleThreads}
+                filter={props.threadFilter}
+                onFilter={props.onThreadFilter}
+                selectedThreadId={props.selectedThreadId}
+                onSelect={props.onSelectThread}
+              />
+            </div>
           </div>
           <ThreadDetailRail
             detail={props.detail}

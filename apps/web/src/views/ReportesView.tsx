@@ -66,7 +66,7 @@ export function ReportesView({ runs }: Props) {
             <MetricCard icon={CheckCircle2} label="Válidas" value={totals.validRequests} tone="mint" />
             <MetricCard icon={Reply} label="Respondidas" value={totals.answered} tone="teal" />
             <MetricCard icon={Clock} label="Sin respuesta" value={totals.unanswered} tone="orange" />
-            <MetricCard icon={HelpCircle} label="Ambiguas" value={totals.ambiguous} tone="amber" />
+            <MetricCard icon={HelpCircle} label="Pendientes de revisión" value={totals.pendingReview} tone="amber" />
           </div>
           <div className="metric-grid primary">
             <MetricCard icon={Ban} label="Ignoradas" value={totals.ignored} tone="gray" />

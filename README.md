@@ -1,4 +1,4 @@
-# Gmail Helpdesk Metrics Inspector
+# Mira Helpdesk
 
 ## TL;DR
 

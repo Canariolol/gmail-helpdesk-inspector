@@ -49,7 +49,7 @@ pub fn build_report_email(
     let body = format!(
         "{}{}{}{}",
         metrics_section(run),
-        findings_section(run, review_items.len()),
+        findings_section(run),
         review_section(review_items),
         cta_section(web_base_url)
     );
@@ -152,6 +152,11 @@ fn metrics_section(run: &AnalysisRun) -> String {
             None,
         ),
         metric_card("Hilos ambiguos", &metrics.ambiguous.to_string(), None),
+        metric_card(
+            "Pendientes de revisión",
+            &metrics.pending_review.to_string(),
+            None,
+        ),
         metric_card("Descartados", &metrics.ignored.to_string(), None),
         metric_card(
             "Confianza del reporte",
@@ -195,7 +200,7 @@ fn metric_card(label: &str, value: &str, colors: Option<(&str, &str)>) -> String
     )
 }
 
-fn findings_section(run: &AnalysisRun, review_count: usize) -> String {
+fn findings_section(run: &AnalysisRun) -> String {
     let metrics = &run.metrics;
     let mut findings = Vec::new();
     if metrics.unanswered > 0 {
@@ -213,10 +218,11 @@ fn findings_section(run: &AnalysisRun, review_count: usize) -> String {
             plural(metrics.ambiguous, "hilo quedó", "hilos quedaron"),
         ));
     }
-    if review_count > 0 {
+    if metrics.pending_review > 0 {
         findings.push(format!(
-            "<strong>{review_count}</strong> {} tu revisión manual (detalle más abajo).",
-            plural(review_count as u64, "hilo espera", "hilos esperan"),
+            "<strong>{}</strong> {} tu revisión manual (detalle más abajo).",
+            metrics.pending_review,
+            plural(metrics.pending_review, "hilo espera", "hilos esperan"),
         ));
     }
     if findings.is_empty() {

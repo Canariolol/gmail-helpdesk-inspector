@@ -11,7 +11,7 @@ export function ThreadFilterSelect({ value, onChange }: Props) {
       <option value="answered">Respondidas</option>
       <option value="unanswered">Sin respuesta</option>
       <option value="review">Revisión pendiente</option>
-      <option value="misc">Ignorados</option>
+      <option value="ignored">Ignorados</option>
     </select>
   );
 }

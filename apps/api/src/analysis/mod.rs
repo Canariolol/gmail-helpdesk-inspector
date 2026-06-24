@@ -1,6 +1,7 @@
 use chrono::{DateTime, NaiveTime, Utc};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::policies::PolicySnapshot;
 
@@ -76,7 +77,7 @@ fn default_timezone() -> String {
 
 /// Count of threads per final classification, so wrongly-suppressed threads
 /// (which fold into `ignored`) are visible instead of vanishing silently.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ClassificationBreakdown {
     #[serde(default)]
     pub valid_client_request: u64,
@@ -94,7 +95,7 @@ pub struct ClassificationBreakdown {
     pub ambiguous: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AnalysisMetrics {
     pub total_threads: u64,
     pub valid_requests: u64,
@@ -102,6 +103,8 @@ pub struct AnalysisMetrics {
     pub unanswered: u64,
     pub ignored: u64,
     pub ambiguous: u64,
+    #[serde(default)]
+    pub pending_review: u64,
     pub manual_overrides: u64,
     pub avg_first_response_minutes: Option<f64>,
     pub median_first_response_minutes: Option<f64>,
@@ -126,6 +129,7 @@ impl Default for AnalysisMetrics {
             unanswered: 0,
             ignored: 0,
             ambiguous: 0,
+            pending_review: 0,
             manual_overrides: 0,
             avg_first_response_minutes: None,
             median_first_response_minutes: None,
@@ -228,6 +232,8 @@ pub struct EmailThread {
     pub manual_review_required: bool,
     pub manual_override_applied: bool,
     pub reasons: Vec<String>,
+    #[serde(default)]
+    pub notes: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -278,6 +284,109 @@ pub struct ManualReview {
     pub resolution_time_minutes: Option<i64>,
     pub notes: Option<String>,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManualReviewOverride {
+    pub owner_email: String,
+    pub gmail_thread_id: String,
+    pub source_run_id: String,
+    pub message_fingerprint: String,
+    pub reviewer_label: String,
+    pub classification: Classification,
+    pub is_answered: bool,
+    pub first_client_message_id: Option<String>,
+    pub first_internal_reply_message_id: Option<String>,
+    pub last_internal_message_id: Option<String>,
+    pub notes: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+pub fn message_fingerprint(messages: &[EmailMessage]) -> String {
+    let mut ids = messages
+        .iter()
+        .map(|message| message.id.as_str())
+        .collect::<Vec<_>>();
+    ids.sort_unstable();
+    ids.dedup();
+    let mut hasher = Sha256::new();
+    for id in ids {
+        hasher.update(id.as_bytes());
+        hasher.update([0]);
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+pub fn apply_manual_review_override(
+    thread: &mut EmailThread,
+    messages: &[EmailMessage],
+    review: &ManualReviewOverride,
+) {
+    thread.classification = review.classification.clone();
+    thread.classification_source = ClassificationSource::Manual;
+    thread.classification_confidence = 1.0;
+    thread.is_valid_client_request = thread.classification == Classification::ValidClientRequest;
+    thread.is_answered = review.is_answered;
+    thread.first_client_message_id = review.first_client_message_id.clone();
+    thread.first_internal_reply_message_id = review.first_internal_reply_message_id.clone();
+    thread.last_internal_message_id = review.last_internal_message_id.clone();
+    thread.first_client_message_at = thread
+        .first_client_message_id
+        .as_ref()
+        .and_then(|id| messages.iter().find(|message| &message.id == id))
+        .map(|message| message.date);
+    thread.first_internal_reply_at = thread
+        .first_internal_reply_message_id
+        .as_ref()
+        .and_then(|id| messages.iter().find(|message| &message.id == id))
+        .map(|message| message.date);
+    thread.last_internal_message_at = thread
+        .last_internal_message_id
+        .as_ref()
+        .and_then(|id| messages.iter().find(|message| &message.id == id))
+        .map(|message| message.date);
+    thread.response_time_minutes = thread
+        .first_client_message_at
+        .zip(thread.first_internal_reply_at)
+        .map(|(client, reply)| (reply - client).num_minutes());
+    thread.resolution_time_minutes = thread
+        .first_client_message_at
+        .zip(thread.last_internal_message_at)
+        .map(|(client, last)| (last - client).num_minutes());
+    thread.notes = review.notes.clone();
+    thread.manual_review_required = false;
+    thread.manual_override_applied = true;
+    thread.reasons.push(
+        "Se heredó una revisión manual previa porque el hilo no tuvo mensajes nuevos.".to_string(),
+    );
+    thread.updated_at = Utc::now();
+}
+
+/// Normaliza documentos creados por la versión antigua del formulario, donde
+/// clasificación y validez podían guardarse de forma independiente.
+///
+/// La única excepción de migración es `Ambiguous + is_valid=true`: esa
+/// combinación solo podía expresar que el usuario marcó la antigua casilla
+/// "Solicitud válida" sin cambiar el desplegable, por lo que se promueve a
+/// `ValidClientRequest`. Las notas nunca se interpretan.
+pub fn reconcile_legacy_thread_classification(thread: &mut EmailThread) -> bool {
+    let original_classification = thread.classification.clone();
+    let original_is_valid = thread.is_valid_client_request;
+    let original_manual_review_required = thread.manual_review_required;
+
+    if thread.classification == Classification::Ambiguous && thread.is_valid_client_request {
+        thread.classification = Classification::ValidClientRequest;
+        thread.manual_review_required = false;
+    }
+    thread.is_valid_client_request = thread.classification == Classification::ValidClientRequest;
+
+    let changed = thread.classification != original_classification
+        || thread.is_valid_client_request != original_is_valid
+        || thread.manual_review_required != original_manual_review_required;
+    if changed {
+        thread.updated_at = Utc::now();
+    }
+    changed
 }
 
 pub fn normalize_subject(subject: &str) -> String {
@@ -623,6 +732,7 @@ fn build_thread(
         manual_review_required,
         manual_override_applied: false,
         reasons,
+        notes: None,
         created_at: now,
         updated_at: now,
     }
@@ -738,17 +848,21 @@ pub fn calculate_metrics(
     let total_threads = threads.len() as u64;
     let valid: Vec<_> = threads
         .iter()
-        .filter(|t| t.is_valid_client_request)
+        .filter(|t| t.classification == Classification::ValidClientRequest)
         .collect();
     let valid_requests = valid.len() as u64;
     let answered = valid.iter().filter(|t| t.is_answered).count() as u64;
     let ambiguous = threads
         .iter()
-        .filter(|t| t.classification == Classification::Ambiguous || t.manual_review_required)
+        .filter(|t| t.classification == Classification::Ambiguous)
         .count() as u64;
+    let pending_review = threads.iter().filter(|t| t.manual_review_required).count() as u64;
     let ignored = threads
         .iter()
-        .filter(|t| !t.is_valid_client_request && t.classification != Classification::Ambiguous)
+        .filter(|t| {
+            t.classification != Classification::ValidClientRequest
+                && t.classification != Classification::Ambiguous
+        })
         .count() as u64;
     let manual_overrides = threads.iter().filter(|t| t.manual_override_applied).count() as u64;
     let mut response_times: Vec<f64> = valid
@@ -765,7 +879,7 @@ pub fn calculate_metrics(
     let confidence = if total_threads == 0 {
         1.0
     } else {
-        (1.0 - (ambiguous as f64 / total_threads as f64)).clamp(0.0, 1.0)
+        (1.0 - (pending_review as f64 / total_threads as f64)).clamp(0.0, 1.0)
     };
 
     let mut classification_breakdown = ClassificationBreakdown::default();
@@ -790,6 +904,7 @@ pub fn calculate_metrics(
         unanswered: valid_requests.saturating_sub(answered),
         ignored,
         ambiguous,
+        pending_review,
         manual_overrides,
         avg_first_response_minutes: average(&response_times),
         median_first_response_minutes: percentile(&response_times, 0.5),
@@ -1087,6 +1202,39 @@ mod tests {
         assert_eq!(metrics.answered, 1);
         assert_eq!(metrics.unanswered, 0);
         assert_eq!(metrics.ai_input_tokens, 12);
+    }
+
+    #[test]
+    fn pending_review_is_separate_from_exclusive_classification_totals() {
+        let base = valid_thread_with_subject("Solicitud");
+        let valid_pending = EmailThread {
+            manual_review_required: true,
+            ..base.clone()
+        };
+        let ignored_pending = EmailThread {
+            classification: Classification::Misc,
+            is_valid_client_request: false,
+            manual_review_required: true,
+            ..base.clone()
+        };
+        let ambiguous = EmailThread {
+            classification: Classification::Ambiguous,
+            is_valid_client_request: false,
+            manual_review_required: true,
+            ..base
+        };
+        let metrics = calculate_metrics(&[valid_pending, ignored_pending, ambiguous], 0, 0);
+
+        assert_eq!(metrics.total_threads, 3);
+        assert_eq!(metrics.valid_requests, 1);
+        assert_eq!(metrics.ignored, 1);
+        assert_eq!(metrics.ambiguous, 1);
+        assert_eq!(metrics.pending_review, 3);
+        assert_eq!(
+            metrics.valid_requests + metrics.ignored + metrics.ambiguous,
+            metrics.total_threads
+        );
+        assert_eq!(metrics.report_confidence, 0.0);
     }
 
     #[test]

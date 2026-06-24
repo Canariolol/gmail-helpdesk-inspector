@@ -96,7 +96,7 @@ export function FocusLanding({ onLogin, onSignup }: VariantProps) {
 
         <Reveal className="lp-focus-section">
           <span className="lp-focus-eyebrow">Cómo funciona</span>
-          <h2>Tres pasos. Sin servidores.</h2>
+          <h2>Tres pasos y listo.</h2>
           <ol className="lp-focus-steps-row">
             {STEPS.map((step) => (
               <li key={step.n}>

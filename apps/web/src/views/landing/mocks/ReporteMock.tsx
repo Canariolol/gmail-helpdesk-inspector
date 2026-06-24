@@ -20,7 +20,7 @@ export function ReporteMock() {
 
       <div className="lp-rep-meta">
         <p>
-          <span>De</span> Helpdesk Inspector
+          <span>De</span> Mira
         </p>
         <p>
           <span>Para</span> equipo@empresa.cl

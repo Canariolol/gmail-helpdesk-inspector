@@ -16,7 +16,7 @@ export function AyudaView() {
   return (
     <div className="view ayuda">
       <section className="card">
-        <h2>Cómo usar Gmail Inspector</h2>
+        <h2>Cómo usar Mira</h2>
         <ol className="help-steps">
           <li>
             <strong>Configura y analiza.</strong> En <em>Resumen</em>, define el rango de fechas y horario, los dominios
@@ -62,7 +62,8 @@ export function AyudaView() {
           </li>
           <li><strong>P90 respuesta:</strong> el 90% de las solicitudes se respondió en este tiempo o menos.</li>
           <li><strong>Cierre medio:</strong> promedio entre la recepción y el último envío interno del hilo.</li>
-          <li><strong>Confianza:</strong> certeza promedio de la clasificación automática (reglas + IA).</li>
+          <li><strong>Pendientes de revisión:</strong> hilos donde reglas o IA requieren confirmación humana; pueden tener un estado tentativo mientras esperan revisión.</li>
+          <li><strong>Confianza:</strong> proporción de hilos que no están pendientes de revisión manual.</li>
         </ul>
       </section>
       <section className="card">
@@ -70,7 +71,7 @@ export function AyudaView() {
         <PrivacyCallout />
         <ul className="help-list plain">
           <li>El permiso de Gmail usado por la aplicación es exclusivamente <code>gmail.readonly</code>.</li>
-          <li>Gmail Inspector no envía, etiqueta, archiva, edita ni elimina correos.</li>
+          <li>Mira no envía, etiqueta, archiva, edita ni elimina correos.</li>
           <li>Los cuerpos completos se usan solo durante el análisis/auditoría y no se persisten en Firestore.</li>
           <li>Las métricas guardan trazabilidad: puedes revisar qué hilos componen cada número.</li>
         </ul>

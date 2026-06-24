@@ -44,6 +44,29 @@ async fn main() -> anyhow::Result<()> {
     } else {
         Arc::new(FirestoreStorage::new(config.firestore.clone())?)
     };
+    let migration = storage.reconcile_manual_review_metrics_v1().await?;
+    if migration.already_applied {
+        tracing::info!("manual review metrics migration already applied");
+    } else {
+        tracing::info!(
+            scanned_runs = migration.scanned_runs,
+            updated_runs = migration.updated_runs,
+            updated_threads = migration.updated_threads,
+            "manual review metrics migration completed"
+        );
+    }
+    let inheritance = storage.reconcile_manual_review_inheritance_v2().await?;
+    if inheritance.already_applied {
+        tracing::info!("manual review inheritance migration already applied");
+    } else {
+        tracing::info!(
+            scanned_runs = inheritance.scanned_runs,
+            created_overrides = inheritance.created_overrides,
+            updated_runs = inheritance.updated_runs,
+            updated_threads = inheritance.updated_threads,
+            "manual review inheritance migration completed"
+        );
+    }
 
     let state = AppState::new(config.clone(), storage);
     if config.scheduler.enabled {

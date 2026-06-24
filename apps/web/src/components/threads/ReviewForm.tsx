@@ -15,11 +15,10 @@ type Props = {
 export function ReviewForm({ detail, onReview, saving, reviewError, reviewSavedAt }: Props) {
   const [classification, setClassification] = useState<Classification>(detail.thread.classification);
   const [answered, setAnswered] = useState(detail.thread.is_answered);
-  const [valid, setValid] = useState(detail.thread.is_valid_client_request);
   const [firstClient, setFirstClient] = useState(detail.thread.first_client_message_id ?? "");
   const [firstReply, setFirstReply] = useState(detail.thread.first_internal_reply_message_id ?? "");
   const [lastInternal, setLastInternal] = useState(detail.thread.last_internal_message_id ?? "");
-  const [notes, setNotes] = useState("");
+  const [notes, setNotes] = useState(detail.thread.notes ?? "");
   const [savedFlash, setSavedFlash] = useState(false);
 
   // reviewSavedAt cambia con cada guardado exitoso. Como el form se remonta por
@@ -46,7 +45,6 @@ export function ReviewForm({ detail, onReview, saving, reviewError, reviewSavedA
         event.preventDefault();
         onReview({
           new_classification: classification,
-          is_valid_client_request: valid,
           is_answered: answered,
           first_client_message_id: firstClient || null,
           first_internal_reply_message_id: firstReply || null,
@@ -65,10 +63,6 @@ export function ReviewForm({ detail, onReview, saving, reviewError, reviewSavedA
             </option>
           ))}
         </select>
-      </label>
-      <label className="checkline">
-        <input type="checkbox" checked={valid} onChange={(event) => setValid(event.target.checked)} />
-        Solicitud válida
       </label>
       <label className="checkline">
         <input type="checkbox" checked={answered} onChange={(event) => setAnswered(event.target.checked)} />

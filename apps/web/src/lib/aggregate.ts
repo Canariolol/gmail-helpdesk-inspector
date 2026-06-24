@@ -8,6 +8,7 @@ export interface ReportTotals {
   unanswered: number;
   ignored: number;
   ambiguous: number;
+  pendingReview: number;
   manualOverrides: number;
   aiInputTokens: number;
   aiOutputTokens: number;
@@ -28,6 +29,7 @@ export interface RunTrendPoint {
   unanswered: number;
   ignored: number;
   ambiguous: number;
+  pendingReview: number;
   confidence: number;
 }
 
@@ -70,6 +72,7 @@ export function aggregateRuns(runs: AnalysisRun[]): ReportTotals {
     unanswered: sumMetric(runs, (m) => m.unanswered),
     ignored: sumMetric(runs, (m) => m.ignored),
     ambiguous: sumMetric(runs, (m) => m.ambiguous),
+    pendingReview: sumMetric(runs, (m) => m.pending_review),
     manualOverrides: sumMetric(runs, (m) => m.manual_overrides),
     aiInputTokens: sumMetric(runs, (m) => m.ai_input_tokens),
     aiOutputTokens: sumMetric(runs, (m) => m.ai_output_tokens),
@@ -98,6 +101,7 @@ export function buildTrendPoints(runs: AnalysisRun[]): RunTrendPoint[] {
       unanswered: run.metrics.unanswered,
       ignored: run.metrics.ignored,
       ambiguous: run.metrics.ambiguous,
+      pendingReview: run.metrics.pending_review,
       confidence: run.metrics.report_confidence,
     }));
 }
