@@ -3,8 +3,13 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 
-from ai_worker.bedrock import audit_with_bedrock
-from ai_worker.schemas import AuditThreadRequest, AuditThreadResponse
+from ai_worker.bedrock import audit_batch_with_bedrock, audit_with_bedrock
+from ai_worker.schemas import (
+    AuditThreadRequest,
+    AuditThreadResponse,
+    BatchAuditRequest,
+    BatchAuditResponse,
+)
 from ai_worker.settings import Settings
 
 settings = Settings()
@@ -31,5 +36,15 @@ async def health() -> dict[str, bool]:
 async def audit_thread(payload: AuditThreadRequest, request: Request) -> AuditThreadResponse:
     try:
         return await audit_with_bedrock(payload, settings, request.app.state.bedrock_client)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post("/audit/batch", response_model=BatchAuditResponse)
+async def audit_batch(payload: BatchAuditRequest, request: Request) -> BatchAuditResponse:
+    try:
+        return await audit_batch_with_bedrock(
+            payload, settings, request.app.state.bedrock_client
+        )
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc

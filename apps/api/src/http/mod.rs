@@ -1,7 +1,7 @@
 mod internal;
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     convert::Infallible,
     sync::Arc,
     time::Duration,
@@ -1362,6 +1362,8 @@ async fn clear_other_default_presets(
 
 #[derive(Debug, Deserialize, Default)]
 struct OrgConfigUpdateRequest {
+    #[serde(default)]
+    finalize: bool,
     org: Option<OrgUpdateRequest>,
     mailbox: Option<MailboxUpdateRequest>,
     analysis_policy: Option<AnalysisPolicyUpdateRequest>,
@@ -1442,7 +1444,12 @@ async fn update_org_config(
     let unrestricted = state
         .config
         .is_privileged_account(&session.google_account_email);
+    let finalize = request.finalize;
     apply_org_config_update(&mut bundle, request, unrestricted)?;
+    let next_setup = setup_state(&bundle.draft);
+    if finalize && !next_setup.ready_for_analysis {
+        return Err(ApiError::incomplete_config(next_setup.missing));
+    }
     let now = Utc::now();
     bundle.org.updated_at = now;
     bundle.draft.updated_at = now;
@@ -1462,7 +1469,7 @@ async fn update_org_config(
     sync_schedule_config_from_policy(&state, &bundle).await?;
     Ok(Json(UpdateOrgConfigResponse {
         policy_version: bundle.policy_version,
-        setup_state: setup_state(&bundle.draft),
+        setup_state: next_setup,
     }))
 }
 
@@ -2310,9 +2317,6 @@ pub(crate) async fn execute_analysis(
     // Recuperamos con holgura cuando hay tope finito (Free), para que el tope de
     // analizados pueda llenarse pese a los descartes del embudo.
     let retrieval_max = retrieval_max_for(has_finite_run_cap, analyzed_cap, policy_max).max(1);
-    // Free audita TODOS los hilos analizados (no una muestra): es el mejor demo y el
-    // costo queda acotado por el tope. Los planes de pago conservan el muestreo.
-    let audit_all = matches!(plan.id, BillingPlanId::Gratis);
 
     let page = state
         .gmail
@@ -2326,49 +2330,43 @@ pub(crate) async fn execute_analysis(
 
     let mut ai_input_tokens = 0u64;
     let mut ai_output_tokens = 0u64;
-    let mut ai_audited_threads = 0u32;
+    let mut ai_unique_thread_ids = HashSet::new();
     // Embudo de diagnóstico: contamos los descartes previos a la clasificación
     // (que no se guardan en ningún lado) y guardamos una muestra acotada para que
     // el usuario vea CUÁLES hilos se cayeron y por qué.
     let mut funnel = AnalysisFunnel::default();
 
-    // Process threads with bounded concurrency: each thread's Gmail fetch, local
-    // classification, AI audit and storage writes are independent, so we run up to
-    // ANALYSIS_CONCURRENCY of them at once instead of strictly one-at-a-time.
+    // Primera fase: Gmail + filtros + heurística local. No se llama a IA todavía,
+    // para poder agrupar los candidatos humanos y reutilizar la política por lote.
     let config = run.config.clone();
     let policy_snapshot = run.policy_snapshot.clone();
     let policy_version_id = run.policy_version_id.clone();
     let owner_email = run.user_email.clone();
     let run_id = run.id.clone();
     let total = run.total_candidate_threads;
-    // Hilos analizados (guardados) y saltados por tope del plan. El contador atómico
-    // reparte los cupos del tope entre las tareas concurrentes: cada hilo que
-    // sobrevive el embudo reclama un slot; los que exceden el tope se saltan.
     let mut stored = 0u64;
     let mut skipped_by_plan_cap = 0u64;
+    let mut prepared_threads = Vec::new();
     {
         let state_ref = &state;
         let access_ref = access_token.as_str();
         let config_ref = &config;
         let policy_ref = policy_snapshot.as_ref();
-        let policy_version_id_ref = policy_version_id.as_deref();
         let run_id_ref = run_id.as_str();
         let owner_email_ref = owner_email.as_str();
         let analyzed_slot = std::sync::atomic::AtomicU32::new(0);
         let analyzed_slot_ref = &analyzed_slot;
         let mut task_stream = stream::iter(thread_ids.into_iter().map(|thread_id| async move {
-            process_one_thread(
+            prepare_one_thread(
                 state_ref,
                 access_ref,
                 run_id_ref,
                 config_ref,
                 ThreadProcessingContext {
                     policy_snapshot: policy_ref,
-                    policy_version_id: policy_version_id_ref,
                     owner_email: owner_email_ref,
                     analyzed_slot: analyzed_slot_ref,
                     analyzed_cap,
-                    audit_all,
                 },
                 thread_id,
             )
@@ -2381,11 +2379,6 @@ pub(crate) async fn execute_analysis(
             processed += 1;
             match result {
                 Ok(outcome) => {
-                    ai_input_tokens += outcome.input_tokens;
-                    ai_output_tokens += outcome.output_tokens;
-                    if outcome.ai_audited {
-                        ai_audited_threads = ai_audited_threads.saturating_add(1);
-                    }
                     match outcome.disposition {
                         ThreadDisposition::Stored => {
                             stored += 1;
@@ -2400,6 +2393,9 @@ pub(crate) async fn execute_analysis(
                             skipped_by_plan_cap += 1;
                         }
                     }
+                    if let Some(prepared) = outcome.prepared {
+                        prepared_threads.push(prepared);
+                    }
                     if let Some(dropped) = outcome.dropped
                         && funnel.dropped_samples.len() < FUNNEL_DROPPED_SAMPLE_CAP
                     {
@@ -2412,16 +2408,120 @@ pub(crate) async fn execute_analysis(
             }
             if processed.is_multiple_of(PROGRESS_UPDATE_EVERY) {
                 run.processed_threads = processed;
-                run.metrics.ai_input_tokens = ai_input_tokens;
-                run.metrics.ai_output_tokens = ai_output_tokens;
                 run.progress_message = format!(
-                    "Procesados {}/{} hilos · IA entrada {} · salida {} tokens",
-                    processed, total, ai_input_tokens, ai_output_tokens
+                    "Filtrados {}/{} hilos · {} candidatos listos para IA",
+                    processed,
+                    total,
+                    prepared_threads
+                        .iter()
+                        .filter(|prepared| prepared.should_batch)
+                        .count()
                 );
                 state.storage.update_analysis_run(&run).await?;
             }
         }
         run.processed_threads = processed;
+    }
+
+    let ai_enabled = policy_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.ai_policy.enabled)
+        .unwrap_or(true);
+    let (auto_apply_threshold, manual_review_threshold) = policy_snapshot
+        .as_ref()
+        .map(|snapshot| {
+            (
+                snapshot.ai_policy.auto_apply_threshold,
+                snapshot.ai_policy.manual_review_threshold,
+            )
+        })
+        .unwrap_or((state.config.ai.apply_confidence_threshold, 0.72));
+    let batch_indexes = prepared_threads
+        .iter()
+        .enumerate()
+        .filter_map(|(index, prepared)| (ai_enabled && prepared.should_batch).then_some(index))
+        .collect::<Vec<_>>();
+
+    // Segunda fase: clasificador compacto por lotes. Los errores se reintentan una
+    // vez dividiendo el lote; únicamente desacuerdos/ambigüedades escalan al auditor
+    // detallado por hilo.
+    let mut detailed_indexes = HashSet::new();
+    for index_chunk in batch_indexes.chunks(AI_BATCH_SIZE) {
+        for index in index_chunk {
+            ai_unique_thread_ids.insert(prepared_threads[*index].thread.gmail_thread_id.clone());
+        }
+        let batch = audit_batch_with_split(
+            &state,
+            &prepared_threads,
+            index_chunk,
+            policy_snapshot.as_ref(),
+        )
+        .await;
+        ai_input_tokens += batch.input_tokens;
+        ai_output_tokens += batch.output_tokens;
+        funnel.ai_calls += batch.calls;
+        funnel.ai_batch_classified += batch.decisions.len() as u64;
+
+        for index in index_chunk {
+            let prepared = &mut prepared_threads[*index];
+            let decision = batch.decisions.get(&prepared.thread.gmail_thread_id);
+            let should_escalate = match decision {
+                Some(decision) => {
+                    if !batch_decision_requires_detailed(
+                        &prepared.thread,
+                        decision,
+                        auto_apply_threshold,
+                        prepared.force_detailed,
+                    ) {
+                        apply_batch_decision(&mut prepared.thread, decision);
+                        false
+                    } else {
+                        true
+                    }
+                }
+                None => true,
+            };
+            if should_escalate {
+                detailed_indexes.insert(*index);
+            }
+        }
+    }
+
+    for index in detailed_indexes {
+        let prepared = &mut prepared_threads[index];
+        ai_unique_thread_ids.insert(prepared.thread.gmail_thread_id.clone());
+        funnel.ai_calls += 1;
+        funnel.ai_detailed_audited += 1;
+        let usage = audit_prepared_thread(
+            &state,
+            &run_id,
+            prepared,
+            policy_snapshot.as_ref(),
+            policy_version_id.as_deref(),
+            auto_apply_threshold,
+            manual_review_threshold,
+        )
+        .await;
+        ai_input_tokens += usage.input_tokens;
+        ai_output_tokens += usage.output_tokens;
+    }
+
+    // Los hilos que no necesitaban IA y los resultados ya resueltos se persisten al
+    // final; los cuerpos se descartan como antes.
+    for prepared in &prepared_threads {
+        let sanitized = prepared
+            .messages
+            .iter()
+            .cloned()
+            .map(|mut message| {
+                message.body_text = None;
+                message
+            })
+            .collect::<Vec<_>>();
+        state
+            .storage
+            .upsert_thread(&prepared.thread, &sanitized)
+            .await?;
     }
 
     // El tope del plan recortó hilos analizables: lo dejamos explícito para que el
@@ -2431,6 +2531,7 @@ pub(crate) async fn execute_analysis(
     funnel.more_beyond_retrieved = more_beyond_retrieved;
     funnel.would_be_analyzed = Some(stored + skipped_by_plan_cap);
     funnel.plan_analyzed_cap = (skipped_by_plan_cap > 0).then_some(analyzed_cap);
+    funnel.ai_unique_threads = ai_unique_thread_ids.len() as u64;
 
     let threads = state.storage.list_threads(&run.id).await?;
     run.metrics = calculate_metrics(&threads, ai_input_tokens, ai_output_tokens);
@@ -2446,7 +2547,7 @@ pub(crate) async fn execute_analysis(
         &state,
         run.org_id.as_deref(),
         stored as u32,
-        ai_audited_threads,
+        ai_unique_thread_ids.len() as u32,
     )
     .await?;
     Ok(())
@@ -2501,17 +2602,26 @@ const PROGRESS_UPDATE_EVERY: u64 = 5;
 /// Máximo de hilos descartados que guardamos como muestra en el embudo, para
 /// acotar el tamaño del documento del run sin perder utilidad de diagnóstico.
 const FUNNEL_DROPPED_SAMPLE_CAP: usize = 100;
+const AI_BATCH_SIZE: usize = 20;
+const AI_BATCH_EXCERPT_CHARS: usize = 200;
 
 #[derive(Default)]
 struct ThreadOutcome {
-    input_tokens: u64,
-    output_tokens: u64,
-    ai_audited: bool,
     /// Dónde terminó el hilo: almacenado o descartado (y por qué). Alimenta el
     /// embudo de diagnóstico para que los descartes dejen de ser invisibles.
     disposition: ThreadDisposition,
     /// Metadatos del descartado (solo cuando `disposition` es un descarte).
     dropped: Option<DroppedThreadInfo>,
+    /// Hilo ya filtrado y clasificado localmente, pendiente de batch IA/persistencia.
+    prepared: Option<PreparedThread>,
+}
+
+struct PreparedThread {
+    thread: EmailThread,
+    messages: Vec<EmailMessage>,
+    label_ids: Vec<String>,
+    should_batch: bool,
+    force_detailed: bool,
 }
 
 /// Construye el registro de un hilo descartado antes de clasificarse, usando los
@@ -2535,18 +2645,15 @@ fn dropped_thread_info(
 
 struct ThreadProcessingContext<'a> {
     policy_snapshot: Option<&'a crate::policies::PolicySnapshot>,
-    policy_version_id: Option<&'a str>,
     owner_email: &'a str,
     /// Contador atómico compartido de hilos analizables ya reclamados, para repartir
     /// los cupos del tope del plan entre las tareas concurrentes.
     analyzed_slot: &'a std::sync::atomic::AtomicU32,
     /// Tope de hilos analizados de este run (del plan vigente).
     analyzed_cap: u32,
-    /// Free audita todos los analizados; los planes de pago muestrean.
-    audit_all: bool,
 }
 
-async fn process_one_thread(
+async fn prepare_one_thread(
     state: &AppState,
     access_token: &str,
     run_id: &str,
@@ -2606,6 +2713,7 @@ async fn process_one_thread(
     let mut thread = classify_thread(run_id, &data.id, &data.messages, config);
     // Señal extra: refina el veredicto heurístico con las pestañas/categorías de Gmail.
     refine_classification_with_gmail_labels(&mut thread, &data.label_ids);
+    let mut force_detailed = thread.manual_review_required;
     // Señal extra: enruta a revisión los hilos cuyo asunto/remitente coincide con una
     // regla de no-responsabilidad configurada (antes solo alimentaban a la IA).
     if let Some(snapshot) = processing.policy_snapshot {
@@ -2622,11 +2730,14 @@ async fn process_one_thread(
         );
         // Señal extra: rescata a válido los hilos cuyo asunto/cuerpo menciona una
         // palabra de "señal de ticket" del tenant; la IA confirma o degrada después.
+        let was_valid = thread.is_valid_client_request;
         rescue_classification_with_valid_signals(
             &mut thread,
             &data.messages,
             &snapshot.analysis_policy.valid_signal_keywords,
         );
+        force_detailed |=
+            thread.manual_review_required || (!was_valid && thread.is_valid_client_request);
     }
     if let Some(review) = state
         .storage
@@ -2645,146 +2756,415 @@ async fn process_one_thread(
             })
             .collect::<Vec<_>>();
         state.storage.upsert_thread(&thread, &sanitized).await?;
-        return Ok(ThreadOutcome::default());
+        return Ok(ThreadOutcome {
+            disposition: ThreadDisposition::Stored,
+            ..Default::default()
+        });
     }
-    let received_human_thread = thread.first_client_message_id.is_some();
-    // Modelo opt-out: la IA está activa por defecto. Un run con snapshot respeta el
-    // flag `enabled` (un opt-out del usuario apaga la IA); sin snapshot (run legacy) se
-    // usa el default activo, coherente con la política por defecto de orgs nuevas.
-    let ai_enabled = processing
-        .policy_snapshot
-        .map(|snapshot| snapshot.ai_policy.enabled)
-        .unwrap_or(true);
-    // Muestreo estratificado determinístico (por hash del id, reproducible): auditamos
-    // siempre los ambiguos, una fracción mayor de los válidos "limpios" y una menor del
-    // resto, para cazar inconsistencias válido/no-válido sin disparar el costo de IA.
-    let sample_rate = match thread.classification {
-        Classification::Ambiguous => AUDIT_SAMPLE_RATE_AMBIGUOUS,
-        Classification::ValidClientRequest => AUDIT_SAMPLE_RATE_VALID,
-        _ => AUDIT_SAMPLE_RATE_OTHER,
-    };
-    let in_audit_sample = sample_bucket(&thread.gmail_thread_id) < sample_rate;
-    // `audit_all` (plan Free) audita todo hilo analizable; los planes de pago usan el
-    // muestreo estratificado para acotar el costo de IA en volúmenes grandes.
-    let should_audit = ai_enabled
-        && received_human_thread
-        && (processing.audit_all
-            || thread.is_valid_client_request
-            || thread.manual_review_required
-            || in_audit_sample);
+    let should_batch = thread.first_client_message_id.is_some()
+        && matches!(
+            thread.classification,
+            Classification::ValidClientRequest | Classification::Ambiguous
+        );
+    Ok(ThreadOutcome {
+        disposition: ThreadDisposition::Stored,
+        prepared: Some(PreparedThread {
+            thread,
+            messages: data.messages,
+            label_ids: data.label_ids,
+            should_batch,
+            force_detailed,
+        }),
+        ..Default::default()
+    })
+}
 
-    let mut outcome = ThreadOutcome::default();
-    if should_audit {
-        outcome.ai_audited = true;
-        let (max_messages, max_body_chars, auto_apply_threshold, manual_review_threshold) =
-            processing
-                .policy_snapshot
-                .map(|snapshot| {
-                    (
-                        snapshot.ai_policy.max_audit_messages as usize,
-                        snapshot.ai_policy.max_body_chars_per_message as usize,
-                        snapshot.ai_policy.auto_apply_threshold,
-                        snapshot.ai_policy.manual_review_threshold,
-                    )
-                })
-                .unwrap_or((14, 280, state.config.ai.apply_confidence_threshold, 0.72));
-        let audit_messages =
-            audit_messages_for_thread(&thread, &data.messages, max_messages, max_body_chars);
-        match audit_thread(
-            state,
-            &thread,
-            &audit_messages,
-            processing.policy_snapshot,
-            &data.label_ids,
-        )
-        .await
-        {
-            Ok(mut audit) => {
-                audit.policy_version_id = processing.policy_version_id.map(ToOwned::to_owned);
-                if let Some(snapshot) = processing.policy_snapshot {
-                    audit.prompt_version = Some(snapshot.ai_policy.prompt_version.clone());
-                    audit.model_id = Some(snapshot.ai_policy.model_id.clone());
-                    audit.auto_apply_threshold = Some(auto_apply_threshold);
-                    audit.max_audit_messages = Some(max_messages as u32);
-                    audit.max_body_chars_per_message = Some(max_body_chars as u32);
-                }
-                outcome.input_tokens = audit.input_tokens;
-                outcome.output_tokens = audit.output_tokens;
-                state
-                    .storage
-                    .add_ai_audit(run_id, &thread.id, &audit)
-                    .await?;
-                let known_ids = data
-                    .messages
-                    .iter()
-                    .map(|m| m.id.clone())
-                    .collect::<Vec<_>>();
-                if should_auto_apply_ai(&audit, &known_ids)
-                    && audit.confidence >= auto_apply_threshold
-                {
-                    // Alta confianza: la IA reemplaza la heurística y queda aplicada.
-                    thread.classification = audit.classification.clone();
-                    thread.classification_source = ClassificationSource::Ai;
-                    thread.classification_confidence = audit.confidence;
-                    thread.is_valid_client_request = audit.is_valid_client_request;
-                    thread.is_answered = audit.is_answered;
-                    thread.first_client_message_id = audit.first_client_message_id.clone();
-                    thread.first_internal_reply_message_id =
-                        audit.first_internal_reply_message_id.clone();
-                    thread.last_internal_message_id = audit.last_internal_message_id.clone();
-                    apply_trace_dates(&mut thread, &data.messages);
-                    thread.manual_review_required = false;
-                    thread.reasons.push(
-                        "La auditoría IA se aplicó automáticamente por alta confianza.".to_string(),
-                    );
-                } else if ai_message_ids_known(&audit, &known_ids)
-                    && audit.confidence >= manual_review_threshold
-                {
-                    // Confianza media: adoptamos la lectura de la IA pero la dejamos
-                    // marcada para confirmación manual.
-                    thread.classification = audit.classification.clone();
-                    thread.classification_source = ClassificationSource::Ai;
-                    thread.classification_confidence = audit.confidence;
-                    thread.is_valid_client_request = audit.is_valid_client_request;
-                    thread.is_answered = audit.is_answered;
-                    thread.first_client_message_id = audit.first_client_message_id.clone();
-                    thread.first_internal_reply_message_id =
-                        audit.first_internal_reply_message_id.clone();
-                    thread.last_internal_message_id = audit.last_internal_message_id.clone();
-                    apply_trace_dates(&mut thread, &data.messages);
-                    thread.manual_review_required = true;
-                    thread.reasons.push(
-                        "La auditoría IA sugiere un cambio con confianza media; requiere confirmación manual."
-                            .to_string(),
-                    );
-                } else {
-                    // Baja confianza: se conserva la heurística y se marca para revisión.
-                    thread.manual_review_required = true;
-                    thread
-                        .reasons
-                        .push("La auditoría IA requiere confirmación manual.".to_string());
-                }
+#[derive(Serialize)]
+struct AiWorkerPolicyContext<'a> {
+    mailbox_email: &'a str,
+    mailbox_display_name: &'a str,
+    workspace_domain: &'a str,
+    internal_domains: &'a [String],
+    responder_emails: &'a [String],
+    mailbox_aliases: &'a [String],
+    valid_request_criteria: &'a [String],
+    non_responsibility_rules: &'a [String],
+    ignored_senders: &'a [String],
+    ignored_domains: &'a [String],
+    ignored_keywords: &'a [String],
+    prompt_version: &'a str,
+    allowed_fields: &'a [String],
+}
+
+fn ai_worker_policy_context(
+    snapshot: &crate::policies::PolicySnapshot,
+) -> AiWorkerPolicyContext<'_> {
+    AiWorkerPolicyContext {
+        mailbox_email: &snapshot.mailbox.google_account_email,
+        mailbox_display_name: &snapshot.mailbox.display_name,
+        workspace_domain: &snapshot.mailbox.workspace_domain,
+        internal_domains: &snapshot.analysis_policy.internal_domains,
+        responder_emails: &snapshot.analysis_policy.responder_emails,
+        mailbox_aliases: &snapshot.analysis_policy.mailbox_aliases,
+        valid_request_criteria: &snapshot.analysis_policy.valid_request_criteria,
+        non_responsibility_rules: &snapshot.analysis_policy.non_responsibility_rules,
+        ignored_senders: &snapshot.analysis_policy.ignored_senders,
+        ignored_domains: &snapshot.analysis_policy.ignored_domains,
+        ignored_keywords: &snapshot.analysis_policy.ignored_keywords,
+        prompt_version: &snapshot.ai_policy.prompt_version,
+        allowed_fields: &snapshot.ai_policy.allowed_fields,
+    }
+}
+
+#[derive(Serialize)]
+struct BatchMessageSummary {
+    message_id: String,
+    from_email: String,
+    date: chrono::DateTime<Utc>,
+    is_internal: bool,
+    is_external: bool,
+    is_automated: bool,
+    excerpt: String,
+}
+
+#[derive(Serialize)]
+struct BatchThreadSummary {
+    thread_id: String,
+    subject: String,
+    gmail_labels: Vec<String>,
+    automatic_classification: Classification,
+    automatic_confidence: f64,
+    automatic_is_valid: bool,
+    automatic_is_answered: bool,
+    automatic_manual_review_required: bool,
+    messages: Vec<BatchMessageSummary>,
+}
+
+#[derive(Serialize)]
+struct BatchAuditRequest<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    policy_context: Option<AiWorkerPolicyContext<'a>>,
+    threads: Vec<BatchThreadSummary>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct BatchAuditDecision {
+    thread_id: String,
+    classification: Classification,
+    is_valid_client_request: bool,
+    is_answered: bool,
+    confidence: f64,
+    manual_review_required: bool,
+    #[serde(default)]
+    issues: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct BatchAuditResponse {
+    decisions: Vec<BatchAuditDecision>,
+    input_tokens: u64,
+    output_tokens: u64,
+}
+
+#[derive(Default)]
+struct BatchExecution {
+    decisions: HashMap<String, BatchAuditDecision>,
+    input_tokens: u64,
+    output_tokens: u64,
+    calls: u64,
+}
+
+#[derive(Default)]
+struct TokenUsage {
+    input_tokens: u64,
+    output_tokens: u64,
+}
+
+fn batch_messages_for_thread(prepared: &PreparedThread) -> Vec<BatchMessageSummary> {
+    let mut ordered = prepared.messages.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|message| message.date);
+    let mut selected_ids: Vec<&str> = Vec::new();
+    for id in [
+        prepared.thread.first_client_message_id.as_ref(),
+        prepared.thread.first_internal_reply_message_id.as_ref(),
+        ordered.last().map(|message| &message.id),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if !selected_ids.contains(&id.as_str()) {
+            selected_ids.push(id.as_str());
+        }
+    }
+    selected_ids
+        .into_iter()
+        .filter_map(|id| prepared.messages.iter().find(|message| message.id == id))
+        .map(|message| {
+            let source = message
+                .body_text
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or(&message.snippet);
+            BatchMessageSummary {
+                message_id: message.id.clone(),
+                from_email: message.from_email.clone(),
+                date: message.date,
+                is_internal: message.is_internal,
+                is_external: message.is_external,
+                is_automated: message.is_automated,
+                excerpt: truncate_chars(source, AI_BATCH_EXCERPT_CHARS),
             }
+        })
+        .collect()
+}
+
+fn batch_summary(prepared: &PreparedThread) -> BatchThreadSummary {
+    BatchThreadSummary {
+        thread_id: prepared.thread.gmail_thread_id.clone(),
+        subject: prepared.thread.subject.clone(),
+        gmail_labels: prepared.label_ids.clone(),
+        automatic_classification: prepared.thread.classification.clone(),
+        automatic_confidence: prepared.thread.classification_confidence,
+        automatic_is_valid: prepared.thread.is_valid_client_request,
+        automatic_is_answered: prepared.thread.is_answered,
+        automatic_manual_review_required: prepared.thread.manual_review_required,
+        messages: batch_messages_for_thread(prepared),
+    }
+}
+
+async fn audit_batch_once(
+    state: &AppState,
+    prepared: &[PreparedThread],
+    indexes: &[usize],
+    policy_snapshot: Option<&crate::policies::PolicySnapshot>,
+) -> anyhow::Result<BatchAuditResponse> {
+    let policy_context = policy_snapshot.map(ai_worker_policy_context);
+    let threads = indexes
+        .iter()
+        .map(|index| batch_summary(&prepared[*index]))
+        .collect();
+    let mut request = state
+        .http
+        .post(format!("{}/audit/batch", state.config.ai.worker_url))
+        .json(&BatchAuditRequest {
+            policy_context,
+            threads,
+        });
+    if let Some(audience) = &state.config.ai.worker_audience {
+        request = request.bearer_auth(fetch_cloud_run_identity_token(&state.http, audience).await?);
+    }
+    Ok(request
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<BatchAuditResponse>()
+        .await?)
+}
+
+async fn audit_batch_with_split(
+    state: &AppState,
+    prepared: &[PreparedThread],
+    indexes: &[usize],
+    policy_snapshot: Option<&crate::policies::PolicySnapshot>,
+) -> BatchExecution {
+    let mut execution = BatchExecution {
+        calls: 1,
+        ..Default::default()
+    };
+    match audit_batch_once(state, prepared, indexes, policy_snapshot).await {
+        Ok(response) => {
+            merge_batch_response(&mut execution, response, prepared, indexes);
+            return execution;
+        }
+        Err(error) => {
+            tracing::warn!(
+                ?error,
+                batch_size = indexes.len(),
+                "falló auditoría IA batch"
+            );
+        }
+    }
+    if indexes.len() <= 1 {
+        return execution;
+    }
+    let middle = indexes.len() / 2;
+    for half in [&indexes[..middle], &indexes[middle..]] {
+        if half.is_empty() {
+            continue;
+        }
+        execution.calls += 1;
+        match audit_batch_once(state, prepared, half, policy_snapshot).await {
+            Ok(response) => merge_batch_response(&mut execution, response, prepared, half),
             Err(error) => {
-                thread.manual_review_required = true;
-                thread
-                    .reasons
-                    .push(format!("La auditoría IA falló: {error}"));
+                tracing::warn!(?error, batch_size = half.len(), "falló reintento IA batch");
             }
         }
     }
+    execution
+}
 
-    let sanitized = data
+fn merge_batch_response(
+    execution: &mut BatchExecution,
+    response: BatchAuditResponse,
+    prepared: &[PreparedThread],
+    indexes: &[usize],
+) {
+    let expected = indexes
+        .iter()
+        .map(|index| prepared[*index].thread.gmail_thread_id.as_str())
+        .collect::<HashSet<_>>();
+    execution.input_tokens += response.input_tokens;
+    execution.output_tokens += response.output_tokens;
+    for decision in response.decisions {
+        if expected.contains(decision.thread_id.as_str()) {
+            execution
+                .decisions
+                .insert(decision.thread_id.clone(), decision);
+        }
+    }
+}
+
+fn batch_agrees_with_heuristic(thread: &EmailThread, decision: &BatchAuditDecision) -> bool {
+    !decision.manual_review_required
+        && decision.classification != Classification::Ambiguous
+        && decision.classification == thread.classification
+        && decision.is_valid_client_request == thread.is_valid_client_request
+        && decision.is_answered == thread.is_answered
+}
+
+fn batch_decision_requires_detailed(
+    thread: &EmailThread,
+    decision: &BatchAuditDecision,
+    auto_apply_threshold: f64,
+    force_detailed: bool,
+) -> bool {
+    force_detailed
+        || decision.confidence < auto_apply_threshold
+        || !batch_agrees_with_heuristic(thread, decision)
+}
+
+fn apply_batch_decision(thread: &mut EmailThread, decision: &BatchAuditDecision) {
+    thread.classification = decision.classification.clone();
+    thread.classification_source = ClassificationSource::Ai;
+    thread.classification_confidence = decision.confidence;
+    thread.is_valid_client_request = decision.is_valid_client_request;
+    thread.is_answered = decision.is_answered;
+    thread.manual_review_required = false;
+    thread
+        .reasons
+        .push("La clasificación IA por lote confirmó la heurística.".to_string());
+    thread.reasons.extend(decision.issues.iter().cloned());
+}
+
+async fn audit_prepared_thread(
+    state: &AppState,
+    run_id: &str,
+    prepared: &mut PreparedThread,
+    policy_snapshot: Option<&crate::policies::PolicySnapshot>,
+    policy_version_id: Option<&str>,
+    auto_apply_threshold: f64,
+    manual_review_threshold: f64,
+) -> TokenUsage {
+    let (max_messages, max_body_chars) = policy_snapshot
+        .map(|snapshot| {
+            (
+                snapshot.ai_policy.max_audit_messages as usize,
+                snapshot.ai_policy.max_body_chars_per_message as usize,
+            )
+        })
+        .unwrap_or((14, 280));
+    let audit_messages = audit_messages_for_thread(
+        &prepared.thread,
+        &prepared.messages,
+        max_messages,
+        max_body_chars,
+    );
+    let result = audit_thread(
+        state,
+        &prepared.thread,
+        &audit_messages,
+        policy_snapshot,
+        &prepared.label_ids,
+    )
+    .await;
+    let mut audit = match result {
+        Ok(audit) => audit,
+        Err(error) => {
+            prepared.thread.manual_review_required = true;
+            prepared
+                .thread
+                .reasons
+                .push(format!("La auditoría IA detallada falló: {error}"));
+            return TokenUsage::default();
+        }
+    };
+    audit.policy_version_id = policy_version_id.map(ToOwned::to_owned);
+    if let Some(snapshot) = policy_snapshot {
+        audit.prompt_version = Some(snapshot.ai_policy.prompt_version.clone());
+        audit.model_id = Some(snapshot.ai_policy.model_id.clone());
+        audit.auto_apply_threshold = Some(auto_apply_threshold);
+        audit.max_audit_messages = Some(max_messages as u32);
+        audit.max_body_chars_per_message = Some(max_body_chars as u32);
+    }
+    let usage = TokenUsage {
+        input_tokens: audit.input_tokens,
+        output_tokens: audit.output_tokens,
+    };
+    if let Err(error) = state
+        .storage
+        .add_ai_audit(run_id, &prepared.thread.id, &audit)
+        .await
+    {
+        tracing::warn!(?error, "no se pudo persistir auditoría IA detallada");
+    }
+
+    let known_ids = prepared
         .messages
         .iter()
-        .cloned()
-        .map(|mut message| {
-            message.body_text = None;
-            message
-        })
+        .map(|message| message.id.clone())
         .collect::<Vec<_>>();
-    state.storage.upsert_thread(&thread, &sanitized).await?;
-    Ok(outcome)
+    if should_auto_apply_ai(&audit, &known_ids) && audit.confidence >= auto_apply_threshold {
+        prepared.thread.classification = audit.classification.clone();
+        prepared.thread.classification_source = ClassificationSource::Ai;
+        prepared.thread.classification_confidence = audit.confidence;
+        prepared.thread.is_valid_client_request = audit.is_valid_client_request;
+        prepared.thread.is_answered = audit.is_answered;
+        prepared.thread.first_client_message_id = audit.first_client_message_id.clone();
+        prepared.thread.first_internal_reply_message_id =
+            audit.first_internal_reply_message_id.clone();
+        prepared.thread.last_internal_message_id = audit.last_internal_message_id.clone();
+        apply_trace_dates(&mut prepared.thread, &prepared.messages);
+        prepared.thread.manual_review_required = false;
+        prepared
+            .thread
+            .reasons
+            .push("La auditoría IA detallada se aplicó por alta confianza.".to_string());
+    } else if ai_message_ids_known(&audit, &known_ids)
+        && audit.confidence >= manual_review_threshold
+    {
+        prepared.thread.classification = audit.classification.clone();
+        prepared.thread.classification_source = ClassificationSource::Ai;
+        prepared.thread.classification_confidence = audit.confidence;
+        prepared.thread.is_valid_client_request = audit.is_valid_client_request;
+        prepared.thread.is_answered = audit.is_answered;
+        prepared.thread.first_client_message_id = audit.first_client_message_id.clone();
+        prepared.thread.first_internal_reply_message_id =
+            audit.first_internal_reply_message_id.clone();
+        prepared.thread.last_internal_message_id = audit.last_internal_message_id.clone();
+        apply_trace_dates(&mut prepared.thread, &prepared.messages);
+        prepared.thread.manual_review_required = true;
+        prepared.thread.reasons.push(
+            "La auditoría IA detallada sugiere un cambio que requiere confirmación manual."
+                .to_string(),
+        );
+    } else {
+        prepared.thread.manual_review_required = true;
+        prepared
+            .thread
+            .reasons
+            .push("La auditoría IA detallada requiere confirmación manual.".to_string());
+    }
+    usage
 }
 
 fn audit_messages_for_thread(
@@ -2889,38 +3269,7 @@ async fn audit_thread(
         policy_context: Option<AiWorkerPolicyContext<'a>>,
     }
 
-    #[derive(Serialize)]
-    struct AiWorkerPolicyContext<'a> {
-        mailbox_email: &'a str,
-        mailbox_display_name: &'a str,
-        workspace_domain: &'a str,
-        internal_domains: &'a [String],
-        responder_emails: &'a [String],
-        mailbox_aliases: &'a [String],
-        valid_request_criteria: &'a [String],
-        non_responsibility_rules: &'a [String],
-        ignored_senders: &'a [String],
-        ignored_domains: &'a [String],
-        ignored_keywords: &'a [String],
-        prompt_version: &'a str,
-        allowed_fields: &'a [String],
-    }
-
-    let policy_context = policy_snapshot.map(|snapshot| AiWorkerPolicyContext {
-        mailbox_email: &snapshot.mailbox.google_account_email,
-        mailbox_display_name: &snapshot.mailbox.display_name,
-        workspace_domain: &snapshot.mailbox.workspace_domain,
-        internal_domains: &snapshot.analysis_policy.internal_domains,
-        responder_emails: &snapshot.analysis_policy.responder_emails,
-        mailbox_aliases: &snapshot.analysis_policy.mailbox_aliases,
-        valid_request_criteria: &snapshot.analysis_policy.valid_request_criteria,
-        non_responsibility_rules: &snapshot.analysis_policy.non_responsibility_rules,
-        ignored_senders: &snapshot.analysis_policy.ignored_senders,
-        ignored_domains: &snapshot.analysis_policy.ignored_domains,
-        ignored_keywords: &snapshot.analysis_policy.ignored_keywords,
-        prompt_version: &snapshot.ai_policy.prompt_version,
-        allowed_fields: &snapshot.ai_policy.allowed_fields,
-    });
+    let policy_context = policy_snapshot.map(ai_worker_policy_context);
 
     let mut request = state
         .http
@@ -2968,26 +3317,6 @@ async fn recalculate_run_metrics(state: &AppState, run_id: &str) -> anyhow::Resu
     );
     run.metrics.funnel = funnel;
     state.storage.update_analysis_run(&run).await
-}
-
-/// Porcentaje de hilos de cada estrato que se auditan con IA además de los que ya se
-/// auditan siempre (válidos y marcados para revisión). Estratificado para gastar el
-/// presupuesto de IA donde más sirve: los ambiguos/dudosos.
-const AUDIT_SAMPLE_RATE_AMBIGUOUS: u8 = 100;
-const AUDIT_SAMPLE_RATE_VALID: u8 = 20;
-const AUDIT_SAMPLE_RATE_OTHER: u8 = 5;
-
-/// Asigna un bucket estable 0..100 a un hilo a partir de su id (FNV-1a). Determinístico:
-/// el mismo hilo cae siempre en el mismo bucket, así el muestreo es reproducible.
-fn sample_bucket(thread_id: &str) -> u8 {
-    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-    let mut hash = FNV_OFFSET;
-    for byte in thread_id.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(FNV_PRIME);
-    }
-    (hash % 100) as u8
 }
 
 async fn enforce_rate_limit(
@@ -3498,6 +3827,7 @@ fn random_urlsafe(bytes: usize) -> String {
 pub struct ApiError {
     status: StatusCode,
     message: String,
+    details: Option<serde_json::Value>,
 }
 
 impl ApiError {
@@ -3505,6 +3835,7 @@ impl ApiError {
         Self {
             status: StatusCode::NOT_FOUND,
             message: message.to_string(),
+            details: None,
         }
     }
 
@@ -3512,6 +3843,7 @@ impl ApiError {
         Self {
             status: StatusCode::UNAUTHORIZED,
             message: "Autenticación requerida".to_string(),
+            details: None,
         }
     }
 
@@ -3519,6 +3851,7 @@ impl ApiError {
         Self {
             status: StatusCode::FORBIDDEN,
             message: message.to_string(),
+            details: None,
         }
     }
 
@@ -3526,6 +3859,7 @@ impl ApiError {
         Self {
             status: StatusCode::PAYMENT_REQUIRED,
             message: message.to_string(),
+            details: None,
         }
     }
 
@@ -3533,6 +3867,15 @@ impl ApiError {
         Self {
             status: StatusCode::BAD_REQUEST,
             message: message.to_string(),
+            details: None,
+        }
+    }
+
+    fn incomplete_config(missing: Vec<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            message: "la configuración sigue incompleta".to_string(),
+            details: Some(json!({ "missing": missing })),
         }
     }
 
@@ -3540,6 +3883,7 @@ impl ApiError {
         Self {
             status: StatusCode::CONFLICT,
             message: message.to_string(),
+            details: None,
         }
     }
 
@@ -3547,6 +3891,7 @@ impl ApiError {
         Self {
             status: StatusCode::TOO_MANY_REQUESTS,
             message: message.to_string(),
+            details: None,
         }
     }
 
@@ -3554,13 +3899,18 @@ impl ApiError {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
             message: message.to_string(),
+            details: None,
         }
     }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
-        (self.status, Json(json!({ "error": self.message }))).into_response()
+        let mut body = json!({ "error": self.message });
+        if let Some(details) = self.details {
+            body["details"] = details;
+        }
+        (self.status, Json(body)).into_response()
     }
 }
 
@@ -3569,6 +3919,7 @@ impl From<anyhow::Error> for ApiError {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: error.to_string(),
+            details: None,
         }
     }
 }
@@ -3578,6 +3929,7 @@ impl From<reqwest::Error> for ApiError {
         Self {
             status: StatusCode::BAD_GATEWAY,
             message: error.to_string(),
+            details: None,
         }
     }
 }
@@ -3853,18 +4205,50 @@ mod tests {
     }
 
     #[test]
-    fn sample_bucket_is_deterministic_and_bounded() {
-        // Determinístico: el mismo id cae siempre en el mismo bucket.
-        assert_eq!(sample_bucket("thread-123"), sample_bucket("thread-123"));
-        // Siempre dentro de 0..100, para comparar contra los porcentajes de muestreo.
-        for id in ["a", "thread-xyz", "", "9f2c-4d", "AAAAAAAAAAAA"] {
-            assert!(sample_bucket(id) < 100, "bucket fuera de rango para {id:?}");
-        }
-        // Ids distintos no colapsan todos al mismo bucket (reparte el muestreo).
-        let buckets: std::collections::HashSet<u8> = (0..50)
-            .map(|n| sample_bucket(&format!("thread-{n}")))
-            .collect();
-        assert!(buckets.len() > 1, "el hash no distribuye los buckets");
+    fn ai_batch_size_splits_fifty_candidates_into_twenty_twenty_ten() {
+        let indexes = (0..50).collect::<Vec<_>>();
+        let sizes = indexes
+            .chunks(AI_BATCH_SIZE)
+            .map(<[usize]>::len)
+            .collect::<Vec<_>>();
+        assert_eq!(sizes, vec![20, 20, 10]);
+    }
+
+    #[test]
+    fn batch_only_escalates_disagreements_ambiguity_or_forced_threads() {
+        let mut candidate = thread("batch", "run");
+        candidate.manual_review_required = false;
+        let mut decision = BatchAuditDecision {
+            thread_id: candidate.gmail_thread_id.clone(),
+            classification: Classification::ValidClientRequest,
+            is_valid_client_request: true,
+            is_answered: false,
+            confidence: 0.95,
+            manual_review_required: false,
+            issues: vec![],
+        };
+        assert!(!batch_decision_requires_detailed(
+            &candidate, &decision, 0.92, false
+        ));
+
+        decision.classification = Classification::Misc;
+        decision.is_valid_client_request = false;
+        assert!(batch_decision_requires_detailed(
+            &candidate, &decision, 0.92, false
+        ));
+
+        decision.classification = Classification::Ambiguous;
+        decision.manual_review_required = true;
+        assert!(batch_decision_requires_detailed(
+            &candidate, &decision, 0.92, false
+        ));
+
+        decision.classification = Classification::ValidClientRequest;
+        decision.is_valid_client_request = true;
+        decision.manual_review_required = false;
+        assert!(batch_decision_requires_detailed(
+            &candidate, &decision, 0.92, true
+        ));
     }
 
     #[test]
@@ -3947,6 +4331,87 @@ mod tests {
         assert!(body.draft.ai_policy.consent_granted_at.is_some());
         assert_eq!(body.draft.retention_policy.retention_days, 30);
         assert_eq!(body.setup_state.missing, vec!["valid_request_criteria"]);
+    }
+
+    #[tokio::test]
+    async fn org_config_finalize_rejects_incomplete_without_persisting() {
+        let test = seeded_app().await;
+        let response = test
+            .app
+            .clone()
+            .oneshot(request(
+                Method::PUT,
+                "/me/org/config",
+                Some(&test.alice_cookie),
+                Some(json!({
+                    "finalize": true,
+                    "analysis_policy": { "internal_domains": [] }
+                })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = response_json(response).await;
+        assert_eq!(
+            body["details"]["missing"],
+            json!(["internal_domains", "valid_request_criteria"])
+        );
+
+        let response = test
+            .app
+            .oneshot(request(
+                Method::GET,
+                "/me/org/config",
+                Some(&test.alice_cookie),
+                None,
+            ))
+            .await
+            .unwrap();
+        let body: OrgConfigResponse = response_json(response).await;
+        assert_eq!(
+            body.draft.analysis_policy.internal_domains,
+            vec!["example.com"]
+        );
+    }
+
+    #[tokio::test]
+    async fn org_config_draft_can_remain_incomplete_and_finalize_can_complete_it() {
+        let test = seeded_app().await;
+        let response = test
+            .app
+            .clone()
+            .oneshot(request(
+                Method::PUT,
+                "/me/org/config",
+                Some(&test.alice_cookie),
+                Some(json!({
+                    "analysis_policy": { "valid_request_criteria": [] }
+                })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = response_json(response).await;
+        assert_eq!(body["setup_state"]["ready_for_analysis"], false);
+
+        let response = test
+            .app
+            .oneshot(request(
+                Method::PUT,
+                "/me/org/config",
+                Some(&test.alice_cookie),
+                Some(json!({
+                    "finalize": true,
+                    "analysis_policy": {
+                        "valid_request_criteria": ["Clientes externos solicitan soporte"]
+                    }
+                })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = response_json(response).await;
+        assert_eq!(body["setup_state"]["ready_for_analysis"], true);
     }
 
     #[tokio::test]

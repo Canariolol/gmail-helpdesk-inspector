@@ -5,7 +5,15 @@ import re
 
 import httpx
 
-from ai_worker.schemas import AuditPolicyContext, AuditThreadRequest, AuditThreadResponse, BedrockDecision
+from ai_worker.schemas import (
+    AuditPolicyContext,
+    AuditThreadRequest,
+    AuditThreadResponse,
+    BatchAuditRequest,
+    BatchAuditResponse,
+    BedrockBatchDecision,
+    BedrockDecision,
+)
 from ai_worker.settings import Settings
 
 
@@ -147,6 +155,99 @@ def build_user_prompt(payload: AuditThreadRequest) -> str:
             },
         },
         ensure_ascii=False,
+    )
+
+
+def build_batch_system_prompt(
+    settings: Settings, policy: AuditPolicyContext | None = None
+) -> str:
+    policy = policy or _fallback_policy_context(settings)
+    return f"""Classify a batch of compact email-thread summaries for one helpdesk mailbox. The tenant policy below applies to every thread in the batch. Return strict JSON with one decision per supplied thread_id and no extra text.
+
+Mailbox: {policy.mailbox_email or "not specified"}
+Internal domains:
+{_bullet_list(policy.internal_domains, "  - infer from message flags")}
+Valid request criteria:
+{_bullet_list(policy.valid_request_criteria, "  - External human clients ask this helpdesk for support, access, incident handling, service, or follow-up.")}
+Out-of-scope rules:
+{_bullet_list(policy.non_responsibility_rules, "  - Automated mail, newsletters, spam, internal-only threads, and requests owned by another team are not valid.")}
+Ignored senders/domains/keywords:
+{_bullet_list([*policy.ignored_senders, *policy.ignored_domains, *policy.ignored_keywords], "  - none")}
+
+For each thread:
+- valid_client_request means an external human asks for work covered by the policy.
+- is_answered requires a later human internal reply; automated acknowledgements do not count.
+- Use ambiguous and manual_review_required=true when compact evidence is insufficient or conflicts with the automatic classification.
+- Preserve every supplied thread_id exactly and return exactly one decision for each.
+- Issues must be written in Spanish.
+
+Output shape:
+{{"decisions":[{{"thread_id":"...","classification":"valid_client_request|internal|automated|newsletter|spam|misc|ambiguous","is_valid_client_request":true,"is_answered":false,"confidence":0.0,"manual_review_required":false,"issues":[]}}]}}"""
+
+
+def build_batch_user_prompt(payload: BatchAuditRequest) -> str:
+    return json.dumps(
+        {
+            "threads": [thread.model_dump(mode="json") for thread in payload.threads],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+async def audit_batch_with_bedrock(
+    payload: BatchAuditRequest,
+    settings: Settings,
+    client: httpx.AsyncClient | None = None,
+) -> BatchAuditResponse:
+    if not settings.aws_bearer_token_bedrock:
+        raise RuntimeError("AWS_BEARER_TOKEN_BEDROCK is required")
+
+    request_body = {
+        "system": [{"text": build_batch_system_prompt(settings, payload.policy_context)}],
+        "messages": [
+            {
+                "role": "user",
+                "content": [{"text": build_batch_user_prompt(payload)}],
+            }
+        ],
+        "inferenceConfig": {
+            "maxTokens": 4000,
+            "temperature": 0,
+        },
+    }
+
+    owns_client = client is None
+    if client is None:
+        client = httpx.AsyncClient(timeout=60)
+    try:
+        response = await client.post(
+            settings.batch_invoke_url,
+            headers={
+                "Authorization": f"Bearer {settings.aws_bearer_token_bedrock}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            json=request_body,
+        )
+        response.raise_for_status()
+        raw = response.json()
+    finally:
+        if owns_client:
+            await client.aclose()
+
+    text = (
+        raw.get("output", {})
+        .get("message", {})
+        .get("content", [{}])[0]
+        .get("text", "")
+    )
+    decision = BedrockBatchDecision.model_validate_json(extract_json_text(text))
+    usage = raw.get("usage", {})
+    return BatchAuditResponse(
+        decisions=decision.decisions,
+        input_tokens=int(usage.get("inputTokens", 0)),
+        output_tokens=int(usage.get("outputTokens", 0)),
     )
 
 

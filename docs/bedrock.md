@@ -8,9 +8,13 @@ Required environment:
 AWS_BEARER_TOKEN_BEDROCK=
 AWS_REGION=us-east-1
 BEDROCK_MODEL_ID=amazon.nova-2-lite-v1:0
+BEDROCK_BATCH_MODEL_ID=
 ```
 
-The worker uses the Bedrock Converse API, sends text-only payloads, and expects strict JSON back from the model.
+The worker uses the Bedrock Converse API, sends compact text-only batches of up
+to 20 threads, and expects strict JSON back from the model. Ambiguous or
+conflicting decisions are escalated to the existing detailed per-thread audit.
+`BEDROCK_BATCH_MODEL_ID` is optional and falls back to `BEDROCK_MODEL_ID`.
 If the model returns invalid JSON or confidence below the API threshold, the
 thread remains queued for manual review.
 

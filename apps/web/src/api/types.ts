@@ -39,6 +39,10 @@ export interface AnalysisFunnel {
   plan_analyzed_cap?: number | null;
   would_be_analyzed?: number | null;
   more_beyond_retrieved?: boolean;
+  ai_batch_classified?: number;
+  ai_detailed_audited?: number;
+  ai_unique_threads?: number;
+  ai_calls?: number;
 }
 
 export interface Metrics {

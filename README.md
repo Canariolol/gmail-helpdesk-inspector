@@ -208,8 +208,9 @@ Missed weekdays are not backfilled automatically — use the endpoint with
   again. Publish/verify the OAuth app before broad SaaS launch.
 - The current rate limiter is in-memory per API instance. For private beta, run
   one API instance or replace it with a distributed limiter before scaling out.
-- The AI worker is stateless: the API sends per-run policy context in each audit
-  request. Do not configure tenant/company prompt defaults in the worker.
+- The AI worker is stateless: the API sends per-run policy context once per
+  classification batch and again only for threads escalated to detailed audit.
+  Do not configure tenant/company prompt defaults in the worker.
 - Retention expiry is stored per run, but destructive retention jobs are still a
   later production hardening task.
 

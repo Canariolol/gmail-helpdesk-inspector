@@ -77,6 +77,49 @@ class AuditThreadRequest(BaseModel):
     gmail_labels: list[str] = Field(default_factory=list)
 
 
+class BatchMessageSummary(BaseModel):
+    message_id: str
+    from_email: str
+    date: datetime
+    is_internal: bool
+    is_external: bool
+    is_automated: bool
+    excerpt: str = ""
+
+
+class BatchThreadSummary(BaseModel):
+    thread_id: str
+    subject: str
+    gmail_labels: list[str] = Field(default_factory=list)
+    automatic_classification: Classification
+    automatic_confidence: float = Field(ge=0, le=1)
+    automatic_is_valid: bool
+    automatic_is_answered: bool
+    automatic_manual_review_required: bool
+    messages: list[BatchMessageSummary] = Field(default_factory=list)
+
+
+class BatchAuditRequest(BaseModel):
+    policy_context: AuditPolicyContext | None = None
+    threads: list[BatchThreadSummary] = Field(min_length=1, max_length=20)
+
+
+class BatchAuditDecision(BaseModel):
+    thread_id: str
+    classification: Classification
+    is_valid_client_request: bool
+    is_answered: bool
+    confidence: float = Field(ge=0, le=1)
+    manual_review_required: bool
+    issues: list[str] = Field(default_factory=list)
+
+
+class BatchAuditResponse(BaseModel):
+    decisions: list[BatchAuditDecision]
+    input_tokens: int = Field(ge=0)
+    output_tokens: int = Field(ge=0)
+
+
 class AuditThreadResponse(BaseModel):
     classification: Classification
     is_valid_client_request: bool
@@ -101,3 +144,7 @@ class BedrockDecision(BaseModel):
     confidence: float = Field(ge=0, le=1)
     manual_review_required: bool
     issues: list[str] = Field(default_factory=list)
+
+
+class BedrockBatchDecision(BaseModel):
+    decisions: list[BatchAuditDecision]

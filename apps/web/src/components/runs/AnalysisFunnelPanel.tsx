@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ChevronDown, Clock, Filter, Inbox, ListChecks } from "lucide-react";
+import { Bot, ChevronDown, Clock, Filter, Inbox, ListChecks, SearchCheck } from "lucide-react";
 import type { AnalysisRun, DroppedThreadInfo } from "../../api/types";
 import { formatDateTime } from "../../lib/format";
 
@@ -27,8 +27,13 @@ export function AnalysisFunnelPanel({ run }: Props) {
 
   const droppedNotPrimary = funnel.dropped_not_primary_inbox;
   const droppedWindow = funnel.dropped_no_external_in_window;
-  const totalDropped = droppedNotPrimary + droppedWindow;
-  if (totalDropped === 0) return null;
+  const skippedByPlan = funnel.skipped_by_plan_cap ?? 0;
+  const totalDropped = droppedNotPrimary + droppedWindow + skippedByPlan;
+  const aiBatch = funnel.ai_batch_classified ?? 0;
+  const aiDetailed = funnel.ai_detailed_audited ?? 0;
+  const aiUnique = funnel.ai_unique_threads ?? 0;
+  const aiCalls = funnel.ai_calls ?? 0;
+  if (totalDropped === 0 && aiUnique === 0) return null;
 
   const candidates = run.total_candidate_threads;
   const analyzed = run.metrics.total_threads;
@@ -43,10 +48,10 @@ export function AnalysisFunnelPanel({ run }: Props) {
       >
         <span className="funnel-kicker">
           <Filter size={16} />
-          {totalDropped} {totalDropped === 1 ? "correo no se analizó" : "correos no se analizaron"}
+          Embudo del análisis
         </span>
         <span className="funnel-subtitle">
-          De {candidates} encontrados en Gmail, se analizaron {analyzed}. Mira por qué quedaron fuera.
+          Gmail encontró {candidates}; se analizaron {analyzed} y {aiUnique} se enviaron a IA en {aiCalls} llamadas.
         </span>
         <ChevronDown size={18} className={open ? "funnel-chevron open" : "funnel-chevron"} />
       </button>
@@ -68,7 +73,21 @@ export function AnalysisFunnelPanel({ run }: Props) {
               tone="tone-orange"
             />
             <FunnelStat icon={ListChecks} label="Analizados" value={analyzed} tone="tone-mint" />
+            <FunnelStat icon={Bot} label="Clasificados por lote" value={aiBatch} tone="tone-violet" />
+            <FunnelStat
+              icon={SearchCheck}
+              label="Auditoría detallada"
+              value={aiDetailed}
+              tone="tone-blue"
+            />
           </div>
+
+          {skippedByPlan > 0 && (
+            <p className="funnel-hint">
+              {skippedByPlan} hilos analizables quedaron fuera por el límite del plan
+              {funnel.more_beyond_retrieved ? "; Gmail además indicó que había más resultados" : ""}.
+            </p>
+          )}
 
           {droppedWindow > 0 && (
             <p className="funnel-hint">

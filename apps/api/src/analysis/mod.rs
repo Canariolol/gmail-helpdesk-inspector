@@ -146,6 +146,18 @@ pub struct AnalysisFunnel {
     /// `true` si Gmail indicó que había aún más hilos allá del lote recuperado.
     #[serde(default)]
     pub more_beyond_retrieved: bool,
+    /// Hilos enviados al clasificador IA por lotes.
+    #[serde(default)]
+    pub ai_batch_classified: u64,
+    /// Hilos que requirieron una segunda auditoría IA detallada.
+    #[serde(default)]
+    pub ai_detailed_audited: u64,
+    /// Hilos únicos enviados a IA (una escalada no cuenta dos veces).
+    #[serde(default)]
+    pub ai_unique_threads: u64,
+    /// Llamadas totales al proveedor IA, incluidos reintentos y escaladas.
+    #[serde(default)]
+    pub ai_calls: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

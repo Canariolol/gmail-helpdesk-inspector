@@ -13,6 +13,7 @@ class Settings(BaseSettings):
         default="us.anthropic.claude-sonnet-4-6",
         alias="BEDROCK_MODEL_ID",
     )
+    bedrock_batch_model_id: str = Field(default="", alias="BEDROCK_BATCH_MODEL_ID")
 
     # Legacy fallback context. Production requests should send policy_context
     # per analysis run; these defaults intentionally contain no tenant/company data.
@@ -24,6 +25,14 @@ class Settings(BaseSettings):
     @property
     def invoke_url(self) -> str:
         model = quote(self.bedrock_model_id, safe="")
+        return (
+            f"https://bedrock-runtime.{self.aws_region}.amazonaws.com"
+            f"/model/{model}/converse"
+        )
+
+    @property
+    def batch_invoke_url(self) -> str:
+        model = quote(self.bedrock_batch_model_id or self.bedrock_model_id, safe="")
         return (
             f"https://bedrock-runtime.{self.aws_region}.amazonaws.com"
             f"/model/{model}/converse"

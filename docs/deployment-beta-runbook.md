@@ -71,6 +71,7 @@ Principios de producción beta:
 | `AWS_BEARER_TOKEN_BEDROCK` | Bearer token para Bedrock runtime cuando aplique. |
 | `AWS_REGION` | Default `us-east-1`. |
 | `BEDROCK_MODEL_ID` | Default `us.anthropic.claude-sonnet-4-6`. |
+| `BEDROCK_BATCH_MODEL_ID` | Opcional; modelo para clasificación batch. Vacío reutiliza `BEDROCK_MODEL_ID`. |
 | `DESK_MAILBOX`, `ANALYZED_MAILBOX`, `INTERNAL_DOMAIN`, `DESK_MEMBERS` | Legacy fallback genérico. No configurar datos tenant/company en producción SaaS. |
 
 ### Web (`apps/web`)
@@ -136,6 +137,7 @@ Variables mínimas:
 AWS_BEARER_TOKEN_BEDROCK=<secret>
 AWS_REGION=<region>
 BEDROCK_MODEL_ID=<model-id>
+BEDROCK_BATCH_MODEL_ID=<optional-cheaper-model-id>
 ```
 
 ### API

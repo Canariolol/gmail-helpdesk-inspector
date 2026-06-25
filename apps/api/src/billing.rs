@@ -213,8 +213,8 @@ pub fn public_plans() -> Vec<BillingPlan> {
 
 /// Plan gratuito por defecto (sin tarjeta). No es comprable: se asigna como plan
 /// vigente cuando una org no tiene suscripción que dé acceso (nueva o churned).
-/// Límites mini, todos tuneables aquí. Ninfa cubre TODOS los hilos analizados, así
-/// que `ai_audited_threads_per_month == analyzed_threads_per_month`.
+/// Límites mini, todos tuneables aquí. El cupo IA permite que cualquier hilo
+/// analizado pueda entrar al embudo batch, sin obligar a auditar todos individualmente.
 pub fn free_plan() -> BillingPlan {
     BillingPlan {
         id: BillingPlanId::Gratis,
@@ -360,11 +360,11 @@ mod tests {
     }
 
     #[test]
-    fn free_plan_caps_analyzed_and_audits_all() {
+    fn free_plan_caps_analyzed_and_has_matching_ai_eligibility() {
         let limits = free_plan().limits;
         assert_eq!(limits.analyzed_threads_per_run, 40);
         assert_eq!(limits.analyzed_threads_per_month, 120);
-        // Ninfa cubre todos los analizados: el tope de IA iguala al de analizados.
+        // Todo hilo analizado puede ser elegible para el batch sin exceder el cupo.
         assert_eq!(
             limits.ai_audited_threads_per_month,
             limits.analyzed_threads_per_month

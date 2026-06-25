@@ -107,8 +107,9 @@ function initDraft(config: OrgConfig | null): WizardDraft {
   };
 }
 
-function buildPutBody(d: WizardDraft) {
+function buildPutBody(d: WizardDraft, finalize = false) {
   return {
+    finalize,
     org: { name: d.orgName.trim(), default_timezone: d.orgTimezone, locale: "es-CL" },
     analysis_policy: {
       timezone: d.orgTimezone,
@@ -143,6 +144,13 @@ function buildPutBody(d: WizardDraft) {
     },
     retention_policy: { retention_days: d.retentionDays },
   };
+}
+
+function stepForMissing(missing: string[]): number {
+  if (missing.includes("internal_domains")) return 2;
+  if (missing.includes("valid_request_criteria")) return 3;
+  if (missing.includes("report_recipients")) return 5;
+  return 1;
 }
 
 function formatDateTime(iso: string | null): string {
@@ -275,11 +283,14 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
       initialized.current = true;
       setDraft(initDraft(orgConfig));
       setSetupState(orgConfig.setup_state);
+      if (!orgConfig.setup_state.ready_for_analysis) {
+        setStep(stepForMissing(orgConfig.setup_state.missing));
+      }
     }
   }, [orgConfig]);
 
   const saveMutation = useMutation({
-    mutationFn: (body: unknown) =>
+    mutationFn: (body: ReturnType<typeof buildPutBody>) =>
       api<PutConfigResponse>("/me/org/config", { method: "PUT", body: JSON.stringify(body) }),
     onSuccess: (res) => {
       setSetupState(res.setup_state);
@@ -296,6 +307,18 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
     if (s === 1 && !draft.orgName.trim()) return "El nombre de la organización es requerido.";
     if (s === 2 && splitLines(draft.internalDomainsText).length === 0)
       return "Agrega al menos un dominio interno (sin @). Ej: tuempresa.com";
+    if (s === 3 && splitLines(draft.validCriteriaText).length === 0)
+      return "Describe al menos un criterio de solicitud válida.";
+    if (s === 5 && draft.schedulerEnabled && splitLines(draft.reportRecipientsText).length === 0)
+      return "Agrega al menos un destinatario para activar el análisis automático.";
+    return null;
+  }
+
+  function validateAll(): { step: number; message: string } | null {
+    for (const candidate of STEPS) {
+      const message = validate(candidate.id);
+      if (message) return { step: candidate.id, message };
+    }
     return null;
   }
 
@@ -312,11 +335,16 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
     setStep((s) => Math.max(s - 1, 1));
   }
 
-  function handleSave() {
-    const err = validate(step);
-    if (err) { setStepError(err); return; }
+  function handleSave(finalize = false) {
+    const validation = finalize ? validateAll() : null;
+    const err = validation?.message ?? null;
+    if (err) {
+      if (validation) setStep(validation.step);
+      setStepError(err);
+      return;
+    }
     setStepError(null);
-    saveMutation.mutate(buildPutBody(draft));
+    saveMutation.mutate(buildPutBody(draft, finalize));
   }
 
   if (isLoading) {
@@ -494,7 +522,10 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
                 </p>
               </div>
               <div className="field">
-                <label htmlFor="valid-criteria">Criterios de solicitud válida</label>
+                <label htmlFor="valid-criteria">
+                  Criterios de solicitud válida
+                  <span style={{ fontWeight: 400, color: "var(--chip-red-fg)" }}> *</span>
+                </label>
                 <textarea
                   id="valid-criteria"
                   rows={4}
@@ -745,9 +776,11 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
             <div className="wizard-success" style={{ marginTop: 16 }}>
               <CheckCircle2 size={16} />
               Configuración guardada correctamente.
-              {setupState?.ready_for_analysis
-                ? " La casilla está lista para análisis."
-                : " Completa los pasos restantes para habilitar el análisis."}
+              {saveMutation.variables?.finalize
+                ? setupState?.ready_for_analysis
+                  ? " La casilla está lista para análisis."
+                  : " Completa los pasos restantes para habilitar el análisis."
+                : " Puedes continuar editando el borrador."}
             </div>
           )}
 
@@ -765,7 +798,7 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
               <button
                 type="button"
                 className="btn-ghost"
-                onClick={handleSave}
+                onClick={() => handleSave(false)}
                 disabled={saveMutation.isPending}
               >
                 {saveMutation.isPending ? <Loader2 size={16} className="spin" /> : null}
@@ -779,11 +812,11 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
                 <button
                   type="button"
                   className="btn-primary"
-                  onClick={handleSave}
+                  onClick={() => handleSave(true)}
                   disabled={saveMutation.isPending}
                 >
                   {saveMutation.isPending ? <Loader2 size={16} className="spin" /> : null}
-                  Guardar configuración
+                  Completar configuración
                 </button>
               )}
             </div>
