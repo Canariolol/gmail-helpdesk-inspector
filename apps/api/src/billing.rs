@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum BillingPlanId {
+    Gratis,
     Inicial,
     Pro,
     Equipo,
@@ -12,6 +13,7 @@ pub enum BillingPlanId {
 impl BillingPlanId {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::Gratis => "gratis",
             Self::Inicial => "inicial",
             Self::Pro => "pro",
             Self::Equipo => "equipo",
@@ -20,6 +22,7 @@ impl BillingPlanId {
 
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
+            "gratis" => Some(Self::Gratis),
             "inicial" => Some(Self::Inicial),
             "pro" => Some(Self::Pro),
             "equipo" => Some(Self::Equipo),
@@ -39,12 +42,21 @@ pub struct BillingPlan {
     pub highlighted: bool,
 }
 
+/// Centinela para "sin tope de hilos analizados por análisis" (planes de pago):
+/// `analyzed_threads_per_run` con este valor significa que el plan no limita el run
+/// (el límite real lo pone la policy de recuperación y el cupo mensual).
+pub const UNLIMITED_ANALYZED_PER_RUN: u32 = u32::MAX;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanLimits {
     pub mailboxes: u32,
     pub members: u32,
     pub runs_per_month: u32,
-    pub candidate_threads_per_month: u32,
+    /// Cupo mensual de hilos efectivamente ANALIZADOS (los que sobreviven el embudo
+    /// y se guardan), no los recuperados de Gmail.
+    pub analyzed_threads_per_month: u32,
+    /// Tope de hilos ANALIZADOS por cada análisis. `UNLIMITED_ANALYZED_PER_RUN` = sin tope.
+    pub analyzed_threads_per_run: u32,
     pub ai_audited_threads_per_month: u32,
     pub report_recipients: u32,
     pub retention_days: u32,
@@ -121,7 +133,9 @@ pub struct UsageLedger {
     pub org_id: String,
     pub period_key: String,
     pub runs_created: u32,
-    pub candidate_threads: u32,
+    /// Hilos efectivamente ANALIZADOS (guardados) en el período, no los recuperados.
+    #[serde(default, alias = "candidate_threads")]
+    pub analyzed_threads: u32,
     pub ai_audited_threads: u32,
     pub updated_at: DateTime<Utc>,
 }
@@ -151,7 +165,8 @@ pub fn public_plans() -> Vec<BillingPlan> {
                 mailboxes: 1,
                 members: 1,
                 runs_per_month: 10,
-                candidate_threads_per_month: 1_000,
+                analyzed_threads_per_month: 1_000,
+                analyzed_threads_per_run: UNLIMITED_ANALYZED_PER_RUN,
                 ai_audited_threads_per_month: 250,
                 report_recipients: 3,
                 retention_days: 30,
@@ -168,7 +183,8 @@ pub fn public_plans() -> Vec<BillingPlan> {
                 mailboxes: 2,
                 members: 3,
                 runs_per_month: 50,
-                candidate_threads_per_month: 7_500,
+                analyzed_threads_per_month: 7_500,
+                analyzed_threads_per_run: UNLIMITED_ANALYZED_PER_RUN,
                 ai_audited_threads_per_month: 2_000,
                 report_recipients: 10,
                 retention_days: 90,
@@ -185,7 +201,8 @@ pub fn public_plans() -> Vec<BillingPlan> {
                 mailboxes: 5,
                 members: 10,
                 runs_per_month: 200,
-                candidate_threads_per_month: 25_000,
+                analyzed_threads_per_month: 25_000,
+                analyzed_threads_per_run: UNLIMITED_ANALYZED_PER_RUN,
                 ai_audited_threads_per_month: 8_000,
                 report_recipients: 25,
                 retention_days: 180,
@@ -194,7 +211,36 @@ pub fn public_plans() -> Vec<BillingPlan> {
     ]
 }
 
+/// Plan gratuito por defecto (sin tarjeta). No es comprable: se asigna como plan
+/// vigente cuando una org no tiene suscripción que dé acceso (nueva o churned).
+/// Límites mini, todos tuneables aquí. Ninfa cubre TODOS los hilos analizados, así
+/// que `ai_audited_threads_per_month == analyzed_threads_per_month`.
+pub fn free_plan() -> BillingPlan {
+    BillingPlan {
+        id: BillingPlanId::Gratis,
+        name: "Mira Free".to_string(),
+        usd_reference_monthly: 0,
+        clp_monthly: 0,
+        trial_days: 0,
+        highlighted: false,
+        limits: PlanLimits {
+            mailboxes: 1,
+            members: 1,
+            // Backstop anti-abuso; el límite real es el cupo de hilos analizados.
+            runs_per_month: 15,
+            analyzed_threads_per_month: 120,
+            analyzed_threads_per_run: 40,
+            ai_audited_threads_per_month: 120,
+            report_recipients: 1,
+            retention_days: 14,
+        },
+    }
+}
+
 pub fn plan_by_id(plan_id: &BillingPlanId) -> BillingPlan {
+    if matches!(plan_id, BillingPlanId::Gratis) {
+        return free_plan();
+    }
     public_plans()
         .into_iter()
         .find(|plan| &plan.id == plan_id)
@@ -304,5 +350,35 @@ mod tests {
     #[test]
     fn missing_subscription_blocks_access() {
         assert!(!subscription_allows_access(None, Utc::now()));
+    }
+
+    #[test]
+    fn plan_by_id_resolves_free_without_panicking() {
+        let plan = plan_by_id(&BillingPlanId::Gratis);
+        assert_eq!(plan.id, BillingPlanId::Gratis);
+        assert_eq!(plan.clp_monthly, 0);
+    }
+
+    #[test]
+    fn free_plan_caps_analyzed_and_audits_all() {
+        let limits = free_plan().limits;
+        assert_eq!(limits.analyzed_threads_per_run, 40);
+        assert_eq!(limits.analyzed_threads_per_month, 120);
+        // Ninfa cubre todos los analizados: el tope de IA iguala al de analizados.
+        assert_eq!(
+            limits.ai_audited_threads_per_month,
+            limits.analyzed_threads_per_month
+        );
+    }
+
+    #[test]
+    fn paid_plans_have_no_per_run_analyzed_cap() {
+        for plan in public_plans() {
+            assert_eq!(
+                plan.limits.analyzed_threads_per_run, UNLIMITED_ANALYZED_PER_RUN,
+                "{} no debe topar hilos por análisis",
+                plan.name
+            );
+        }
     }
 }

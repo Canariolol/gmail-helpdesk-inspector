@@ -105,6 +105,9 @@ pub enum ThreadDisposition {
     Stored,
     DroppedNotPrimaryInbox,
     DroppedNoExternalInWindow,
+    /// Hilo que SÍ era analizable (sobrevivió el embudo) pero quedó fuera porque se
+    /// alcanzó el tope de hilos analizados del plan. No se guarda ni se audita.
+    SkippedByPlanCap,
 }
 
 /// Metadatos mínimos de un hilo descartado antes de clasificarse, para que el
@@ -128,6 +131,21 @@ pub struct AnalysisFunnel {
     pub dropped_no_external_in_window: u64,
     #[serde(default)]
     pub dropped_samples: Vec<DroppedThreadInfo>,
+    /// Hilos analizables que quedaron fuera por el tope de hilos analizados del plan.
+    #[serde(default)]
+    pub skipped_by_plan_cap: u64,
+    /// `true` cuando el tope del plan realmente recortó hilos analizables.
+    #[serde(default)]
+    pub truncated_by_plan: bool,
+    /// Tope de hilos analizados que aplicó el plan en este run (cuando truncó).
+    #[serde(default)]
+    pub plan_analyzed_cap: Option<u32>,
+    /// Total de hilos analizables observados = analizados + saltados por tope.
+    #[serde(default)]
+    pub would_be_analyzed: Option<u64>,
+    /// `true` si Gmail indicó que había aún más hilos allá del lote recuperado.
+    #[serde(default)]
+    pub more_beyond_retrieved: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

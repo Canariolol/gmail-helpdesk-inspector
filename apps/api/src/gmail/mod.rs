@@ -34,11 +34,27 @@ pub struct GmailThreadData {
 struct ThreadListResponse {
     #[serde(default)]
     threads: Vec<ThreadRef>,
+    /// Presente cuando hay más resultados de los que cupieron en `maxResults`:
+    /// señal de que la recuperación quedó truncada (hay más hilos en el rango).
+    #[serde(rename = "nextPageToken", default)]
+    next_page_token: Option<String>,
+    /// Estimación de Gmail del total de resultados (aproximada).
+    #[serde(rename = "resultSizeEstimate", default)]
+    result_size_estimate: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
 struct ThreadRef {
     id: String,
+}
+
+/// Página de IDs de hilos recuperados de Gmail, con señales de truncación para
+/// poder informar "recuperamos N, pero hay más" sin una segunda llamada.
+#[derive(Debug, Clone)]
+pub struct ThreadListPage {
+    pub ids: Vec<String>,
+    pub next_page_token: Option<String>,
+    pub result_size_estimate: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -151,7 +167,7 @@ impl GmailClient {
         access_token: &str,
         config: &AnalysisConfig,
         max_threads: u32,
-    ) -> anyhow::Result<Vec<String>> {
+    ) -> anyhow::Result<ThreadListPage> {
         let url = build_thread_list_url(config, max_threads);
         let response: ThreadListResponse = self
             .client
@@ -163,11 +179,15 @@ impl GmailClient {
             .context("failed to list Gmail threads")?
             .json()
             .await?;
-        Ok(response
-            .threads
-            .into_iter()
-            .map(|thread| thread.id)
-            .collect())
+        Ok(ThreadListPage {
+            ids: response
+                .threads
+                .into_iter()
+                .map(|thread| thread.id)
+                .collect(),
+            next_page_token: response.next_page_token.filter(|token| !token.is_empty()),
+            result_size_estimate: response.result_size_estimate,
+        })
     }
 
     pub async fn fetch_thread(
@@ -542,6 +562,27 @@ fn html_to_text(html: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thread_list_response_reads_truncation_signals() {
+        let json = r#"{
+            "threads": [{"id": "a"}, {"id": "b"}],
+            "nextPageToken": "tok-123",
+            "resultSizeEstimate": 137
+        }"#;
+        let parsed: ThreadListResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.threads.len(), 2);
+        assert_eq!(parsed.next_page_token.as_deref(), Some("tok-123"));
+        assert_eq!(parsed.result_size_estimate, Some(137));
+    }
+
+    #[test]
+    fn thread_list_response_without_truncation_signals() {
+        let json = r#"{"threads": [{"id": "a"}]}"#;
+        let parsed: ThreadListResponse = serde_json::from_str(json).unwrap();
+        assert!(parsed.next_page_token.is_none());
+        assert!(parsed.result_size_estimate.is_none());
+    }
 
     fn config() -> AnalysisConfig {
         AnalysisConfig {

@@ -7,6 +7,7 @@ import { EmptyState } from "../components/common/EmptyState";
 import { MetricCard } from "../components/common/MetricCard";
 import { FilterBar } from "../components/filters/FilterBar";
 import { AnalysisFunnelPanel } from "../components/runs/AnalysisFunnelPanel";
+import { PlanCapBanner } from "../components/runs/PlanCapBanner";
 import { StatusBanner } from "../components/runs/StatusBanner";
 import { ThreadDetailRail } from "../components/threads/ThreadDetailRail";
 import { ThreadTable } from "../components/threads/ThreadTable";
@@ -36,6 +37,8 @@ type Props = {
   onSavePreset?: (payload: unknown) => void;
   onDeletePreset?: (id: string) => void;
   analysisError?: string | null;
+  planName?: string | null;
+  onUpgrade?: () => void;
 };
 
 export function ResumenView(props: Props) {
@@ -109,6 +112,7 @@ export function ResumenView(props: Props) {
         <div className="split-view">
           <div className="view-col">
             <StatusBanner run={run} onStart={props.onStartRun} starting={props.startingRun} onViewDetails={() => focusThreads("all")} />
+            <PlanCapBanner run={run} planName={props.planName ?? null} onUpgrade={props.onUpgrade} />
             <AnalysisFunnelPanel run={run} />
             <div className="metric-grid primary">
               <MetricCard icon={Mail} label="Total analizados" value={run.metrics.total_threads} tone="blue" onClick={() => focusThreads("all")} />

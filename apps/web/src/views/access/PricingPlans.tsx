@@ -55,7 +55,7 @@ export function PricingPlans({
                 <Check size={15} /> {plan.limits.runs_per_month} análisis al mes
               </li>
               <li>
-                <Check size={15} /> {formatClp(plan.limits.candidate_threads_per_month)} hilos candidatos/mes
+                <Check size={15} /> {formatClp(plan.limits.analyzed_threads_per_month)} hilos analizados/mes
               </li>
               <li>
                 <Check size={15} /> {formatClp(plan.limits.ai_audited_threads_per_month)} hilos auditados por Ninfa/mes

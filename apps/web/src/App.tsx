@@ -480,6 +480,10 @@ export function App() {
   const runsLimit = usage.data?.limits?.runs_per_month ?? null;
   const runsCreated = usage.data?.usage.runs_created ?? 0;
   const runsLimitReached = !isBlocked && runsLimit !== null && runsCreated >= runsLimit;
+  // El cupo mensual de Free se mide en hilos ANALIZADOS, no solo en #análisis.
+  const analyzedLimit = usage.data?.limits?.analyzed_threads_per_month ?? null;
+  const analyzedUsed = usage.data?.usage.analyzed_threads ?? 0;
+  const analyzedLimitReached = !isBlocked && analyzedLimit !== null && analyzedUsed >= analyzedLimit;
   const effectiveView = isBlocked && DATA_VIEWS.includes(view) ? "cuenta" : view;
 
   return (
@@ -494,13 +498,25 @@ export function App() {
       />
       <main className="main-area">
         {isBlocked && <BlockedBanner onReactivate={() => setView("cuenta")} />}
-        {runsLimitReached && runsLimit !== null && (
+        {analyzedLimitReached && analyzedLimit !== null ? (
           <UsageLimitBanner
-            runsCreated={runsCreated}
-            runsLimit={runsLimit}
+            used={analyzedUsed}
+            limit={analyzedLimit}
+            unitLabel="hilos analizados"
             planName={planName}
             onUpgrade={() => setShowPlansModal(true)}
           />
+        ) : (
+          runsLimitReached &&
+          runsLimit !== null && (
+            <UsageLimitBanner
+              used={runsCreated}
+              limit={runsLimit}
+              unitLabel="análisis"
+              planName={planName}
+              onUpgrade={() => setShowPlansModal(true)}
+            />
+          )
         )}
         {effectiveView === "resumen" && (
           <ResumenView
@@ -526,6 +542,8 @@ export function App() {
             onSavePreset={(payload) => savePreset.mutate(payload)}
             onDeletePreset={(id) => deletePreset.mutate(id)}
             analysisError={createRun.error?.message ?? startRun.error?.message ?? null}
+            planName={planName}
+            onUpgrade={() => setShowPlansModal(true)}
           />
         )}
         {(effectiveView === "hilos" || effectiveView === "revision") && (

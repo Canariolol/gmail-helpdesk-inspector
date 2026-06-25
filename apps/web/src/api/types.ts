@@ -33,6 +33,12 @@ export interface AnalysisFunnel {
   dropped_not_primary_inbox: number;
   dropped_no_external_in_window: number;
   dropped_samples: DroppedThreadInfo[];
+  // Tope del plan: hilos analizables que quedaron fuera por el cupo del plan.
+  skipped_by_plan_cap?: number;
+  truncated_by_plan?: boolean;
+  plan_analyzed_cap?: number | null;
+  would_be_analyzed?: number | null;
+  more_beyond_retrieved?: boolean;
 }
 
 export interface Metrics {
@@ -127,14 +133,17 @@ export interface ThreadDetail {
 
 // ---- Account / Billing ----
 
-export type BillingPlanId = "inicial" | "pro" | "equipo";
+export type BillingPlanId = "gratis" | "inicial" | "pro" | "equipo";
 export type SubscriptionStatus = "pending" | "trialing" | "active" | "past_due" | "cancelled" | "expired";
 
 export interface PlanLimits {
   mailboxes: number;
   members: number;
   runs_per_month: number;
-  candidate_threads_per_month: number;
+  // Cupo mensual de hilos efectivamente ANALIZADOS (no los recuperados de Gmail).
+  analyzed_threads_per_month: number;
+  // Tope de hilos analizados por análisis (UNLIMITED en planes de pago).
+  analyzed_threads_per_run: number;
   ai_audited_threads_per_month: number;
   report_recipients: number;
   retention_days: number;
@@ -188,7 +197,8 @@ export interface UsageLedger {
   org_id: string;
   period_key: string;
   runs_created: number;
-  candidate_threads: number;
+  // Hilos efectivamente ANALIZADOS (guardados) en el período, no los recuperados.
+  analyzed_threads: number;
   ai_audited_threads: number;
   updated_at: string;
 }

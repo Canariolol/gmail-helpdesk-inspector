@@ -45,8 +45,9 @@ use crate::{
     },
     billing::{
         Account, BillingPlan, BillingPlanId, CheckoutSession, CheckoutSessionStatus,
-        EntitlementSnapshot, SubscriptionStatus, UsageLedger, active_subscription_for_trial,
-        plan_by_id, public_plans, subscription_allows_access,
+        EntitlementSnapshot, SubscriptionStatus, UNLIMITED_ANALYZED_PER_RUN, UsageLedger,
+        active_subscription_for_trial, free_plan, plan_by_id, public_plans,
+        subscription_allows_access,
     },
     config::AppConfig,
     gmail::GmailClient,
@@ -848,11 +849,8 @@ async fn get_usage(
         .get_usage_ledger(&bundle.org.id, &period_key)
         .await?
         .unwrap_or_else(|| empty_usage(&bundle.org.id, &period_key));
-    let subscription = state
-        .storage
-        .get_subscription_for_org(&bundle.org.id)
-        .await?;
-    let limits = subscription.map(|subscription| plan_by_id(&subscription.plan_id).limits);
+    // Plan vigente (pagado o Mira Free por defecto): siempre hay límites que mostrar.
+    let limits = Some(effective_plan_for_org(&state, &bundle.org.id).await?.limits);
     Ok(Json(UsageResponse {
         period_key,
         usage,
@@ -2278,15 +2276,50 @@ pub(crate) async fn execute_analysis(
         .get_analysis_run(&run_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("analysis run not found"))?;
-    let max_threads = run
+    // Plan vigente para este run (pagado o Mira Free por defecto). El tope del plan
+    // se aplica sobre los hilos ANALIZADOS (los que sobreviven el embudo), no sobre
+    // los recuperados de Gmail.
+    let plan = plan_for_run(&state, run.org_id.as_deref()).await?;
+    let used_analyzed = match run.org_id.as_deref() {
+        Some(org_id) => state
+            .storage
+            .get_usage_ledger(org_id, &current_period_key())
+            .await?
+            .map(|usage| usage.analyzed_threads)
+            .unwrap_or(0),
+        None => 0,
+    };
+    let policy_max = run
         .policy_snapshot
         .as_ref()
         .map(|snapshot| snapshot.analysis_policy.max_threads_per_run)
         .unwrap_or(state.config.google.gmail_max_threads);
-    let thread_ids = state
+    // En dev (`enforcement_enabled=false`) no hay tope: análisis ilimitado como antes.
+    let enforce = state.config.billing.enforcement_enabled;
+    let analyzed_cap = if enforce {
+        analyzed_run_cap(
+            plan.limits.analyzed_threads_per_run,
+            plan.limits.analyzed_threads_per_month,
+            used_analyzed,
+        )
+    } else {
+        u32::MAX
+    };
+    let has_finite_run_cap =
+        enforce && plan.limits.analyzed_threads_per_run != UNLIMITED_ANALYZED_PER_RUN;
+    // Recuperamos con holgura cuando hay tope finito (Free), para que el tope de
+    // analizados pueda llenarse pese a los descartes del embudo.
+    let retrieval_max = retrieval_max_for(has_finite_run_cap, analyzed_cap, policy_max).max(1);
+    // Free audita TODOS los hilos analizados (no una muestra): es el mejor demo y el
+    // costo queda acotado por el tope. Los planes de pago conservan el muestreo.
+    let audit_all = matches!(plan.id, BillingPlanId::Gratis);
+
+    let page = state
         .gmail
-        .list_thread_ids(&access_token, &run.config, max_threads)
+        .list_thread_ids(&access_token, &run.config, retrieval_max)
         .await?;
+    let more_beyond_retrieved = page.next_page_token.is_some();
+    let thread_ids = page.ids;
     run.total_candidate_threads = thread_ids.len() as u64;
     run.progress_message = format!("{} hilos encontrados en Gmail", thread_ids.len());
     state.storage.update_analysis_run(&run).await?;
@@ -2308,6 +2341,11 @@ pub(crate) async fn execute_analysis(
     let owner_email = run.user_email.clone();
     let run_id = run.id.clone();
     let total = run.total_candidate_threads;
+    // Hilos analizados (guardados) y saltados por tope del plan. El contador atómico
+    // reparte los cupos del tope entre las tareas concurrentes: cada hilo que
+    // sobrevive el embudo reclama un slot; los que exceden el tope se saltan.
+    let mut stored = 0u64;
+    let mut skipped_by_plan_cap = 0u64;
     {
         let state_ref = &state;
         let access_ref = access_token.as_str();
@@ -2316,6 +2354,8 @@ pub(crate) async fn execute_analysis(
         let policy_version_id_ref = policy_version_id.as_deref();
         let run_id_ref = run_id.as_str();
         let owner_email_ref = owner_email.as_str();
+        let analyzed_slot = std::sync::atomic::AtomicU32::new(0);
+        let analyzed_slot_ref = &analyzed_slot;
         let mut task_stream = stream::iter(thread_ids.into_iter().map(|thread_id| async move {
             process_one_thread(
                 state_ref,
@@ -2326,6 +2366,9 @@ pub(crate) async fn execute_analysis(
                     policy_snapshot: policy_ref,
                     policy_version_id: policy_version_id_ref,
                     owner_email: owner_email_ref,
+                    analyzed_slot: analyzed_slot_ref,
+                    analyzed_cap,
+                    audit_all,
                 },
                 thread_id,
             )
@@ -2344,12 +2387,17 @@ pub(crate) async fn execute_analysis(
                         ai_audited_threads = ai_audited_threads.saturating_add(1);
                     }
                     match outcome.disposition {
-                        ThreadDisposition::Stored => {}
+                        ThreadDisposition::Stored => {
+                            stored += 1;
+                        }
                         ThreadDisposition::DroppedNotPrimaryInbox => {
                             funnel.dropped_not_primary_inbox += 1;
                         }
                         ThreadDisposition::DroppedNoExternalInWindow => {
                             funnel.dropped_no_external_in_window += 1;
+                        }
+                        ThreadDisposition::SkippedByPlanCap => {
+                            skipped_by_plan_cap += 1;
                         }
                     }
                     if let Some(dropped) = outcome.dropped
@@ -2376,6 +2424,14 @@ pub(crate) async fn execute_analysis(
         run.processed_threads = processed;
     }
 
+    // El tope del plan recortó hilos analizables: lo dejamos explícito para que el
+    // reporte pueda decir honestamente "Analizamos N de M" en vez de aparentar falla.
+    funnel.skipped_by_plan_cap = skipped_by_plan_cap;
+    funnel.truncated_by_plan = skipped_by_plan_cap > 0;
+    funnel.more_beyond_retrieved = more_beyond_retrieved;
+    funnel.would_be_analyzed = Some(stored + skipped_by_plan_cap);
+    funnel.plan_analyzed_cap = (skipped_by_plan_cap > 0).then_some(analyzed_cap);
+
     let threads = state.storage.list_threads(&run.id).await?;
     run.metrics = calculate_metrics(&threads, ai_input_tokens, ai_output_tokens);
     // Los descartados no están en `threads` (nunca se guardan), así que el embudo
@@ -2385,15 +2441,58 @@ pub(crate) async fn execute_analysis(
     run.progress_message = "Análisis completado".to_string();
     run.completed_at = Some(Utc::now());
     state.storage.update_analysis_run(&run).await?;
+    // El cupo mensual se cobra por hilos ANALIZADOS (guardados), no por recuperados.
     add_analysis_usage(
         &state,
         run.org_id.as_deref(),
-        run.total_candidate_threads as u32,
+        stored as u32,
         ai_audited_threads,
     )
     .await?;
     Ok(())
 }
+
+/// Plan vigente para un run en background (versión `anyhow` de `effective_plan_for_org`).
+async fn plan_for_run(state: &AppState, org_id: Option<&str>) -> anyhow::Result<BillingPlan> {
+    if !state.config.billing.enforcement_enabled {
+        return Ok(plan_by_id(&BillingPlanId::Pro));
+    }
+    let Some(org_id) = org_id else {
+        return Ok(plan_by_id(&BillingPlanId::Pro));
+    };
+    let subscription = state.storage.get_subscription_for_org(org_id).await?;
+    if subscription_allows_access(subscription.as_ref(), Utc::now()) {
+        Ok(plan_by_id(&subscription.expect("checked above").plan_id))
+    } else {
+        Ok(free_plan())
+    }
+}
+
+/// Tope de hilos analizados para un run: el menor entre el tope por análisis del
+/// plan y lo que reste del cupo mensual.
+fn analyzed_run_cap(per_run: u32, per_month: u32, used_this_month: u32) -> u32 {
+    let monthly_remaining = per_month.saturating_sub(used_this_month);
+    per_run.min(monthly_remaining)
+}
+
+/// Cuántos candidatos recuperar de Gmail. Con tope finito (Free) recuperamos con
+/// holgura para que el tope de analizados pueda llenarse pese a los descartes del
+/// embudo; sin tope (planes de pago) respetamos el `max_threads_per_run` de policy.
+fn retrieval_max_for(has_finite_run_cap: bool, analyzed_cap: u32, policy_max: u32) -> u32 {
+    if has_finite_run_cap {
+        analyzed_cap
+            .saturating_mul(FREE_RETRIEVAL_FACTOR)
+            .min(FREE_RETRIEVAL_HARD_MAX)
+            .max(analyzed_cap.min(FREE_RETRIEVAL_HARD_MAX))
+    } else {
+        policy_max
+    }
+}
+
+/// Holgura de recuperación para planes con tope finito de analizados.
+const FREE_RETRIEVAL_FACTOR: u32 = 3;
+/// Techo duro de recuperación para no disparar las llamadas a Gmail en Free.
+const FREE_RETRIEVAL_HARD_MAX: u32 = 300;
 
 /// Maximum number of threads processed concurrently in a single analysis run.
 const ANALYSIS_CONCURRENCY: usize = 5;
@@ -2438,6 +2537,13 @@ struct ThreadProcessingContext<'a> {
     policy_snapshot: Option<&'a crate::policies::PolicySnapshot>,
     policy_version_id: Option<&'a str>,
     owner_email: &'a str,
+    /// Contador atómico compartido de hilos analizables ya reclamados, para repartir
+    /// los cupos del tope del plan entre las tareas concurrentes.
+    analyzed_slot: &'a std::sync::atomic::AtomicU32,
+    /// Tope de hilos analizados de este run (del plan vigente).
+    analyzed_cap: u32,
+    /// Free audita todos los analizados; los planes de pago muestrean.
+    audit_all: bool,
 }
 
 async fn process_one_thread(
@@ -2481,6 +2587,18 @@ async fn process_one_thread(
                 &data.messages,
                 ThreadDisposition::DroppedNoExternalInWindow,
             )),
+            ..Default::default()
+        });
+    }
+
+    // El hilo sobrevivió el embudo: es analizable. Reclama un cupo bajo el tope del
+    // plan. Si ya se agotó, no se guarda ni se audita (cuenta como saltado por tope).
+    let slot = processing
+        .analyzed_slot
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    if slot >= processing.analyzed_cap {
+        return Ok(ThreadOutcome {
+            disposition: ThreadDisposition::SkippedByPlanCap,
             ..Default::default()
         });
     }
@@ -2546,9 +2664,14 @@ async fn process_one_thread(
         _ => AUDIT_SAMPLE_RATE_OTHER,
     };
     let in_audit_sample = sample_bucket(&thread.gmail_thread_id) < sample_rate;
+    // `audit_all` (plan Free) audita todo hilo analizable; los planes de pago usan el
+    // muestreo estratificado para acotar el costo de IA en volúmenes grandes.
     let should_audit = ai_enabled
         && received_human_thread
-        && (thread.is_valid_client_request || thread.manual_review_required || in_audit_sample);
+        && (processing.audit_all
+            || thread.is_valid_client_request
+            || thread.manual_review_required
+            || in_audit_sample);
 
     let mut outcome = ThreadOutcome::default();
     if should_audit {
@@ -2912,6 +3035,21 @@ fn require_gmail_connected(session: &UserSession) -> Result<(), ApiError> {
     }
 }
 
+/// Plan vigente de una org: el de su suscripción si da acceso, o Mira Free por
+/// defecto (cuentas nuevas y churned caen a Free, sin filas ni migración). En modo
+/// dev (`enforcement_enabled=false`) se usa Pro para no toparse con nada.
+async fn effective_plan_for_org(state: &AppState, org_id: &str) -> Result<BillingPlan, ApiError> {
+    if !state.config.billing.enforcement_enabled {
+        return Ok(plan_by_id(&BillingPlanId::Pro));
+    }
+    let subscription = state.storage.get_subscription_for_org(org_id).await?;
+    if subscription_allows_access(subscription.as_ref(), Utc::now()) {
+        Ok(plan_by_id(&subscription.expect("checked above").plan_id))
+    } else {
+        Ok(free_plan())
+    }
+}
+
 async fn entitlement_snapshot(
     state: &AppState,
     org_id: &str,
@@ -2928,10 +3066,14 @@ async fn entitlement_snapshot(
         });
     }
     let subscription = state.storage.get_subscription_for_org(org_id).await?;
-    let allowed = subscription_allows_access(subscription.as_ref(), Utc::now());
-    let plan = subscription
-        .as_ref()
-        .map(|subscription| plan_by_id(&subscription.plan_id));
+    // Capa gratuita: el acceso SIEMPRE está permitido. Quien no tiene suscripción
+    // que dé acceso (nuevo o churned) usa Mira Free; quien la tiene, su plan pagado.
+    let has_paid_access = subscription_allows_access(subscription.as_ref(), Utc::now());
+    let plan = if has_paid_access {
+        plan_by_id(&subscription.as_ref().expect("checked above").plan_id)
+    } else {
+        free_plan()
+    };
     let cancel_at_period_end = subscription
         .as_ref()
         .map(|subscription| subscription.cancel_at_period_end)
@@ -2942,9 +3084,11 @@ async fn entitlement_snapshot(
     let trial_ends_at = subscription
         .as_ref()
         .and_then(|subscription| subscription.trial_ends_at);
-    // Si una cancelación agendada ya venció, reportar Cancelled para que el front la trate como bloqueada.
+    // Estado real de la suscripción, para que el front pueda mostrar un nudge de
+    // recuperación (dunning) sin bloquear: una cancelación agendada ya vencida se
+    // reporta como Cancelled.
     let subscription_status = subscription.map(|subscription| {
-        if !allowed
+        if !has_paid_access
             && subscription.status == SubscriptionStatus::Active
             && subscription.cancel_at_period_end
         {
@@ -2954,14 +3098,10 @@ async fn entitlement_snapshot(
         }
     });
     Ok(EntitlementSnapshot {
-        allowed,
-        reason: if allowed {
-            None
-        } else {
-            Some("subscription_required".to_string())
-        },
+        allowed: true,
+        reason: None,
         subscription_status,
-        plan,
+        plan: Some(plan),
         cancel_at_period_end,
         current_period_end,
         trial_ends_at,
@@ -2997,7 +3137,7 @@ fn empty_usage(org_id: &str, period_key: &str) -> UsageLedger {
         org_id: org_id.to_string(),
         period_key: period_key.to_string(),
         runs_created: 0,
-        candidate_threads: 0,
+        analyzed_threads: 0,
         ai_audited_threads: 0,
         updated_at: Utc::now(),
     }
@@ -3007,12 +3147,9 @@ async fn enforce_usage_allows_run(state: &AppState, org_id: &str) -> Result<(), 
     if !state.config.billing.enforcement_enabled {
         return Ok(());
     }
-    let subscription = state
-        .storage
-        .get_subscription_for_org(org_id)
-        .await?
-        .ok_or_else(|| ApiError::payment_required("necesitas un plan activo"))?;
-    let plan = plan_by_id(&subscription.plan_id);
+    // Plan vigente (pagado o Mira Free por defecto). Free nunca tiene fila de
+    // suscripción, así que NO podemos exigir una aquí.
+    let plan = effective_plan_for_org(state, org_id).await?;
     let period_key = current_period_key();
     let usage = state
         .storage
@@ -3022,6 +3159,11 @@ async fn enforce_usage_allows_run(state: &AppState, org_id: &str) -> Result<(), 
     if usage.runs_created >= plan.limits.runs_per_month {
         return Err(ApiError::payment_required(
             "alcanzaste el límite mensual de análisis de tu plan",
+        ));
+    }
+    if usage.analyzed_threads >= plan.limits.analyzed_threads_per_month {
+        return Err(ApiError::payment_required(
+            "agotaste tu cupo mensual de hilos analizados — sube de plan para seguir",
         ));
     }
     Ok(())
@@ -3046,7 +3188,7 @@ async fn increment_runs_usage(state: &AppState, org_id: Option<&str>) -> Result<
 async fn add_analysis_usage(
     state: &AppState,
     org_id: Option<&str>,
-    candidate_threads: u32,
+    analyzed_threads: u32,
     ai_audited_threads: u32,
 ) -> anyhow::Result<()> {
     let Some(org_id) = org_id else {
@@ -3058,7 +3200,7 @@ async fn add_analysis_usage(
         .get_usage_ledger(org_id, &period_key)
         .await?
         .unwrap_or_else(|| empty_usage(org_id, &period_key));
-    usage.candidate_threads = usage.candidate_threads.saturating_add(candidate_threads);
+    usage.analyzed_threads = usage.analyzed_threads.saturating_add(analyzed_threads);
     usage.ai_audited_threads = usage.ai_audited_threads.saturating_add(ai_audited_threads);
     usage.updated_at = Utc::now();
     state.storage.upsert_usage_ledger(&usage).await
@@ -3492,6 +3634,33 @@ mod tests {
         storage::MemoryStorage,
     };
 
+    #[test]
+    fn analyzed_run_cap_takes_min_of_per_run_and_monthly_remaining() {
+        // Free: tope por run 40, cupo mensual 120 sin uso => 40.
+        assert_eq!(analyzed_run_cap(40, 120, 0), 40);
+        // Queda poco cupo mensual: el run se topa por el remanente.
+        assert_eq!(analyzed_run_cap(40, 120, 100), 20);
+        // Cupo agotado => 0.
+        assert_eq!(analyzed_run_cap(40, 120, 120), 0);
+        assert_eq!(analyzed_run_cap(40, 120, 999), 0);
+        // Plan de pago (sin tope por run): manda el remanente mensual.
+        assert_eq!(
+            analyzed_run_cap(UNLIMITED_ANALYZED_PER_RUN, 7_500, 100),
+            7_400
+        );
+    }
+
+    #[test]
+    fn retrieval_max_gives_headroom_for_finite_cap_and_respects_policy_otherwise() {
+        // Free (tope finito): recupera con holgura (factor 3) acotado por el techo.
+        assert_eq!(retrieval_max_for(true, 40, 50), 120);
+        assert_eq!(retrieval_max_for(true, 200, 50), FREE_RETRIEVAL_HARD_MAX);
+        // Cupo pequeño: nunca recupera menos que el propio tope.
+        assert_eq!(retrieval_max_for(true, 5, 50), 15);
+        // Plan de pago (sin tope): respeta el max_threads_per_run de policy.
+        assert_eq!(retrieval_max_for(false, 999, 50), 50);
+    }
+
     struct TestApp {
         app: axum::Router,
         storage: MemoryStorage,
@@ -3850,7 +4019,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn analysis_creation_requires_active_subscription() {
+    async fn free_tier_allows_analysis_creation_without_subscription() {
+        // Capa gratuita: sin suscripción, una cuenta nueva puede crear análisis de
+        // inmediato (antes esto devolvía 402). El siguiente gate ya no es pago.
         let config = test_app_config();
         let storage = MemoryStorage::default();
         storage
@@ -3873,18 +4044,23 @@ mod tests {
             ))
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+        assert_ne!(
+            response.status(),
+            StatusCode::PAYMENT_REQUIRED,
+            "el plan gratis no debe exigir pago para crear un análisis"
+        );
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
-    async fn history_reads_require_active_subscription() {
+    async fn free_tier_allows_history_reads_without_subscription() {
         let config = test_app_config();
         let storage = MemoryStorage::default();
         storage
-            .upsert_user_session(&session("blocked-session", "blocked@example.com"))
+            .upsert_user_session(&session("free-reader-session", "free-reader@example.com"))
             .await
             .unwrap();
-        let cookie = signed_cookie("blocked-session", &config.session_secret);
+        let cookie = signed_cookie("free-reader-session", &config.session_secret);
         let app = crate::build_app(config, Arc::new(storage));
 
         for uri in ["/analysis-runs", "/threads/whatever"] {
@@ -3893,16 +4069,17 @@ mod tests {
                 .oneshot(request(Method::GET, uri, Some(&cookie), None))
                 .await
                 .unwrap();
-            assert_eq!(
+            assert_ne!(
                 response.status(),
                 StatusCode::PAYMENT_REQUIRED,
-                "GET {uri} debería exigir suscripción activa"
+                "GET {uri} ya no debe exigir suscripción en el plan gratis"
             );
         }
     }
 
     #[tokio::test]
-    async fn gmail_connect_requires_active_subscription() {
+    async fn free_tier_allows_gmail_connect_without_subscription() {
+        // Sin suscripción, conectar Gmail redirige a Google (307) en vez de bloquear.
         let config = test_app_config();
         let storage = MemoryStorage::default();
         storage
@@ -3921,7 +4098,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
     }
 
     #[tokio::test]
