@@ -18,6 +18,23 @@ export interface ClassificationBreakdown {
   ambiguous: number;
 }
 
+export type ThreadDropReason =
+  | "dropped_not_primary_inbox"
+  | "dropped_no_external_in_window";
+
+export interface DroppedThreadInfo {
+  gmail_thread_id: string;
+  subject: string;
+  first_message_at?: string | null;
+  reason: ThreadDropReason | "stored";
+}
+
+export interface AnalysisFunnel {
+  dropped_not_primary_inbox: number;
+  dropped_no_external_in_window: number;
+  dropped_samples: DroppedThreadInfo[];
+}
+
 export interface Metrics {
   total_threads: number;
   valid_requests: number;
@@ -36,6 +53,7 @@ export interface Metrics {
   ai_input_tokens: number;
   ai_output_tokens: number;
   classification_breakdown?: ClassificationBreakdown;
+  funnel?: AnalysisFunnel;
 }
 
 export interface AnalysisRun {
@@ -217,6 +235,7 @@ export interface AnalysisPolicy {
   ignored_senders: string[];
   ignored_domains: string[];
   ignored_keywords: string[];
+  valid_signal_keywords?: string[];
   default_time_from: string;
   default_time_to: string;
   max_threads_per_run: number;

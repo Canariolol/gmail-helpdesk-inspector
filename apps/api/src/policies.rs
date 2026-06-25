@@ -129,6 +129,11 @@ pub struct AnalysisPolicy {
     pub ignored_senders: Vec<String>,
     pub ignored_domains: Vec<String>,
     pub ignored_keywords: Vec<String>,
+    /// Palabras que confirman una solicitud real (p. ej. "ticket", "incidencia").
+    /// Si alguna aparece en el asunto o el cuerpo de un mensaje, el hilo se rescata
+    /// a Solicitud Válida y se enruta a la auditoría IA para el veredicto final.
+    #[serde(default)]
+    pub valid_signal_keywords: Vec<String>,
     /// Etiquetas/categorías de Gmail a incluir y excluir en la recuperación de
     /// hilos. Vacías = comportamiento histórico (INBOX + pestaña Principal).
     #[serde(default)]
@@ -295,6 +300,7 @@ pub fn provision_default_config(user_email: &str, now: DateTime<Utc>) -> OrgConf
             ignored_senders: vec![],
             ignored_domains: vec![],
             ignored_keywords: vec![],
+            valid_signal_keywords: vec![],
             include_labels: vec![],
             exclude_labels: vec![],
             default_time_from: "00:00".to_string(),

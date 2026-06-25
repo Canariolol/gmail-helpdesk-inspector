@@ -31,12 +31,13 @@ use uuid::Uuid;
 
 use crate::{
     analysis::{
-        AiAuditResult, AnalysisConfig, AnalysisMetrics, AnalysisRun, AnalysisStatus,
-        Classification, ClassificationSource, EmailMessage, EmailThread, ManualReview,
-        ManualReviewOverride, TriggerType, ai_message_ids_known, apply_manual_review_override,
-        calculate_metrics, classify_thread, message_fingerprint, message_is_inside_analysis_window,
+        AiAuditResult, AnalysisConfig, AnalysisFunnel, AnalysisMetrics, AnalysisRun,
+        AnalysisStatus, Classification, ClassificationSource, DroppedThreadInfo, EmailMessage,
+        EmailThread, ManualReview, ManualReviewOverride, ThreadDisposition, TriggerType,
+        ai_message_ids_known, apply_manual_review_override, calculate_metrics, classify_thread,
+        message_fingerprint, message_is_inside_analysis_window,
         refine_classification_with_gmail_labels, refine_classification_with_policy_hints,
-        should_auto_apply_ai,
+        rescue_classification_with_valid_signals, should_auto_apply_ai,
     },
     auth::{
         GoogleTokenResponse, UserSession, clear_oauth_cookie, clear_session_cookie, decrypt_token,
@@ -1395,6 +1396,7 @@ struct AnalysisPolicyUpdateRequest {
     ignored_senders: Option<Vec<String>>,
     ignored_domains: Option<Vec<String>>,
     ignored_keywords: Option<Vec<String>>,
+    valid_signal_keywords: Option<Vec<String>>,
     include_labels: Option<Vec<String>>,
     exclude_labels: Option<Vec<String>>,
     default_time_from: Option<String>,
@@ -1576,6 +1578,9 @@ fn apply_analysis_policy_update(
     }
     if let Some(values) = update.ignored_keywords {
         current.ignored_keywords = normalize_text_list(values);
+    }
+    if let Some(values) = update.valid_signal_keywords {
+        current.valid_signal_keywords = normalize_text_list(values);
     }
     if let Some(values) = update.include_labels {
         current.include_labels = normalize_text_list(values);
@@ -2289,6 +2294,10 @@ pub(crate) async fn execute_analysis(
     let mut ai_input_tokens = 0u64;
     let mut ai_output_tokens = 0u64;
     let mut ai_audited_threads = 0u32;
+    // Embudo de diagnóstico: contamos los descartes previos a la clasificación
+    // (que no se guardan en ningún lado) y guardamos una muestra acotada para que
+    // el usuario vea CUÁLES hilos se cayeron y por qué.
+    let mut funnel = AnalysisFunnel::default();
 
     // Process threads with bounded concurrency: each thread's Gmail fetch, local
     // classification, AI audit and storage writes are independent, so we run up to
@@ -2334,6 +2343,20 @@ pub(crate) async fn execute_analysis(
                     if outcome.ai_audited {
                         ai_audited_threads = ai_audited_threads.saturating_add(1);
                     }
+                    match outcome.disposition {
+                        ThreadDisposition::Stored => {}
+                        ThreadDisposition::DroppedNotPrimaryInbox => {
+                            funnel.dropped_not_primary_inbox += 1;
+                        }
+                        ThreadDisposition::DroppedNoExternalInWindow => {
+                            funnel.dropped_no_external_in_window += 1;
+                        }
+                    }
+                    if let Some(dropped) = outcome.dropped
+                        && funnel.dropped_samples.len() < FUNNEL_DROPPED_SAMPLE_CAP
+                    {
+                        funnel.dropped_samples.push(dropped);
+                    }
                 }
                 Err(error) => {
                     tracing::warn!(?error, "el procesamiento de un hilo falló; se omite");
@@ -2355,6 +2378,9 @@ pub(crate) async fn execute_analysis(
 
     let threads = state.storage.list_threads(&run.id).await?;
     run.metrics = calculate_metrics(&threads, ai_input_tokens, ai_output_tokens);
+    // Los descartados no están en `threads` (nunca se guardan), así que el embudo
+    // se adjunta aparte, después de recomputar las métricas de los almacenados.
+    run.metrics.funnel = funnel;
     run.status = AnalysisStatus::Completed;
     run.progress_message = "Análisis completado".to_string();
     run.completed_at = Some(Utc::now());
@@ -2373,12 +2399,39 @@ pub(crate) async fn execute_analysis(
 const ANALYSIS_CONCURRENCY: usize = 5;
 /// Write run progress to storage every N processed threads (instead of every one).
 const PROGRESS_UPDATE_EVERY: u64 = 5;
+/// Máximo de hilos descartados que guardamos como muestra en el embudo, para
+/// acotar el tamaño del documento del run sin perder utilidad de diagnóstico.
+const FUNNEL_DROPPED_SAMPLE_CAP: usize = 100;
 
 #[derive(Default)]
 struct ThreadOutcome {
     input_tokens: u64,
     output_tokens: u64,
     ai_audited: bool,
+    /// Dónde terminó el hilo: almacenado o descartado (y por qué). Alimenta el
+    /// embudo de diagnóstico para que los descartes dejen de ser invisibles.
+    disposition: ThreadDisposition,
+    /// Metadatos del descartado (solo cuando `disposition` es un descarte).
+    dropped: Option<DroppedThreadInfo>,
+}
+
+/// Construye el registro de un hilo descartado antes de clasificarse, usando los
+/// mensajes ya normalizados (sin tocar cuerpos). El asunto/fecha salen del primer
+/// mensaje del hilo.
+fn dropped_thread_info(
+    thread_id: &str,
+    messages: &[EmailMessage],
+    reason: ThreadDisposition,
+) -> DroppedThreadInfo {
+    let first = messages.iter().min_by_key(|message| message.date);
+    DroppedThreadInfo {
+        gmail_thread_id: thread_id.to_string(),
+        subject: first
+            .map(|message| message.subject.clone())
+            .unwrap_or_else(|| "(sin asunto)".to_string()),
+        first_message_at: first.map(|message| message.date),
+        reason,
+    }
 }
 
 struct ThreadProcessingContext<'a> {
@@ -2400,7 +2453,15 @@ async fn process_one_thread(
         .fetch_thread(access_token, &thread_id, config)
         .await?;
     if !data.is_primary_inbox {
-        return Ok(ThreadOutcome::default());
+        return Ok(ThreadOutcome {
+            disposition: ThreadDisposition::DroppedNotPrimaryInbox,
+            dropped: Some(dropped_thread_info(
+                &data.id,
+                &data.messages,
+                ThreadDisposition::DroppedNotPrimaryInbox,
+            )),
+            ..Default::default()
+        });
     }
     // The report counts "requests received in the window". Keep the thread only if some
     // EXTERNAL message lands inside the window — a new client request, a follow-up, or
@@ -2413,7 +2474,15 @@ async fn process_one_thread(
         .iter()
         .any(|message| message.is_external && message_is_inside_analysis_window(message, config));
     if !has_external_in_window {
-        return Ok(ThreadOutcome::default());
+        return Ok(ThreadOutcome {
+            disposition: ThreadDisposition::DroppedNoExternalInWindow,
+            dropped: Some(dropped_thread_info(
+                &data.id,
+                &data.messages,
+                ThreadDisposition::DroppedNoExternalInWindow,
+            )),
+            ..Default::default()
+        });
     }
 
     let mut thread = classify_thread(run_id, &data.id, &data.messages, config);
@@ -2432,6 +2501,13 @@ async fn process_one_thread(
             &mut thread,
             request_sender,
             &snapshot.analysis_policy.non_responsibility_rules,
+        );
+        // Señal extra: rescata a válido los hilos cuyo asunto/cuerpo menciona una
+        // palabra de "señal de ticket" del tenant; la IA confirma o degrada después.
+        rescue_classification_with_valid_signals(
+            &mut thread,
+            &data.messages,
+            &snapshot.analysis_policy.valid_signal_keywords,
         );
     }
     if let Some(review) = state
@@ -2759,11 +2835,15 @@ async fn recalculate_run_metrics(state: &AppState, run_id: &str) -> anyhow::Resu
         .await?
         .ok_or_else(|| anyhow::anyhow!("analysis run not found"))?;
     let threads = state.storage.list_threads(run_id).await?;
+    // El embudo se calcula solo durante el run (los descartados no se almacenan),
+    // así que lo preservamos al recomputar métricas tras una revisión manual.
+    let funnel = run.metrics.funnel.clone();
     run.metrics = calculate_metrics(
         &threads,
         run.metrics.ai_input_tokens,
         run.metrics.ai_output_tokens,
     );
+    run.metrics.funnel = funnel;
     state.storage.update_analysis_run(&run).await
 }
 

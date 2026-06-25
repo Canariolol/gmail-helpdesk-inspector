@@ -6,6 +6,7 @@ import { CompositionDonut } from "../components/charts/CompositionDonut";
 import { EmptyState } from "../components/common/EmptyState";
 import { MetricCard } from "../components/common/MetricCard";
 import { FilterBar } from "../components/filters/FilterBar";
+import { AnalysisFunnelPanel } from "../components/runs/AnalysisFunnelPanel";
 import { StatusBanner } from "../components/runs/StatusBanner";
 import { ThreadDetailRail } from "../components/threads/ThreadDetailRail";
 import { ThreadTable } from "../components/threads/ThreadTable";
@@ -108,6 +109,7 @@ export function ResumenView(props: Props) {
         <div className="split-view">
           <div className="view-col">
             <StatusBanner run={run} onStart={props.onStartRun} starting={props.startingRun} onViewDetails={() => focusThreads("all")} />
+            <AnalysisFunnelPanel run={run} />
             <div className="metric-grid primary">
               <MetricCard icon={Mail} label="Total analizados" value={run.metrics.total_threads} tone="blue" onClick={() => focusThreads("all")} />
               <MetricCard icon={CheckCircle2} label="Válidos" value={run.metrics.valid_requests} tone="mint" onClick={() => focusThreads("valid_client_request")} />

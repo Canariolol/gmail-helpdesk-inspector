@@ -749,6 +749,134 @@
   white-space: nowrap;
 }
 
+/* ---- Embudo de diagnóstico ---- */
+.funnel-panel {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface-soft);
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+}
+
+.funnel-head {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 2px var(--space-3);
+  width: 100%;
+  padding: var(--space-3) var(--space-5);
+  text-align: left;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+
+.funnel-kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-weight: 700;
+  color: var(--text-strong);
+}
+
+.funnel-kicker svg {
+  color: var(--primary-strong);
+}
+
+.funnel-subtitle {
+  grid-column: 1;
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+
+.funnel-chevron {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  color: var(--text-muted);
+  transition: transform var(--duration-fast, 150ms) ease;
+}
+
+.funnel-chevron.open {
+  transform: rotate(180deg);
+}
+
+.funnel-body {
+  display: grid;
+  gap: var(--space-4);
+  padding: 0 var(--space-5) var(--space-5);
+}
+
+.funnel-stages {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: var(--space-3);
+}
+
+.funnel-stat {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  grid-template-rows: auto auto;
+  column-gap: var(--space-2);
+  align-items: center;
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.funnel-stat .icon-chip {
+  grid-row: 1 / span 2;
+  width: 30px;
+  height: 30px;
+}
+
+.funnel-stat strong {
+  font-size: var(--fs-md);
+  color: var(--text-strong);
+}
+
+.funnel-hint {
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--chip-orange-bg);
+  color: var(--chip-orange-fg);
+  font-size: var(--fs-sm);
+}
+
+.funnel-dropped h4 {
+  margin: 0 0 var(--space-2);
+  color: var(--text-strong);
+}
+
+.funnel-dropped ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-1);
+}
+
+.funnel-dropped li {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+.funnel-dropped-subject {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  color: var(--text);
+}
+
 /* ---- Hilos: tabla completa ---- */
 /* Ancla de scroll para las métricas de Resumen: deja aire sobre la tabla al
    finalizar el desplazamiento para que el encabezado no quede pegado al borde. */

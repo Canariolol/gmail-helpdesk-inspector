@@ -95,6 +95,41 @@ pub struct ClassificationBreakdown {
     pub ambiguous: u64,
 }
 
+/// Disposición de un hilo candidato durante el procesamiento. Hace visible la
+/// pérdida silenciosa: los hilos descartados antes de clasificar no se guardan
+/// en ningún lado, así que sin esto no quedaba rastro de por qué "desaparecen".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadDisposition {
+    #[default]
+    Stored,
+    DroppedNotPrimaryInbox,
+    DroppedNoExternalInWindow,
+}
+
+/// Metadatos mínimos de un hilo descartado antes de clasificarse, para que el
+/// usuario pueda ver CUÁLES se cayeron y por qué (nunca guarda el cuerpo).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DroppedThreadInfo {
+    pub gmail_thread_id: String,
+    pub subject: String,
+    #[serde(default)]
+    pub first_message_at: Option<DateTime<Utc>>,
+    pub reason: ThreadDisposition,
+}
+
+/// Embudo de diagnóstico de un run: cuántos candidatos se descartan en cada
+/// filtro previo a la clasificación, con una muestra acotada de los descartados.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AnalysisFunnel {
+    #[serde(default)]
+    pub dropped_not_primary_inbox: u64,
+    #[serde(default)]
+    pub dropped_no_external_in_window: u64,
+    #[serde(default)]
+    pub dropped_samples: Vec<DroppedThreadInfo>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AnalysisMetrics {
     pub total_threads: u64,
@@ -118,6 +153,9 @@ pub struct AnalysisMetrics {
     pub ai_output_tokens: u64,
     #[serde(default)]
     pub classification_breakdown: ClassificationBreakdown,
+    /// Embudo de diagnóstico del run (descartes previos a la clasificación).
+    #[serde(default)]
+    pub funnel: AnalysisFunnel,
 }
 
 impl Default for AnalysisMetrics {
@@ -140,6 +178,7 @@ impl Default for AnalysisMetrics {
             ai_input_tokens: 0,
             ai_output_tokens: 0,
             classification_breakdown: ClassificationBreakdown::default(),
+            funnel: AnalysisFunnel::default(),
         }
     }
 }
@@ -638,19 +677,26 @@ pub fn classify_thread(
     )
 }
 
-fn subject_has_ignored_keyword(lower_subject: &str, keywords: &[String]) -> bool {
+/// Coincidencia de palabra clave sobre un texto ya en minúsculas. Las keywords
+/// multi-palabra hacen match por substring; las de una sola palabra, por límite
+/// de palabra (para que "ticket" no marque "ticketera" ni "boletines").
+fn keyword_matches(lower_haystack: &str, keywords: &[String]) -> bool {
     keywords.iter().any(|kw| {
         let kw = kw.trim().to_lowercase();
         if kw.is_empty() {
             false
         } else if kw.contains(' ') {
-            lower_subject.contains(kw.as_str())
+            lower_haystack.contains(kw.as_str())
         } else {
-            lower_subject
+            lower_haystack
                 .split(|c: char| !c.is_alphanumeric())
                 .any(|word| word == kw.as_str())
         }
     })
+}
+
+fn subject_has_ignored_keyword(lower_subject: &str, keywords: &[String]) -> bool {
+    keyword_matches(lower_subject, keywords)
 }
 
 fn subject_looks_like_newsletter(lower_subject: &str) -> bool {
@@ -915,6 +961,9 @@ pub fn calculate_metrics(
         ai_input_tokens,
         ai_output_tokens,
         classification_breakdown,
+        // El embudo se rellena en el loop del run (los descartados no están en
+        // `threads`, así que aquí queda por defecto y se setea después).
+        funnel: AnalysisFunnel::default(),
     }
 }
 
@@ -1111,6 +1160,61 @@ pub fn refine_classification_with_policy_hints(
                 .to_string(),
         );
     }
+}
+
+/// Rescata a Solicitud Válida los hilos cuyo asunto o cuerpo menciona una "señal
+/// de ticket" configurada por el tenant (p. ej. "ticket", "incidencia"), y los deja
+/// marcados para que la auditoría IA dé el veredicto final. Pensada para hilos que
+/// la heurística dejó como `Automated`/`Internal`/`Misc`/`Ambiguous` pero que el
+/// equipo sí tramitó. No toca hilos ya válidos ni resueltos por IA/revisión manual.
+pub fn rescue_classification_with_valid_signals(
+    thread: &mut EmailThread,
+    messages: &[EmailMessage],
+    keywords: &[String],
+) {
+    if keywords.is_empty() || thread.is_valid_client_request {
+        return;
+    }
+    if matches!(
+        thread.classification_source,
+        ClassificationSource::Ai | ClassificationSource::Manual
+    ) {
+        return;
+    }
+    let subject_hit = keyword_matches(&thread.subject.to_lowercase(), keywords);
+    let body_hit = || {
+        messages.iter().any(|message| {
+            message
+                .body_text
+                .as_deref()
+                .map(|body| keyword_matches(&body.to_lowercase(), keywords))
+                .unwrap_or(false)
+        })
+    };
+    if !subject_hit && !body_hit() {
+        return;
+    }
+    // Promueve a válido y deja la decisión final a la IA (manual_review_required
+    // habilita la auditoría aunque el hilo no tuviera un cliente humano detectado).
+    thread.classification = Classification::ValidClientRequest;
+    thread.classification_source = ClassificationSource::Heuristics;
+    thread.is_valid_client_request = true;
+    thread.manual_review_required = true;
+    // Ancla al primer mensaje externo del hilo para que `received_human_thread`
+    // sea verdadero y la auditoría IA evalúe el rescate.
+    if thread.first_client_message_id.is_none()
+        && let Some(anchor) = messages
+            .iter()
+            .filter(|message| message.is_external)
+            .min_by_key(|message| message.date)
+    {
+        thread.first_client_message_id = Some(anchor.id.clone());
+        thread.first_client_message_at = Some(anchor.date);
+    }
+    thread.reasons.push(
+        "Rescatado como solicitud válida por una palabra de señal de ticket; pendiente de confirmación de la IA."
+            .to_string(),
+    );
 }
 
 #[cfg(test)]
@@ -1544,5 +1648,96 @@ mod tests {
         thread.classification_source = ClassificationSource::Ai;
         refine_classification_with_policy_hints(&mut thread, "client@example.com", &rules);
         assert!(!thread.manual_review_required);
+    }
+
+    #[test]
+    fn keyword_matches_uses_word_boundaries_for_single_words() {
+        let kw = vec!["ticket".to_string()];
+        assert!(keyword_matches("creamos el ticket #5", &kw));
+        assert!(!keyword_matches("compramos una ticketera nueva", &kw));
+    }
+
+    #[test]
+    fn keyword_matches_handles_accents_and_multiword() {
+        assert!(keyword_matches(
+            "registramos la incidencia del cliente",
+            &["incidencia".to_string()],
+        ));
+        assert!(keyword_matches(
+            "esto va a la mesa de ayuda",
+            &["mesa de ayuda".to_string()],
+        ));
+        assert!(!keyword_matches("texto cualquiera", &["".to_string()]));
+    }
+
+    /// Mensaje externo automático (p. ej. un correo del cliente vía sistema): la
+    /// heurística lo deja como `Automated` porque no hay cliente humano en ventana.
+    fn automated_external_msg(id: &str, subject: &str, body: &str) -> EmailMessage {
+        let mut message = msg(id, "sistema@example.com", false, 0);
+        message.is_automated = true;
+        message.subject = subject.to_string();
+        message.body_text = Some(body.to_string());
+        message
+    }
+
+    #[test]
+    fn rescue_promotes_automated_thread_when_body_mentions_ticket() {
+        let messages = [automated_external_msg(
+            "m1",
+            "Re: consulta",
+            "Estimado, hemos creado el ticket #4521 para su solicitud.",
+        )];
+        let mut thread = classify_thread("run", "t", &messages, &long_thread_config());
+        assert_eq!(thread.classification, Classification::Automated);
+        assert!(!thread.is_valid_client_request);
+
+        rescue_classification_with_valid_signals(&mut thread, &messages, &["ticket".to_string()]);
+
+        assert_eq!(thread.classification, Classification::ValidClientRequest);
+        assert!(thread.is_valid_client_request);
+        assert!(thread.manual_review_required);
+        assert_eq!(
+            thread.classification_source,
+            ClassificationSource::Heuristics
+        );
+        // Ancla fijada para que la auditoría IA evalúe el rescate.
+        assert_eq!(thread.first_client_message_id.as_deref(), Some("m1"));
+    }
+
+    #[test]
+    fn rescue_is_noop_without_keywords() {
+        let messages = [automated_external_msg(
+            "m1",
+            "Re: consulta",
+            "ticket creado",
+        )];
+        let mut thread = classify_thread("run", "t", &messages, &long_thread_config());
+        let before = thread.classification.clone();
+        rescue_classification_with_valid_signals(&mut thread, &messages, &[]);
+        assert_eq!(thread.classification, before);
+        assert!(!thread.is_valid_client_request);
+    }
+
+    #[test]
+    fn rescue_does_not_override_ai_or_manual() {
+        let messages = [automated_external_msg(
+            "m1",
+            "Re: consulta",
+            "ticket creado",
+        )];
+        let mut thread = classify_thread("run", "t", &messages, &long_thread_config());
+        thread.classification_source = ClassificationSource::Ai;
+        rescue_classification_with_valid_signals(&mut thread, &messages, &["ticket".to_string()]);
+        assert_eq!(thread.classification, Classification::Automated);
+        assert!(!thread.is_valid_client_request);
+    }
+
+    #[test]
+    fn rescue_leaves_already_valid_threads_untouched() {
+        let mut thread = valid_thread_with_subject("Necesito ayuda con un ticket");
+        let reasons_before = thread.reasons.len();
+        rescue_classification_with_valid_signals(&mut thread, &[], &["ticket".to_string()]);
+        // Ya era válido: sin cambios ni razones nuevas.
+        assert_eq!(thread.reasons.len(), reasons_before);
     }
 }

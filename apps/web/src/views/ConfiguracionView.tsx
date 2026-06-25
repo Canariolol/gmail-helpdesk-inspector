@@ -47,6 +47,7 @@ type WizardDraft = {
   nonResponsibilityText: string;
   ignoredDomainsText: string;
   ignoredKeywordsText: string;
+  validSignalKeywordsText: string;
   aiEnabled: boolean;
   aiConsentChecked: boolean;
   schedulerEnabled: boolean;
@@ -78,6 +79,7 @@ function initDraft(config: OrgConfig | null): WizardDraft {
       nonResponsibilityText: "",
       ignoredDomainsText: "google.com\ncalendar.google.com",
       ignoredKeywordsText: "newsletter\nboletín\npromoción",
+      validSignalKeywordsText: "",
       aiEnabled: true,
       aiConsentChecked: true,
       schedulerEnabled: false,
@@ -95,6 +97,7 @@ function initDraft(config: OrgConfig | null): WizardDraft {
     nonResponsibilityText: draft.analysis_policy.non_responsibility_rules.join("\n"),
     ignoredDomainsText: draft.analysis_policy.ignored_domains.join("\n"),
     ignoredKeywordsText: draft.analysis_policy.ignored_keywords.join("\n"),
+    validSignalKeywordsText: (draft.analysis_policy.valid_signal_keywords ?? []).join("\n"),
     aiEnabled: draft.ai_policy.enabled,
     aiConsentChecked: draft.ai_policy.enabled,
     schedulerEnabled: draft.schedule_report_policy.scheduler_enabled,
@@ -117,6 +120,7 @@ function buildPutBody(d: WizardDraft) {
       ignored_senders: [],
       ignored_domains: splitLines(d.ignoredDomainsText),
       ignored_keywords: splitLines(d.ignoredKeywordsText),
+      valid_signal_keywords: splitLines(d.validSignalKeywordsText),
       default_time_from: "00:00",
       default_time_to: "23:59",
       max_threads_per_run: 50,
@@ -500,6 +504,20 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
                 />
                 <span style={{ fontSize: "var(--fs-sm)", color: "var(--text-muted)" }}>
                   Describe los tipos de correos que sí cuentan como solicitud. Uno por línea.
+                </span>
+              </div>
+              <div className="field">
+                <label htmlFor="valid-signal-keywords">Palabras que confirman un ticket (opcional)</label>
+                <textarea
+                  id="valid-signal-keywords"
+                  rows={3}
+                  value={draft.validSignalKeywordsText}
+                  onChange={(e) => set("validSignalKeywordsText", e.target.value)}
+                  placeholder={"ticket\nincidencia\ncaso\nfolio"}
+                />
+                <span style={{ fontSize: "var(--fs-sm)", color: "var(--text-muted)" }}>
+                  Si la respuesta del equipo menciona alguna de estas palabras, el correo se cuenta
+                  como solicitud válida y la IA confirma el veredicto. Una por línea.
                 </span>
               </div>
               <div className="field">
