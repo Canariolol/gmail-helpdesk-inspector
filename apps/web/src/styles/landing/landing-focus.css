@@ -3,9 +3,50 @@
    ========================================================================== */
 .lp-focus {
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
-  background: var(--surface);
+  position: relative;
+  isolation: isolate; /* mantiene las capas de fondo (z negativo) dentro del contexto */
+  /* Gradiente cálido sutil en vez de un blanco plano. */
+  background: linear-gradient(180deg, #fff7ef 0%, var(--surface) 24%, var(--surface) 68%, #fdf4ea 100%);
   color: var(--text);
   overflow-x: hidden; /* permite franjas full-bleed sin scroll horizontal */
+}
+
+/* Aurora: resplandores naranjas difusos detrás del hero y la demo. */
+.lp-focus::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: clamp(620px, 80vh, 980px);
+  z-index: -2;
+  pointer-events: none;
+  background:
+    radial-gradient(58% 48% at 16% -4%, rgba(251, 146, 60, 0.22), transparent 70%),
+    radial-gradient(52% 44% at 88% 4%, rgba(249, 115, 22, 0.15), transparent 70%),
+    radial-gradient(46% 42% at 50% 26%, rgba(253, 186, 116, 0.16), transparent 72%);
+}
+
+/* Grano: textura muy tenue para quitar el aspecto plano. */
+.lp-focus::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  opacity: 0.035;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size: 160px 160px;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .lp-focus::before {
+    animation: lp-aurora 18s ease-in-out infinite alternate;
+  }
+}
+
+@keyframes lp-aurora {
+  to {
+    transform: translate3d(0, 20px, 0) scale(1.05);
+  }
 }
 
 .lp-focus main {
@@ -107,6 +148,11 @@
 
 .lp-focus-hero .lp-di {
   width: 100%;
+  /* Halo naranja + sombra marcada para que la demo resalte sobre la aurora. */
+  box-shadow:
+    0 30px 70px -22px rgba(249, 115, 22, 0.30),
+    0 18px 44px rgba(120, 80, 35, 0.14),
+    0 1px 0 rgba(255, 255, 255, 0.7) inset;
 }
 
 /* Banda de confianza full-bleed ------------------------------------------- */
@@ -239,6 +285,14 @@
 .lp-focus-reports-list svg {
   color: var(--primary-strong);
   flex-shrink: 0;
+}
+
+/* El mock de reporte también se eleva sobre el fondo. */
+.lp-focus-reports-mock .lp-rep {
+  box-shadow:
+    0 26px 60px -24px rgba(249, 115, 22, 0.26),
+    0 16px 38px rgba(120, 80, 35, 0.13),
+    0 1px 0 rgba(255, 255, 255, 0.7) inset;
 }
 
 /* Secciones genéricas (pasos) --------------------------------------------- */

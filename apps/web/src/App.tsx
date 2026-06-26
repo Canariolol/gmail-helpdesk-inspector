@@ -20,6 +20,7 @@ import { AccessShell } from "./views/access/AccessShell";
 import { deriveAccessState, isBlockedStatus } from "./views/access/accessState";
 import { BlockedBanner } from "./views/access/BlockedBanner";
 import { CheckoutPendingGate } from "./views/access/CheckoutPendingGate";
+import { CheckoutView } from "./views/access/CheckoutView";
 import { GmailConnectGate } from "./views/access/GmailConnectGate";
 import { LoadingGate } from "./views/access/LoadingGate";
 import {
@@ -64,6 +65,8 @@ export function App() {
     readPendingCheckout(),
   );
   const [showPlansModal, setShowPlansModal] = useState(false);
+  // Plan elegido para el checkout embebido; muestra el formulario de tarjeta.
+  const [checkoutPlan, setCheckoutPlan] = useState<BillingPlan | null>(null);
   // Marca de tiempo del último guardado de revisión exitoso; alimenta la
   // confirmación transitoria del formulario de revisión.
   const [reviewSavedAt, setReviewSavedAt] = useState<number | null>(null);
@@ -287,25 +290,56 @@ export function App() {
   });
 
   const checkout = useMutation({
-    mutationFn: (planId: BillingPlanId) =>
+    mutationFn: (payload: { planId: BillingPlanId; cardTokenId?: string; payerEmail?: string }) =>
       api<CheckoutSessionResponse>("/checkout/subscriptions", {
         method: "POST",
-        body: JSON.stringify({ plan_id: planId }),
+        body: JSON.stringify({
+          plan_id: payload.planId,
+          ...(payload.cardTokenId
+            ? { card_token_id: payload.cardTokenId, payer_email: payload.payerEmail }
+            : {}),
+        }),
       }),
     onSuccess: (response) => {
       const session = response.session;
-      if (!session.checkout_url) return;
       const plan = plans.data?.find((item) => item.id === session.plan_id);
+
+      // Checkout embebido autorizado: la suscripción ya quedó activa.
+      if (session.status === "activated") {
+        setCheckoutPlan(null);
+        clearPendingCheckout();
+        setPendingCheckout(null);
+        queryClient.invalidateQueries({ queryKey: ["account"] });
+        queryClient.invalidateQueries({ queryKey: ["usage"] });
+        return;
+      }
+
+      // Fallback con redirección (sin tarjeta tokenizada).
+      if (session.checkout_url) {
+        const pending: PendingCheckout = {
+          id: session.id,
+          checkoutUrl: session.checkout_url,
+          planId: session.plan_id,
+          planName: plan?.name ?? session.plan_id,
+          createdAt: Date.now(),
+        };
+        savePendingCheckout(pending);
+        setPendingCheckout(pending);
+        window.location.href = session.checkout_url;
+        return;
+      }
+
+      // Pago en revisión: dejamos el checkout pendiente y el polling de la cuenta resuelve.
       const pending: PendingCheckout = {
         id: session.id,
-        checkoutUrl: session.checkout_url,
+        checkoutUrl: "",
         planId: session.plan_id,
         planName: plan?.name ?? session.plan_id,
         createdAt: Date.now(),
       };
       savePendingCheckout(pending);
       setPendingCheckout(pending);
-      window.location.href = session.checkout_url;
+      setCheckoutPlan(null);
     },
   });
 
@@ -374,7 +408,24 @@ export function App() {
   const handleGoToSetup = () => setView("configuracion");
 
   const handleChoosePlan = (planId: BillingPlanId) => {
-    checkout.mutate(planId);
+    const plan = plans.data?.find((item) => item.id === planId);
+    if (!plan) return;
+    checkout.reset();
+    setCheckoutPlan(plan);
+  };
+
+  const handlePayCheckout = (data: { cardTokenId: string; payerEmail: string }) => {
+    if (!checkoutPlan) return;
+    checkout.mutate({
+      planId: checkoutPlan.id,
+      cardTokenId: data.cardTokenId,
+      payerEmail: data.payerEmail,
+    });
+  };
+
+  const handleBackFromCheckout = () => {
+    setCheckoutPlan(null);
+    checkout.reset();
   };
 
   const handleChangePlan = (planId: BillingPlanId) => {
@@ -390,6 +441,7 @@ export function App() {
   const handleBackToPlans = () => {
     clearPendingCheckout();
     setPendingCheckout(null);
+    setCheckoutPlan(null);
     checkout.reset();
   };
 
@@ -436,11 +488,24 @@ export function App() {
 
   const accessState = deriveAccessState(accountData, hasPendingCheckout);
   const checkoutError = checkout.error?.message ?? null;
-  const checkoutLoadingPlanId = checkout.isPending ? checkout.variables ?? null : null;
+  // El estado de carga del pago vive ahora en CheckoutView; las tarjetas de
+  // PricingGate solo abren el checkout embebido, sin spinner propio.
+  const checkoutLoadingPlanId = null;
   const changePlanLoadingId = changePlan.isPending ? changePlan.variables ?? null : null;
   const planName = accountData.entitlement.plan?.name ?? null;
 
   if (accessState.kind === "pricing") {
+    if (checkoutPlan) {
+      return (
+        <CheckoutView
+          plan={checkoutPlan}
+          onPay={handlePayCheckout}
+          onBack={handleBackFromCheckout}
+          isSubmitting={checkout.isPending}
+          error={checkoutError}
+        />
+      );
+    }
     return (
       <PricingGate
         email={accountData.account_email}

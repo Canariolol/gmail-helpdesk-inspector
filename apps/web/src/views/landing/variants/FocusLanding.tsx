@@ -1,6 +1,8 @@
 import { ArrowRight, Check, Lock } from "lucide-react";
-import { ADVANTAGES, BRAND, HERO, REPORTS, STEPS, TRUST_BAND } from "../content";
+import { ADVANTAGES, HERO, REPORTS, STEPS, TRUST_BAND } from "../content";
 import { DemoInspector } from "../mocks/DemoInspector";
+import { PublicHeader } from "../PublicHeader";
+import { PublicFooter } from "../PublicFooter";
 import { ReporteMock } from "../mocks/ReporteMock";
 import { Reveal } from "../Reveal";
 
@@ -14,20 +16,7 @@ export function FocusLanding({ onLogin, onSignup }: VariantProps) {
 
   return (
     <div className="lp lp-focus">
-      <header className="lp-focus-nav">
-        <span className="lp-brand">
-          <img src="/logo-192.png" alt="" />
-          {BRAND.short}
-        </span>
-        <div className="lp-focus-nav-actions">
-          <button type="button" className="lp-focus-link" onClick={onLogin}>
-            {hero.login}
-          </button>
-          <button type="button" className="lp-btn-primary lp-focus-nav-cta" onClick={onSignup}>
-            {hero.cta}
-          </button>
-        </div>
-      </header>
+      <PublicHeader onLogin={onLogin} onSignup={onSignup} />
 
       <main>
         <section className="lp-focus-hero">
@@ -116,10 +105,7 @@ export function FocusLanding({ onLogin, onSignup }: VariantProps) {
         </Reveal>
       </main>
 
-      <footer className="lp-focus-footer">
-        <span>{BRAND.name}</span>
-        <span>Beta privada · no afiliado a Google LLC.</span>
-      </footer>
+      <PublicFooter />
     </div>
   );
 }

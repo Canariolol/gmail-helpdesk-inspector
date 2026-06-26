@@ -1,0 +1,1551 @@
+# Plan de preparación para producción — Mira Helpdesk
+
+> Fecha de creación: 2026-06-25  
+> Objetivo: lanzar una beta pagada y controlada en pocos días, manteniendo el producto simple y evitando infraestructura prematura.  
+> Alcance: pagos, configuración de producción, seguridad, privacidad, control de datos, observabilidad, operación y release.  
+> Fuera de alcance inmediato: conexión multiproveedor, migración completa a Supabase, plataforma de observabilidad autohospedada y escalado horizontal.
+
+---
+
+## 0. Cómo usar este documento
+
+Este archivo es el checklist maestro de preparación para producción.
+
+### Estados
+
+- `[ ]` Pendiente.
+- `[x]` Terminado y verificado.
+- `[-]` Decidido conscientemente como deuda aceptada para la beta.
+
+### Regla para marcar una tarea como terminada
+
+Una tarea solo se marca `[x]` cuando:
+
+1. La implementación o configuración existe.
+2. Fue probada en un entorno equivalente a producción.
+3. Existe evidencia verificable.
+4. Se documentó el comportamiento operativo o la forma de recuperación.
+
+Ejemplos de evidencia:
+
+- Resultado de un test automatizado.
+- Captura o ID de una transacción sandbox.
+- Nombre de una revisión de Cloud Run.
+- Alerta creada en Cloud Monitoring.
+- Entrada actualizada en un runbook.
+- Registro de una prueba de restauración.
+
+### Prioridades
+
+| Prioridad | Significado |
+|---|---|
+| **P0** | Bloqueador para comenzar a cobrar a usuarios externos. |
+| **P1** | Debe quedar listo durante la beta inicial o inmediatamente después del lanzamiento. |
+| **P2** | Mejora importante, pero puede esperar a que exista uso real. |
+| **P3** | Escalabilidad o madurez posterior. No debe retrasar el lanzamiento. |
+
+---
+
+# 1. Definición del lanzamiento
+
+## 1.1 Alcance de la primera versión
+
+- [ ] Definir explícitamente el lanzamiento como **beta pagada por invitación**.
+- [ ] Definir el máximo inicial de organizaciones permitidas.
+  - Recomendación: entre 3 y 10 organizaciones.
+- [ ] Definir si todos los usuarios serán incorporados mediante onboarding acompañado.
+- [ ] Definir qué proveedores de correo estarán disponibles.
+  - Para este lanzamiento: Gmail y Google Workspace.
+  - Microsoft e IMAP permanecen fuera de alcance.
+- [ ] Definir si los reportes automáticos estarán habilitados desde el primer día.
+- [ ] Definir un único canal de soporte para la beta.
+  - Correo recomendado: `soporte@<dominio>`.
+- [ ] Definir horario y plazo objetivo de respuesta de soporte.
+- [ ] Definir quién puede autorizar accesos internos privilegiados.
+- [ ] Revisar que la landing, precios, términos y onboarding digan claramente “beta”.
+
+### Criterio de aceptación
+
+- [ ] Existe una descripción de alcance de una página como máximo.
+- [ ] Se conocen las funciones incluidas y excluidas.
+- [ ] No se promete conexión multiproveedor ni borrado automático si todavía no existe.
+
+## 1.2 Política de deuda aceptada
+
+- [ ] Crear una lista corta de riesgos aceptados para la beta.
+- [ ] Cada riesgo aceptado debe tener:
+  - Responsable.
+  - Mitigación temporal.
+  - Fecha de revisión.
+  - Condición que obliga a resolverlo.
+- [ ] No aceptar como deuda ningún riesgo P0.
+
+Ejemplos razonables de deuda beta:
+
+- `[-]` Rate limiter distribuido, mientras la API esté limitada a una instancia.
+- `[-]` Migración a Supabase, mientras Firestore tenga respaldo y recuperación habilitados.
+- `[-]` Panel administrativo completo, mientras exista un procedimiento operativo manual.
+- `[-]` Tests E2E exhaustivos, mientras los flujos críticos tengan pruebas manuales repetibles.
+
+---
+
+# 2. Gate maestro de lanzamiento
+
+No comenzar a cobrar a usuarios externos hasta completar todos los puntos siguientes:
+
+- [ ] Checkout embebido de Mercado Pago terminado.
+- [ ] Webhook de Mercado Pago autenticado y probado.
+- [ ] Billing enforcement activo.
+- [ ] `APP_ENV=production` activo.
+- [ ] API limitada temporalmente a una instancia.
+- [ ] Flujo de pago probado de extremo a extremo.
+- [ ] Errores internos sanitizados.
+- [ ] Sesiones con expiración y revocación server-side.
+- [ ] Desconexión de Gmail disponible.
+- [ ] Procedimiento de borrado de datos disponible.
+- [ ] PITR o mecanismo de respaldo equivalente habilitado.
+- [ ] Alertas mínimas operativas activas.
+- [ ] Uptime checks activos.
+- [ ] Política de privacidad publicada.
+- [ ] Términos y condiciones publicados.
+- [ ] Copy sobre uso de IA consistente con el comportamiento real.
+- [ ] Check de release completo en verde.
+- [ ] Smoke test final realizado en producción.
+- [ ] Procedimiento de rollback probado o documentado.
+
+### Decisión final
+
+- [ ] **GO:** todos los bloqueadores P0 están cerrados.
+- [ ] **NO-GO:** existe al menos un bloqueador P0 abierto.
+
+---
+
+# 3. Mercado Pago y billing
+
+Prioridad: **P0**
+
+## 3.1 Contrato funcional del checkout embebido
+
+- [ ] Documentar el flujo exacto del checkout embebido.
+- [ ] Definir qué componente de Mercado Pago se utilizará.
+- [ ] Definir qué datos de tarjeta pasan directamente a Mercado Pago.
+- [ ] Confirmar que el backend nunca recibe ni persiste:
+  - Número completo de tarjeta.
+  - CVV.
+  - Datos PCI sensibles.
+- [ ] Definir qué identificador devuelve el frontend al backend.
+- [ ] Definir cuándo se crea una `CheckoutSession`.
+- [ ] Definir cuándo se crea o actualiza una `Subscription`.
+- [ ] Definir cuándo se concede acceso.
+- [ ] Confirmar que el frontend nunca decide por sí solo que un pago está aprobado.
+- [ ] Usar Mercado Pago como fuente de verdad para estado y fechas.
+- [ ] Definir el comportamiento si el usuario cierra la pestaña durante el pago.
+- [ ] Definir el comportamiento si el frontend recibe éxito, pero el webhook todavía no llega.
+- [ ] Definir el comportamiento si el webhook llega antes que la respuesta del checkout.
+
+## 3.2 Estados de checkout y suscripción
+
+- [ ] Revisar la tabla de estados internos.
+- [ ] Mapear cada estado relevante de Mercado Pago a un estado interno.
+- [ ] Diferenciar:
+  - Checkout iniciado.
+  - Pago pendiente.
+  - Pago aprobado.
+  - Pago rechazado.
+  - Suscripción activa.
+  - Suscripción pausada.
+  - Cobro vencido.
+  - Suscripción cancelada.
+  - Trial activo.
+  - Trial finalizado.
+- [ ] Definir estados desconocidos como no autorizados por defecto.
+- [ ] Registrar el estado original del proveedor para diagnóstico.
+- [ ] Evitar que un evento antiguo revierta un estado más nuevo.
+- [ ] Guardar timestamp del último evento procesado.
+
+## 3.3 Seguridad del webhook
+
+- [ ] Configurar `MERCADOPAGO_WEBHOOK_SECRET`.
+- [ ] Hacer obligatorio el secreto cuando `APP_ENV=production`.
+- [ ] Rechazar webhooks sin firma.
+- [ ] Rechazar webhooks con firma inválida.
+- [ ] Validar que `data.id` coincida con el identificador firmado.
+- [ ] Validar antigüedad del timestamp de firma.
+- [ ] Definir una ventana máxima de tolerancia.
+  - Recomendación inicial: 5 minutos, ajustable según documentación del proveedor.
+- [ ] Implementar protección contra replay.
+- [ ] Registrar un identificador único de evento si Mercado Pago lo entrega.
+- [ ] Hacer el procesamiento idempotente.
+- [ ] Responder rápidamente al webhook.
+- [ ] Evitar que una operación lenta del proveedor bloquee innecesariamente la recepción.
+- [ ] No registrar secretos ni payloads sensibles.
+
+## 3.4 Idempotencia y concurrencia
+
+- [ ] Evitar que dos clics creen dos suscripciones.
+- [ ] Crear una clave idempotente por organización, plan e intento.
+- [ ] Deshabilitar temporalmente el botón mientras existe una solicitud activa.
+- [ ] Tratar webhooks duplicados como éxito sin duplicar efectos.
+- [ ] Evitar crear varias suscripciones activas para una misma organización.
+- [ ] Evitar incrementar uso o activar beneficios dos veces.
+- [ ] Probar dos requests de checkout simultáneos.
+- [ ] Probar dos webhooks simultáneos.
+- [ ] Definir cómo se resuelve una suscripción duplicada en el proveedor.
+
+## 3.5 Reconciliación
+
+- [ ] Crear una forma de consultar el estado real en Mercado Pago.
+- [ ] Crear una operación de reconciliación manual por suscripción.
+- [ ] Considerar una tarea periódica para reconciliar:
+  - Checkouts pendientes demasiado tiempo.
+  - Suscripciones activas localmente sin confirmación reciente.
+  - Pagos vencidos.
+  - Cancelaciones.
+- [ ] Definir cuánto tiempo puede permanecer un checkout pendiente.
+- [ ] Marcar checkouts abandonados o expirados.
+- [ ] Alertar por diferencias entre el estado local y Mercado Pago.
+
+## 3.6 Cancelación, reactivación y cambio de plan
+
+- [ ] Confirmar semántica real de cancelación con Mercado Pago.
+- [ ] Confirmar si cancelar detiene cobros inmediatamente o al fin del período.
+- [ ] No mostrar “mantienes acceso hasta fin de período” si Mercado Pago no garantiza esa conducta.
+- [ ] Obtener `current_period_end` desde el proveedor cuando sea posible.
+- [ ] Probar cancelación.
+- [ ] Probar webhook posterior a cancelación.
+- [ ] Probar reactivación.
+- [ ] Probar cambio de plan ascendente.
+- [ ] Probar cambio de plan descendente.
+- [ ] Definir prorrateo o ausencia de prorrateo.
+- [ ] Explicarlo en la UI y los términos.
+- [ ] Evitar cambios de plan durante un checkout pendiente.
+
+## 3.7 Matriz mínima de pruebas sandbox
+
+- [ ] Pago aprobado.
+- [ ] Pago rechazado.
+- [ ] Pago pendiente.
+- [ ] Fondos insuficientes.
+- [ ] Tarjeta vencida.
+- [ ] Datos de tarjeta inválidos.
+- [ ] Usuario abandona checkout.
+- [ ] Timeout del frontend.
+- [ ] Timeout del backend.
+- [ ] Mercado Pago responde 4xx.
+- [ ] Mercado Pago responde 5xx.
+- [ ] Webhook válido.
+- [ ] Webhook sin firma.
+- [ ] Webhook con firma incorrecta.
+- [ ] Webhook duplicado.
+- [ ] Webhook atrasado.
+- [ ] Webhooks fuera de orden.
+- [ ] Trial activado.
+- [ ] Trial finalizado.
+- [ ] Renovación aprobada.
+- [ ] Renovación rechazada.
+- [ ] Cancelación.
+- [ ] Reactivación.
+- [ ] Cambio de plan.
+- [ ] Refresh del navegador durante el checkout.
+- [ ] Apertura del mismo checkout en dos pestañas.
+
+### Evidencia requerida
+
+- [ ] Tabla con resultado de cada caso.
+- [ ] ID de operación sandbox.
+- [ ] Estado esperado y estado observado.
+- [ ] Logs sanitizados asociados mediante `request_id` o `checkout_id`.
+
+---
+
+# 4. Configuración real de producción en GCP
+
+Prioridad: **P0**
+
+## 4.1 Variables y secretos
+
+- [ ] Configurar `APP_ENV=production`.
+- [ ] Configurar explícitamente `BILLING_ENFORCEMENT_ENABLED=true`.
+- [ ] Configurar `MERCADOPAGO_ACCESS_TOKEN` mediante Secret Manager.
+- [ ] Configurar `MERCADOPAGO_WEBHOOK_SECRET` mediante Secret Manager.
+- [ ] Confirmar `WORKOS_API_KEY` en Secret Manager.
+- [ ] Confirmar `WORKOS_COOKIE_SECRET` fuerte y no reutilizado.
+- [ ] Confirmar `APP_ENCRYPTION_KEY` fuerte.
+- [ ] Confirmar `APP_SESSION_SECRET` fuerte.
+- [ ] Confirmar `GOOGLE_CLIENT_SECRET` en Secret Manager.
+- [ ] Confirmar `CRON_SECRET` fuerte.
+- [ ] Confirmar `RESEND_API_KEY` en Secret Manager.
+- [ ] Confirmar que ningún secreto real aparece como variable de texto plano.
+- [ ] Confirmar que ningún secreto está versionado.
+- [ ] Documentar rotación de cada secreto.
+- [ ] Definir responsable de rotación.
+
+## 4.2 Validaciones de arranque
+
+- [ ] Hacer que producción rechace `APP_STORAGE=memory`.
+- [ ] Hacer que producción rechace billing activo sin credenciales completas.
+- [ ] Hacer que producción rechace webhook sin secreto.
+- [ ] Hacer que producción rechace URLs HTTP.
+- [ ] Validar `APP_COOKIE_SECURE=true`.
+- [ ] Validar valores permitidos de `APP_COOKIE_SAMESITE`.
+- [ ] Validar que `WEB_BASE_URL` y `API_BASE_URL` tengan orígenes esperados.
+- [ ] Validar que `GOOGLE_REDIRECT_URL` corresponda al entorno.
+- [ ] Validar que `WORKOS_REDIRECT_URI` corresponda al entorno.
+- [ ] Validar que `AI_WORKER_AUDIENCE` exista cuando el worker es privado.
+
+## 4.3 Escalado temporal
+
+- [ ] Configurar `max-instances=1` para `ghmi-api`.
+- [ ] Confirmar que el scheduler externo sigue operativo.
+- [ ] Mantener `SCHEDULER_ENABLED=false` si Cloud Scheduler es la fuente elegida.
+- [ ] No habilitar simultáneamente scheduler interno y externo sin una razón documentada.
+- [ ] Confirmar que la concurrencia máxima no produce análisis simultáneos inesperados.
+- [ ] Documentar qué tareas impiden escalar horizontalmente:
+  - Rate limiter en memoria.
+  - Contadores read-modify-write.
+  - Claims del scheduler sin transacción.
+  - Posibles carreras de billing.
+
+## 4.4 Revisión segura
+
+- [ ] Desplegar una revisión sin tráfico.
+- [ ] Probar `/health`.
+- [ ] Probar login WorkOS.
+- [ ] Probar conexión Gmail.
+- [ ] Probar lectura de configuración.
+- [ ] Probar checkout sandbox.
+- [ ] Probar recepción de webhook.
+- [ ] Probar creación y ejecución de análisis.
+- [ ] Probar scheduler manualmente.
+- [ ] Enviar tráfico progresivamente.
+  - 0% → pruebas internas.
+  - 10% → smoke test.
+  - 100% → solo después de validar logs.
+
+### Evidencia requerida
+
+- [ ] Nombre de revisión Cloud Run.
+- [ ] Lista de variables configuradas, sin valores.
+- [ ] Resultado de smoke test.
+- [ ] Confirmación de tráfico y rollback disponible.
+
+---
+
+# 5. Sesiones, cookies y revocación
+
+Prioridad: **P0**
+
+## 5.1 Modelo de sesión
+
+- [ ] Añadir `expires_at` a la sesión server-side.
+- [ ] Añadir `revoked_at` o estado equivalente.
+- [ ] Validar expiración en cada request autenticado.
+- [ ] Rechazar sesiones revocadas.
+- [ ] Evitar depender únicamente del `Max-Age` de la cookie.
+- [ ] Definir duración de sesión.
+  - Recomendación inicial: 7–30 días según sensibilidad y UX.
+- [ ] Definir si la actividad extiende la sesión.
+- [ ] Definir una duración absoluta máxima.
+- [ ] Registrar `last_seen_at` solo si aporta valor operativo.
+
+## 5.2 Logout
+
+- [ ] Invalidar la sesión en el servidor al cerrar sesión.
+- [ ] Borrar la cookie del navegador.
+- [ ] Probar reutilización de una cookie copiada después del logout.
+- [ ] La cookie reutilizada debe responder 401.
+- [ ] Implementar “cerrar todas las sesiones” para soporte/admin o usuario.
+- [ ] Documentar qué ocurre al cambiar contraseña en WorkOS.
+- [ ] Evaluar invalidación cuando WorkOS suspende al usuario.
+
+## 5.3 Separar sesión y conexión de Gmail
+
+- [ ] Diseñar el refresh token de Gmail como credencial de la conexión de casilla.
+- [ ] Evitar que el scheduler dependa de una sesión web histórica.
+- [ ] Asociar credenciales Gmail a:
+  - Organización.
+  - Mailbox.
+  - Usuario autorizador.
+- [ ] Mantenerlas cifradas.
+- [ ] Registrar cuándo fueron actualizadas.
+- [ ] Registrar revocación.
+- [ ] Permitir rotación del refresh token.
+- [ ] Mantener sesiones web revocables sin romper el scheduler.
+
+## 5.4 Cookies
+
+- [ ] Confirmar `HttpOnly`.
+- [ ] Confirmar `Secure`.
+- [ ] Confirmar `SameSite` acorde a la arquitectura final.
+- [ ] Preferir mismo origen mediante proxy para evitar cookies third-party.
+- [ ] Definir `Domain` solo si es estrictamente necesario.
+- [ ] Evaluar prefijo `__Host-` para cookie de sesión.
+- [ ] Evitar exponer tokens a JavaScript.
+- [ ] Revisar cookies de OAuth temporales.
+- [ ] Confirmar expiración breve de cookies OAuth.
+
+## 5.5 CSRF
+
+- [ ] Determinar si todas las llamadas autenticadas son same-origin.
+- [ ] Validar `Origin` o `Referer` en requests mutables.
+- [ ] Rechazar orígenes desconocidos.
+- [ ] Evaluar token CSRF si se conserva `SameSite=None`.
+- [ ] Probar POST/PATCH/DELETE desde un origen externo.
+- [ ] Asegurar especialmente:
+  - Cancelación de suscripción.
+  - Cambio de plan.
+  - Inicio de checkout.
+  - Revisión manual.
+  - Cambios de configuración.
+  - Borrado de datos.
+  - Desconexión de Gmail.
+
+---
+
+# 6. Errores, mensajes, logs y exposición de información
+
+Prioridad: **P0**
+
+## 6.1 Contrato público de errores
+
+- [ ] Definir un formato único:
+
+```json
+{
+  "error": {
+    "code": "PAYMENT_PROVIDER_UNAVAILABLE",
+    "message": "No pudimos confirmar el pago. Inténtalo nuevamente.",
+    "request_id": "req_..."
+  }
+}
+```
+
+- [ ] Definir catálogo de códigos públicos.
+- [ ] Separar mensaje técnico y mensaje al usuario.
+- [ ] No devolver `error.to_string()` directamente.
+- [ ] No devolver bodies de proveedores.
+- [ ] No devolver URLs internas.
+- [ ] No devolver nombres de colecciones o documentos.
+- [ ] No devolver stack traces.
+- [ ] Mantener mensajes 401/403/404 consistentes.
+- [ ] Evitar confirmar existencia de recursos de otro usuario.
+
+## 6.2 Proveedores externos
+
+Revisar y sanitizar errores de:
+
+- [ ] WorkOS.
+- [ ] Google OAuth.
+- [ ] Gmail API.
+- [ ] Mercado Pago.
+- [ ] Resend.
+- [ ] Bedrock.
+- [ ] AI worker.
+- [ ] Firestore.
+- [ ] Metadata server de GCP.
+
+Para cada proveedor:
+
+- [ ] Crear código interno de categoría.
+- [ ] Crear mensaje público.
+- [ ] Registrar status code externo.
+- [ ] Registrar request/provider ID si es seguro.
+- [ ] Redactar tokens, cuerpos y datos personales.
+
+## 6.3 Identificadores de correlación
+
+- [ ] Generar `request_id` por request.
+- [ ] Aceptar un request ID entrante solo si se valida o regenerarlo.
+- [ ] Devolverlo en header y error público.
+- [ ] Incluirlo en logs.
+- [ ] Propagarlo al worker.
+- [ ] Asociarlo a:
+  - `run_id`.
+  - `checkout_id`.
+  - `subscription_id`.
+  - `org_id` pseudonimizado.
+- [ ] No usar email como identificador principal en logs.
+
+## 6.4 Redacción de logs
+
+- [ ] No registrar access tokens.
+- [ ] No registrar refresh tokens.
+- [ ] No registrar cookies.
+- [ ] No registrar secretos.
+- [ ] No registrar números de tarjeta.
+- [ ] No registrar bodies completos de correo.
+- [ ] No registrar excerpts salvo necesidad justificada.
+- [ ] No registrar payload completo enviado a IA.
+- [ ] No registrar headers completos.
+- [ ] No registrar respuestas completas de proveedores.
+- [ ] Pseudonimizar email y org cuando sea posible.
+- [ ] Revisar errores persistidos en runs y scheduler.
+
+## 6.5 Frontend y navegador
+
+- [ ] Buscar `console.log`.
+- [ ] Buscar `console.error`.
+- [ ] Eliminar logs innecesarios de producción.
+- [ ] No imprimir objetos de error completos.
+- [ ] Revisar mensajes visibles en banners y modales.
+- [ ] Traducir estados técnicos a lenguaje de usuario.
+- [ ] Revisar Network:
+  - Login fallido.
+  - Gmail OAuth fallido.
+  - Pago fallido.
+  - Análisis fallido.
+  - Worker caído.
+  - Firestore caído.
+- [ ] Confirmar que ninguna respuesta contiene secretos o detalles internos.
+- [ ] Revisar Source Maps.
+- [ ] Decidir si se publican source maps.
+- [ ] Si se publican a una herramienta, impedir acceso público.
+
+## 6.6 Pasada de copy
+
+- [ ] Unificar nombre “Mira Helpdesk”.
+- [ ] Eliminar nombres internos o históricos.
+- [ ] Eliminar referencias técnicas como:
+  - `policy_snapshot`.
+  - `pending_backend_contract`.
+  - `provider_subscription_id`.
+  - `invalid_grant`.
+- [ ] Corregir mensajes en español.
+- [ ] Corregir textos contradictorios.
+- [ ] Confirmar que “beta” aparece donde corresponde.
+- [ ] Confirmar que no se promete funcionalidad futura.
+
+---
+
+# 7. Uso de IA, privacidad y consentimiento informado
+
+Prioridad: **P0**
+
+## 7.1 Posicionamiento coherente
+
+- [ ] Definir formalmente la IA como funcionalidad activa por defecto con opt-out.
+- [ ] Dejar de describirla como opt-in si no requiere activación.
+- [ ] Actualizar README.
+- [ ] Actualizar landing.
+- [ ] Actualizar onboarding.
+- [ ] Actualizar Configuración.
+- [ ] Actualizar Ayuda.
+- [ ] Actualizar Política de Privacidad.
+- [ ] Actualizar Términos de Uso.
+
+Copy sugerido:
+
+> Mira utiliza IA para clasificar fragmentos minimizados de los correos analizados. Puedes desactivarla cuando quieras desde Configuración. Al desactivarla, algunas clasificaciones requerirán revisión manual y pueden perder precisión.
+
+## 7.2 Información que debe conocer el usuario
+
+- [ ] Qué proveedor procesa la IA.
+- [ ] Qué datos se envían.
+- [ ] Qué datos no se envían.
+- [ ] Límite de mensajes por hilo.
+- [ ] Límite de caracteres por mensaje.
+- [ ] Ausencia de adjuntos.
+- [ ] Posibilidad de texto sensible en excerpts.
+- [ ] Objetivo del procesamiento.
+- [ ] Consecuencia de desactivar IA.
+- [ ] Cómo desactivarla.
+- [ ] Cuándo aplica el cambio.
+- [ ] Política de retención del proveedor, si corresponde.
+- [ ] Región de procesamiento, si es relevante.
+
+## 7.3 Registro de aceptación
+
+- [ ] Guardar versión de términos aceptada.
+- [ ] Guardar versión de política de privacidad aceptada.
+- [ ] Guardar timestamp.
+- [ ] Guardar usuario que aceptó.
+- [ ] Guardar versión de política IA aplicable.
+- [ ] Pedir nueva aceptación solo cuando exista un cambio material.
+- [ ] Permitir consultar las versiones vigentes.
+
+## 7.4 Revisión de minimización
+
+- [ ] Confirmar que bodies completos no se persisten.
+- [ ] Confirmar que el worker solo recibe el contenido necesario.
+- [ ] Confirmar límites reales contra el copy mostrado.
+- [ ] Confirmar que no se envían adjuntos.
+- [ ] Confirmar que headers almacenados están limitados.
+- [ ] Revisar snippets y subjects como datos personales.
+- [ ] Revisar datos incluidos en reportes por correo.
+- [ ] Confirmar modo métricas-only por defecto.
+
+---
+
+# 8. Desconexión, eliminación y ciclo de vida de datos
+
+Prioridad: **P0**
+
+## 8.1 Desconectar Gmail
+
+- [ ] Añadir acción disponible en UI.
+- [ ] Exigir confirmación.
+- [ ] Revocar el token en Google cuando sea posible.
+- [ ] Marcar mailbox como revocada.
+- [ ] Eliminar o inutilizar access token.
+- [ ] Eliminar o inutilizar refresh token.
+- [ ] Desactivar scheduler.
+- [ ] Bloquear nuevos análisis.
+- [ ] Mantener o eliminar datos históricos según elección explícita.
+- [ ] Mostrar claramente qué datos permanecen.
+- [ ] Permitir reconectar.
+- [ ] Probar reconexión con la misma cuenta.
+- [ ] Probar reconexión con otra cuenta, si se permite.
+
+## 8.2 Borrar análisis
+
+- [ ] Definir borrado de un run.
+- [ ] Definir borrado de todos los runs.
+- [ ] Eliminar:
+  - Analysis run.
+  - Threads.
+  - Messages derivados.
+  - AI audits.
+  - Manual reviews asociadas.
+  - Overrides cuya semántica dependa del run.
+- [ ] Recalcular uso solo si la política comercial lo exige.
+- [ ] Definir si borrar datos devuelve cuota.
+  - Recomendación: no devolver cuota consumida.
+- [ ] Confirmación fuerte.
+- [ ] Operación idempotente.
+- [ ] Registro de auditoría de la eliminación.
+- [ ] Evitar dejar documentos huérfanos.
+
+## 8.3 Borrar cuenta y organización
+
+- [ ] Definir quién puede solicitarlo.
+- [ ] Limitarlo al owner.
+- [ ] Exigir reautenticación reciente.
+- [ ] Exigir confirmación explícita.
+- [ ] Cancelar suscripción o impedir cobros futuros.
+- [ ] Desconectar Gmail.
+- [ ] Desactivar scheduler.
+- [ ] Revocar sesiones.
+- [ ] Eliminar configuración.
+- [ ] Eliminar políticas y versiones según requisitos.
+- [ ] Eliminar presets.
+- [ ] Eliminar runs y datos derivados.
+- [ ] Eliminar credenciales.
+- [ ] Eliminar cuenta WorkOS si corresponde o documentar su tratamiento.
+- [ ] Mantener solo registros financieros/legalmente necesarios.
+- [ ] Documentar esos registros y su retención.
+- [ ] Enviar confirmación final.
+
+## 8.4 Retención
+
+- [ ] Decidir si la retención se aplica por plan o por política.
+- [ ] Definir qué entidades expiran.
+- [ ] Crear job de eliminación.
+- [ ] Ejecutarlo con idempotencia.
+- [ ] Registrar cantidad eliminada.
+- [ ] Alertar por fallos.
+- [ ] Probar con datos de prueba.
+- [ ] Probar reejecución.
+- [ ] No prometer retención automática hasta que el job esté activo.
+
+## 8.5 Procedimiento manual temporal
+
+Mientras los flujos automáticos no estén completos:
+
+- [ ] Publicar un canal para solicitar eliminación.
+- [ ] Definir responsable.
+- [ ] Definir plazo.
+- [ ] Crear checklist manual.
+- [ ] Registrar solicitudes.
+- [ ] Verificar identidad.
+- [ ] Confirmar ejecución.
+- [ ] Auditar que no quedan datos.
+
+---
+
+# 9. Firestore: hardening inmediato
+
+Prioridad: **P0**
+
+## 9.1 Recuperación
+
+- [ ] Habilitar Point-in-Time Recovery.
+- [ ] Habilitar protección contra eliminación de la base.
+- [ ] Confirmar periodo de recuperación.
+- [ ] Documentar restauración.
+- [ ] Crear un entorno o proyecto para probar restore.
+- [ ] Ejecutar una prueba real de restauración.
+- [ ] Medir tiempo de recuperación.
+- [ ] Definir RPO.
+- [ ] Definir RTO.
+
+Sugerencia inicial:
+
+- RPO: 24 horas o mejor.
+- RTO: 4 horas para beta.
+
+## 9.2 Permisos
+
+- [ ] Revisar permisos de la service account.
+- [ ] Mantener mínimo privilegio.
+- [ ] Evitar roles Owner/Editor.
+- [ ] Confirmar que web y worker no acceden directamente a Firestore.
+- [ ] Separar service accounts por servicio cuando sea útil.
+- [ ] Revisar acceso humano al proyecto.
+- [ ] Activar MFA para cuentas administrativas.
+- [ ] Revisar claves de service account.
+- [ ] Evitar claves persistentes en producción.
+
+## 9.3 Integridad y concurrencia
+
+- [ ] Identificar operaciones read-modify-write.
+- [ ] Proteger contadores de uso.
+- [ ] Proteger claims del scheduler.
+- [ ] Proteger actualización de suscripciones.
+- [ ] Proteger creación de checkout.
+- [ ] Usar transacciones/precondiciones donde corresponda.
+- [ ] Confirmar comportamiento ante retries.
+- [ ] Confirmar comportamiento con dos requests concurrentes.
+
+## 9.4 Rendimiento provisional
+
+- [ ] Eliminar búsquedas que listan colecciones completas en rutas frecuentes.
+- [ ] Evitar listar todas las cuentas para buscar por email.
+- [ ] Evitar listar todas las sesiones para buscar refresh token.
+- [ ] Evitar listar todas las suscripciones para buscar provider ID.
+- [ ] Evitar listar todos los checkouts para buscar provider ID.
+- [ ] Crear índices o documentos lookup.
+- [ ] Definir limpieza de sesiones históricas.
+- [ ] Definir limpieza de checkouts abandonados.
+- [ ] Medir lecturas Firestore por flujo.
+- [ ] Configurar presupuesto y alerta de costes.
+
+---
+
+# 10. Decisión sobre Supabase/Postgres
+
+Prioridad: **P2**
+
+No realizar esta migración como requisito del lanzamiento.
+
+## 10.1 Condiciones para iniciar la migración
+
+- [ ] Mercado Pago estable en producción.
+- [ ] Primeros usuarios reales activos.
+- [ ] Modelo de datos suficientemente estable.
+- [ ] Flujos de borrado definidos.
+- [ ] Métricas reales de uso de Firestore.
+- [ ] Dolor concreto que justifique la migración.
+
+## 10.2 Alcance recomendado
+
+- [ ] Mantener WorkOS como autenticación.
+- [ ] Usar Supabase principalmente como Postgres administrado.
+- [ ] No migrar autenticación y persistencia simultáneamente.
+- [ ] Crear implementación Postgres de `StorageRepository`.
+- [ ] Diseñar claves e índices.
+- [ ] Usar transacciones para:
+  - Billing.
+  - Usage ledger.
+  - Claims.
+  - Eliminaciones.
+- [ ] Definir Row Level Security aunque la API sea el acceso principal.
+- [ ] Separar credenciales de backend y cliente.
+- [ ] Evitar exponer tablas directamente al frontend sin necesidad.
+
+## 10.3 Estrategia de migración
+
+- [ ] Diseñar esquema relacional.
+- [ ] Crear migraciones versionadas.
+- [ ] Crear exportador Firestore.
+- [ ] Crear importador Postgres.
+- [ ] Crear validación de conteos.
+- [ ] Crear validación por checksums o muestras.
+- [ ] Definir dual-write o ventana de mantenimiento.
+- [ ] Definir rollback.
+- [ ] Probar con copia de datos.
+- [ ] Migrar primero entorno no productivo.
+- [ ] Ejecutar prueba de carga básica.
+
+## 10.4 Modelo relacional inicial esperado
+
+- [ ] `accounts`
+- [ ] `organizations`
+- [ ] `memberships`
+- [ ] `mailboxes`
+- [ ] `mailbox_credentials`
+- [ ] `policy_drafts`
+- [ ] `policy_versions`
+- [ ] `subscriptions`
+- [ ] `checkout_sessions`
+- [ ] `payment_events`
+- [ ] `usage_ledgers`
+- [ ] `analysis_runs`
+- [ ] `threads`
+- [ ] `messages`
+- [ ] `ai_audits`
+- [ ] `manual_reviews`
+- [ ] `manual_review_overrides`
+- [ ] `schedule_configs`
+- [ ] `schedule_states`
+- [ ] `filter_presets`
+- [ ] `user_sessions`
+- [ ] `audit_log`
+
+---
+
+# 11. Observabilidad mínima con GCP
+
+Prioridad: **P0**
+
+Decisión inicial recomendada:
+
+- Cloud Logging para logs.
+- Cloud Monitoring para métricas y alertas.
+- Uptime Checks para disponibilidad.
+- Métricas basadas en logs para eventos de negocio.
+- Sin Loki/Prometheus/Grafana autohospedados durante la beta inicial.
+
+## 11.1 Logs estructurados
+
+- [ ] Emitir JSON estructurado desde API.
+- [ ] Emitir JSON estructurado desde worker.
+- [ ] Mantener niveles:
+  - `INFO`: operación normal relevante.
+  - `WARN`: degradación recuperable.
+  - `ERROR`: operación fallida.
+- [ ] Incluir:
+  - `service`.
+  - `environment`.
+  - `request_id`.
+  - `operation`.
+  - `status`.
+  - `duration_ms`.
+  - `run_id`, cuando aplique.
+  - `checkout_id`, cuando aplique.
+  - `error_code`, cuando aplique.
+- [ ] No incluir datos sensibles.
+- [ ] Definir retención de logs.
+- [ ] Revisar coste estimado.
+
+## 11.2 Uptime checks
+
+- [ ] Uptime check para web.
+- [ ] Uptime check para API `/health`.
+- [ ] Considerar un readiness interno que verifique Firestore.
+- [ ] No incluir dependencias costosas en cada liveness check.
+- [ ] Configurar frecuencia.
+- [ ] Configurar múltiples regiones.
+- [ ] Crear canal de notificación.
+- [ ] Probar alerta provocando una condición controlada.
+
+## 11.3 Alertas técnicas
+
+- [ ] Tasa de 5xx en API.
+- [ ] Tasa de 5xx en web/proxy.
+- [ ] Errores del worker.
+- [ ] Latencia p95 API.
+- [ ] Latencia del worker.
+- [ ] Instancias reiniciándose.
+- [ ] Uso alto de memoria.
+- [ ] Uso alto de CPU.
+- [ ] Requests 429 anormalmente altos.
+- [ ] Errores de autenticación anormalmente altos.
+- [ ] Fallos de acceso a Firestore.
+
+## 11.4 Alertas de negocio
+
+Crear métricas basadas en logs para:
+
+- [ ] `payment_webhook_failed`.
+- [ ] `payment_reconciliation_mismatch`.
+- [ ] `checkout_stuck`.
+- [ ] `analysis_failed`.
+- [ ] `scheduled_analysis_failed`.
+- [ ] `scheduled_analysis_missed`.
+- [ ] `gmail_refresh_invalid_grant`.
+- [ ] `resend_delivery_failed`.
+- [ ] `ai_worker_failed`.
+- [ ] `bedrock_failed`.
+- [ ] `data_deletion_failed`.
+- [ ] `retention_job_failed`.
+
+## 11.5 Dashboard operativo en Cloud Monitoring
+
+- [ ] Requests por servicio.
+- [ ] Latencia p50/p95/p99.
+- [ ] 4xx y 5xx.
+- [ ] Análisis creados/completados/fallidos.
+- [ ] Duración de análisis.
+- [ ] Hilos procesados.
+- [ ] Llamadas IA.
+- [ ] Tokens IA.
+- [ ] Checkouts iniciados.
+- [ ] Pagos aprobados/rechazados/pendientes.
+- [ ] Scheduler exitoso/fallido.
+- [ ] Errores Gmail.
+- [ ] Costes o señales de consumo.
+
+## 11.6 On-call mínimo
+
+- [ ] Definir quién recibe alertas.
+- [ ] Definir canal:
+  - Email.
+  - Slack/Discord.
+  - SMS solo para incidentes graves.
+- [ ] Definir severidades.
+- [ ] Definir tiempo de respuesta.
+- [ ] Definir cuándo desactivar temporalmente una función.
+- [ ] Crear runbook por alerta crítica.
+
+---
+
+# 12. OpenTelemetry y Grafana como siguiente etapa
+
+Prioridad: **P2**
+
+## 12.1 Cuándo incorporarlo
+
+- [ ] Existe más de un servicio difícil de correlacionar.
+- [ ] Cloud Logging ya no permite diagnosticar suficientemente.
+- [ ] Se necesitan trazas distribuidas.
+- [ ] El volumen o coste justifica una plataforma adicional.
+- [ ] Existe tiempo para operar o pagar un servicio administrado.
+
+## 12.2 Ruta recomendada
+
+- [ ] Instrumentar API con OpenTelemetry.
+- [ ] Instrumentar worker con OpenTelemetry.
+- [ ] Propagar contexto de trazas.
+- [ ] Añadir spans para:
+  - WorkOS.
+  - Google OAuth.
+  - Gmail.
+  - Firestore.
+  - Worker IA.
+  - Bedrock.
+  - Mercado Pago.
+  - Resend.
+- [ ] Evaluar Grafana Cloud antes de autohospedar.
+- [ ] Usar Grafana Alloy como collector si aporta valor.
+- [ ] Mantener datos sensibles fuera de atributos y spans.
+
+## 12.3 Evitar durante la beta inicial
+
+- [ ] No desplegar Loki autohospedado.
+- [ ] No desplegar Prometheus autohospedado.
+- [ ] No desplegar Grafana autohospedado.
+- [ ] No desplegar Tempo autohospedado.
+- [ ] No administrar almacenamiento, backups y upgrades de observabilidad sin necesidad real.
+
+---
+
+# 13. Panel administrativo
+
+Prioridad: **P1**
+
+El panel admin debe resolver operaciones del negocio. No debe intentar reemplazar Cloud Monitoring o Grafana.
+
+## 13.1 Acceso y autorización
+
+- [ ] Crear rol admin explícito.
+- [ ] No depender solamente de una lista de emails privilegiados.
+- [ ] Exigir MFA mediante proveedor de identidad.
+- [ ] Registrar cada acción administrativa.
+- [ ] Mostrar advertencia antes de acciones destructivas.
+- [ ] Evitar acceso directo del navegador a Firestore.
+
+## 13.2 Vista de organizaciones
+
+- [ ] Lista de organizaciones.
+- [ ] Estado de onboarding.
+- [ ] Plan.
+- [ ] Estado de suscripción.
+- [ ] Gmail conectado/revocado.
+- [ ] Scheduler activo.
+- [ ] Último análisis.
+- [ ] Último análisis exitoso.
+- [ ] Uso del período.
+- [ ] Estado de trial.
+- [ ] Fecha de creación.
+
+## 13.3 Acciones administrativas
+
+- [ ] Ver estado sin mostrar secretos.
+- [ ] Revocar sesiones.
+- [ ] Desconectar Gmail.
+- [ ] Desactivar scheduler.
+- [ ] Reintentar reconciliación de pago.
+- [ ] Reintentar una operación idempotente.
+- [ ] Iniciar borrado solicitado.
+- [ ] Bloquear organización.
+- [ ] Quitar acceso interno privilegiado.
+- [ ] Ver historial de acciones.
+
+## 13.4 Datos que no debe mostrar
+
+- [ ] Access tokens.
+- [ ] Refresh tokens.
+- [ ] Cookies.
+- [ ] Secretos.
+- [ ] Bodies completos de correo.
+- [ ] Datos de tarjeta.
+- [ ] Payload completo enviado a IA.
+
+---
+
+# 14. CI, calidad y proceso de release
+
+Prioridad: **P0**
+
+## 14.1 Check local
+
+- [ ] `cargo fmt --check`.
+- [ ] `cargo test`.
+- [ ] `cargo clippy --all-targets -- -D warnings`.
+- [ ] `python3 -m pytest apps/ai-worker/tests`.
+- [ ] `npm --prefix apps/web run build`.
+- [ ] `npm audit --omit=dev`.
+- [ ] `cargo build --release`.
+- [ ] Resolver el warning actual de Clippy.
+- [ ] Mantener `./scripts/check-all.sh` completamente verde.
+
+## 14.2 CI
+
+- [ ] Crear workflow de CI.
+- [ ] Ejecutarlo en pull requests.
+- [ ] Ejecutarlo antes de deploy.
+- [ ] Bloquear merge si falla.
+- [ ] Cachear dependencias.
+- [ ] No exponer secretos en PRs.
+- [ ] Añadir escaneo de secretos.
+- [ ] Añadir auditoría de dependencias Rust.
+- [ ] Añadir auditoría de dependencias Python.
+- [ ] Mantener `npm audit`.
+
+## 14.3 Tests críticos faltantes
+
+- [ ] Tests del nuevo checkout embebido.
+- [ ] Tests de webhook duplicado.
+- [ ] Tests de webhook fuera de orden.
+- [ ] Tests de expiración de sesión.
+- [ ] Tests de logout revocable.
+- [ ] Tests CSRF/origen.
+- [ ] Tests de desconexión Gmail.
+- [ ] Tests de borrado de análisis.
+- [ ] Tests de borrado de cuenta.
+- [ ] Tests de retención.
+- [ ] Tests de sanitización de errores.
+- [ ] Tests de concurrencia de usage ledger.
+
+## 14.4 E2E mínimo
+
+- [ ] Landing → registro.
+- [ ] Login.
+- [ ] Selección de plan.
+- [ ] Checkout.
+- [ ] Activación mediante webhook.
+- [ ] Conexión Gmail.
+- [ ] Configuración inicial.
+- [ ] Creación de análisis.
+- [ ] Ejecución.
+- [ ] Visualización de resultados.
+- [ ] Revisión manual.
+- [ ] Logout.
+- [ ] Reconexión de sesión.
+
+## 14.5 Artefactos reproducibles
+
+- [ ] Etiquetar imágenes con SHA del commit.
+- [ ] Evitar depender únicamente de `latest`.
+- [ ] Registrar qué commit corresponde a cada revisión.
+- [ ] Mantener imagen anterior disponible.
+- [ ] Documentar rollback por servicio.
+- [ ] Eliminar el lockfile duplicado `apps/web/apps/web/package-lock.json` si no tiene propósito.
+- [ ] Fijar dependencias Python mediante lockfile.
+- [ ] Usar `npm ci` en builds.
+- [ ] No instalar dependencias de test en imagen final del worker.
+
+---
+
+# 15. Seguridad de contenedores y frontend
+
+Prioridad: **P1**
+
+## 15.1 Contenedores
+
+- [ ] Ejecutar API como usuario no root.
+- [ ] Ejecutar worker como usuario no root.
+- [ ] Ejecutar web como usuario no root.
+- [ ] Reducir paquetes del runtime.
+- [ ] Separar dependencias build/test/runtime.
+- [ ] Escanear imágenes.
+- [ ] Revisar vulnerabilidades base.
+- [ ] Definir frecuencia de rebuild.
+- [ ] Limitar filesystem de escritura cuando sea viable.
+- [ ] Definir límites de CPU y memoria.
+- [ ] Probar comportamiento ante OOM.
+
+## 15.2 Headers HTTP
+
+- [ ] `Content-Security-Policy`.
+- [ ] `Strict-Transport-Security`.
+- [ ] `X-Content-Type-Options: nosniff`.
+- [ ] `Referrer-Policy`.
+- [ ] `Permissions-Policy`.
+- [ ] `frame-ancestors` o `X-Frame-Options`.
+- [ ] Política de caché para HTML.
+- [ ] Caché larga e immutable para assets con hash.
+- [ ] No cachear respuestas autenticadas sensibles.
+
+## 15.3 CSP
+
+- [ ] Inventariar orígenes necesarios.
+- [ ] Revisar Google Fonts.
+- [ ] Revisar scripts de Mercado Pago.
+- [ ] Revisar frames necesarios para checkout embebido.
+- [ ] No usar `unsafe-eval`.
+- [ ] Minimizar `unsafe-inline`.
+- [ ] Probar checkout bajo CSP.
+- [ ] Probar WorkOS y OAuth.
+- [ ] Crear reporte CSP inicialmente si es necesario.
+
+## 15.4 Frontend
+
+- [ ] Dividir bundle si afecta carga.
+- [ ] Cargar vistas pesadas de forma diferida.
+- [ ] Revisar accesibilidad básica.
+- [ ] Probar móvil.
+- [ ] Probar Chrome, Firefox y Safari.
+- [ ] Probar bloqueo de cookies third-party.
+- [ ] Probar refresh en rutas internas.
+- [ ] Probar expiración de sesión mientras la app está abierta.
+
+---
+
+# 16. Disponibilidad y resiliencia
+
+Prioridad: **P1**
+
+## 16.1 Health y readiness
+
+- [ ] Mantener liveness simple.
+- [ ] Crear readiness separado si es necesario.
+- [ ] Readiness puede validar Firestore de forma liviana.
+- [ ] No llamar Gmail, Bedrock o Mercado Pago en cada healthcheck.
+- [ ] Mostrar solo estado general, sin detalles sensibles.
+
+## 16.2 Timeouts y retries
+
+- [ ] Revisar timeout de WorkOS.
+- [ ] Revisar timeout de Google OAuth.
+- [ ] Revisar timeout de Gmail.
+- [ ] Revisar timeout de Firestore.
+- [ ] Revisar timeout del worker.
+- [ ] Revisar timeout de Bedrock.
+- [ ] Revisar timeout de Mercado Pago.
+- [ ] Revisar timeout de Resend.
+- [ ] Añadir retries solo para operaciones idempotentes.
+- [ ] Aplicar backoff con jitter.
+- [ ] Evitar retry automático de cobros no idempotentes.
+
+## 16.3 Degradación controlada
+
+- [ ] Si IA falla, definir si el run:
+  - Continúa con heurísticas.
+  - Queda en revisión manual.
+  - Falla completamente.
+- [ ] Si Resend falla, no perder el análisis.
+- [ ] Si el scheduler falla, permitir reintento.
+- [ ] Si Gmail limita requests, informar y reintentar.
+- [ ] Si Mercado Pago no responde, no conceder acceso sin confirmación.
+- [ ] Si Firestore no responde, evitar estados parciales.
+
+## 16.4 Jobs largos
+
+- [ ] Medir duración máxima de análisis.
+- [ ] Confirmar timeout Cloud Run.
+- [ ] Evitar que el navegador sea responsable de completar el proceso.
+- [ ] Mantener progreso persistido.
+- [ ] Recuperar runs atascados.
+- [ ] Definir TTL de estado `running`.
+- [ ] Alertar por runs atascados.
+
+---
+
+# 17. Legal, confianza y comunicación
+
+Prioridad: **P0**
+
+> Este checklist organiza implementación y producto; no reemplaza asesoría legal.
+
+## 17.1 Política de privacidad
+
+- [ ] Identidad del responsable.
+- [ ] Datos recopilados.
+- [ ] Finalidad.
+- [ ] Base o autorización aplicable.
+- [ ] Proveedores/subprocesadores.
+- [ ] WorkOS.
+- [ ] Google.
+- [ ] GCP/Firestore.
+- [ ] AWS Bedrock.
+- [ ] Mercado Pago.
+- [ ] Resend.
+- [ ] Retención.
+- [ ] Seguridad.
+- [ ] Transferencias internacionales, si aplican.
+- [ ] Derechos y solicitudes.
+- [ ] Canal de contacto.
+- [ ] Fecha y versión.
+
+## 17.2 Términos y condiciones
+
+- [ ] Descripción del servicio.
+- [ ] Estado beta.
+- [ ] Obligaciones del usuario.
+- [ ] Autorización sobre la casilla conectada.
+- [ ] Uso permitido.
+- [ ] Uso de IA.
+- [ ] Exactitud y necesidad de revisión humana.
+- [ ] Planes y precios.
+- [ ] Renovación.
+- [ ] Trial.
+- [ ] Cancelación.
+- [ ] Reembolsos.
+- [ ] Disponibilidad.
+- [ ] Limitación de responsabilidad.
+- [ ] Suspensión.
+- [ ] Terminación.
+- [ ] Eliminación de datos.
+- [ ] Cambios de términos.
+- [ ] Jurisdicción y contacto.
+
+## 17.3 Página de seguridad
+
+- [ ] Gmail readonly.
+- [ ] Tokens cifrados.
+- [ ] Worker privado.
+- [ ] Datos enviados a IA.
+- [ ] Datos no enviados.
+- [ ] Retención.
+- [ ] Proceso de reporte de vulnerabilidades.
+- [ ] Contacto de seguridad.
+- [ ] No prometer certificaciones inexistentes.
+- [ ] No usar lenguaje absoluto como “100% seguro”.
+
+## 17.4 Aceptación
+
+- [ ] Links visibles antes de crear cuenta o contratar.
+- [ ] Checkbox o acto inequívoco según decisión legal.
+- [ ] Registrar versión aceptada.
+- [ ] Acceso permanente a documentos vigentes.
+- [ ] Historial de versiones.
+
+---
+
+# 18. Operación y soporte
+
+Prioridad: **P0**
+
+## 18.1 Runbooks
+
+- [ ] Pago no activado.
+- [ ] Webhook fallido.
+- [ ] Suscripción duplicada.
+- [ ] Gmail desconectado.
+- [ ] Refresh token revocado.
+- [ ] Análisis atascado.
+- [ ] Worker IA caído.
+- [ ] Bedrock caído.
+- [ ] Resend caído.
+- [ ] Scheduler omitido.
+- [ ] Firestore no disponible.
+- [ ] Borrado solicitado.
+- [ ] Incidente de seguridad.
+- [ ] Rollback.
+- [ ] Restauración de datos.
+
+Cada runbook debe incluir:
+
+- [ ] Síntoma.
+- [ ] Cómo confirmar.
+- [ ] Impacto.
+- [ ] Mitigación inmediata.
+- [ ] Resolución.
+- [ ] Verificación.
+- [ ] Comunicación al usuario.
+
+## 18.2 Soporte al usuario
+
+- [ ] Canal visible.
+- [ ] Mensaje de recepción.
+- [ ] Prioridades de tickets.
+- [ ] Registro de incidentes.
+- [ ] Plantillas para:
+  - Pago.
+  - Gmail.
+  - Datos.
+  - Análisis.
+  - Disponibilidad.
+- [ ] Procedimiento para solicitar información sin pedir secretos.
+- [ ] Nunca solicitar tokens o contraseñas por correo.
+
+## 18.3 Incidentes
+
+- [ ] Definir severidades.
+- [ ] Definir quién decide desactivar funciones.
+- [ ] Mantener timeline.
+- [ ] Preservar evidencia.
+- [ ] Comunicar a usuarios afectados.
+- [ ] Realizar postmortem sin culpas.
+- [ ] Convertir acciones correctivas en checklist.
+
+---
+
+# 19. Costes y abuso
+
+Prioridad: **P1**
+
+## 19.1 Presupuestos
+
+- [ ] Budget de GCP.
+- [ ] Alertas de presupuesto.
+- [ ] Seguimiento de Firestore.
+- [ ] Seguimiento de Cloud Run.
+- [ ] Seguimiento de Logging.
+- [ ] Seguimiento de AWS Bedrock.
+- [ ] Seguimiento de Resend.
+- [ ] Seguimiento de WorkOS.
+- [ ] Seguimiento de Mercado Pago.
+
+## 19.2 Límites
+
+- [ ] Rate limit de login si WorkOS no lo cubre.
+- [ ] Rate limit de checkout.
+- [ ] Rate limit de consultas de estado.
+- [ ] Rate limit de análisis.
+- [ ] Límite de hilos por run.
+- [ ] Límite mensual.
+- [ ] Límite IA.
+- [ ] Límite de destinatarios.
+- [ ] Límite de retries.
+- [ ] Protección contra loops de scheduler.
+
+## 19.3 Cuentas internas
+
+- [ ] Revisar `INTERNAL_FULL_ACCESS_EMAILS`.
+- [ ] Mantener lista mínima.
+- [ ] Registrar uso del bypass.
+- [ ] Evitar que el bypass relaje aislamiento de datos.
+- [ ] Evitar usar cuentas privilegiadas para pruebas rutinarias.
+- [ ] Crear proceso para retirar privilegios.
+
+---
+
+# 20. Checklist de lanzamiento
+
+## 20.1 48–72 horas antes
+
+- [ ] Congelar nuevas features.
+- [ ] Resolver todos los P0.
+- [ ] Ejecutar CI completo.
+- [ ] Construir imágenes con commit SHA.
+- [ ] Confirmar secretos.
+- [ ] Confirmar URLs y redirects OAuth.
+- [ ] Confirmar Mercado Pago sandbox.
+- [ ] Ejecutar smoke test completo.
+- [ ] Activar PITR.
+- [ ] Activar alertas.
+- [ ] Confirmar canal de soporte.
+- [ ] Publicar documentos legales.
+- [ ] Revisar copy.
+- [ ] Confirmar rollback.
+
+## 20.2 Día del lanzamiento
+
+- [ ] Desplegar revisión.
+- [ ] Validar health.
+- [ ] Validar login.
+- [ ] Validar pago real controlado de bajo riesgo.
+- [ ] Validar webhook.
+- [ ] Validar Gmail.
+- [ ] Validar análisis.
+- [ ] Validar email de reporte.
+- [ ] Revisar logs.
+- [ ] Revisar métricas.
+- [ ] Incorporar usuarios gradualmente.
+- [ ] Mantener monitoreo activo.
+
+## 20.3 Primeras 24 horas
+
+- [ ] Revisar 5xx.
+- [ ] Revisar latencia.
+- [ ] Revisar checkouts pendientes.
+- [ ] Revisar webhooks.
+- [ ] Revisar errores Gmail.
+- [ ] Revisar análisis fallidos.
+- [ ] Revisar scheduler.
+- [ ] Revisar consumo Bedrock.
+- [ ] Revisar costes.
+- [ ] Contactar proactivamente a usuarios con fallos.
+
+## 20.4 Primera semana
+
+- [ ] Revisión diaria de alertas.
+- [ ] Revisión diaria de pagos.
+- [ ] Revisión diaria de runs fallidos.
+- [ ] Revisión de feedback.
+- [ ] Clasificar problemas por frecuencia e impacto.
+- [ ] Evitar abrir trabajo multiproveedor salvo demanda real.
+- [ ] Decidir primeras mejoras P1.
+- [ ] Revisar si Firestore sigue siendo suficiente.
+
+---
+
+# 21. Orden recomendado de ejecución
+
+## Fase A — Bloqueadores inmediatos
+
+- [ ] Terminar checkout embebido.
+- [ ] Cerrar seguridad e idempotencia del webhook.
+- [ ] Configurar modo producción.
+- [ ] Limitar API a una instancia.
+- [ ] Sanitizar errores.
+- [ ] Corregir sesión/logout.
+- [ ] Implementar desconexión Gmail.
+- [ ] Definir y habilitar borrado.
+- [ ] Alinear copy y documentos sobre IA.
+
+## Fase B — Protección operativa
+
+- [ ] Activar PITR y delete protection.
+- [ ] Crear logs estructurados.
+- [ ] Crear request IDs.
+- [ ] Crear uptime checks.
+- [ ] Crear alertas técnicas y de negocio.
+- [ ] Crear runbooks.
+- [ ] Corregir check oficial.
+- [ ] Crear CI.
+
+## Fase C — Lanzamiento controlado
+
+- [ ] Smoke test.
+- [ ] Prueba real controlada de pago.
+- [ ] Onboarding del primer usuario externo.
+- [ ] Monitoreo diario.
+- [ ] Resolver errores P0/P1 observados.
+
+## Fase D — Después de validar uso
+
+- [ ] Panel admin.
+- [ ] Retención automática.
+- [ ] OpenTelemetry.
+- [ ] Grafana Cloud si se justifica.
+- [ ] Evaluación formal Firestore vs Supabase.
+- [ ] Migración a Postgres si el beneficio ya es concreto.
+- [ ] Escalado multi-instancia.
+- [ ] Rate limiting distribuido.
+- [ ] Conexión multiproveedor.
+
+---
+
+# 22. Registro de progreso
+
+Usar esta tabla para mantener una visión ejecutiva:
+
+| Área | Prioridad | Estado | Responsable | Evidencia | Observaciones |
+|---|---:|---|---|---|---|
+| Checkout embebido | P0 | Pendiente |  |  |  |
+| Webhook Mercado Pago | P0 | Pendiente |  |  |  |
+| Configuración production | P0 | Pendiente |  |  |  |
+| Sesiones y logout | P0 | Pendiente |  |  |  |
+| Sanitización de errores | P0 | Pendiente |  |  |  |
+| Desconexión Gmail | P0 | Pendiente |  |  |  |
+| Borrado de datos | P0 | Pendiente |  |  |  |
+| Privacidad y términos | P0 | En progreso |  |  |  |
+| PITR Firestore | P0 | Pendiente |  |  |  |
+| Uptime y alertas | P0 | Pendiente |  |  |  |
+| CI verde | P0 | Pendiente |  |  | Clippy falla actualmente. |
+| Panel admin | P1 | Pendiente |  |  |  |
+| Hardening contenedores | P1 | Pendiente |  |  |  |
+| Retención automática | P1 | Pendiente |  |  |  |
+| OpenTelemetry/Grafana | P2 | Pendiente |  |  |  |
+| Migración Supabase | P2 | Pendiente |  |  |  |
+| Multiproveedor | P3 | Planificado |  | `docs/plan-conexion-multiproveedor.md` |  |
+
+---
+
+# 23. Estado observado al crear este plan
+
+Este bloque es una fotografía inicial y debe actualizarse a medida que cambie el sistema.
+
+## Ya existente o favorable
+
+- [x] API, web y worker desplegados en Cloud Run.
+- [x] Worker IA privado mediante IAM.
+- [x] Gmail usa scope readonly.
+- [x] Tokens Gmail cifrados antes de persistirse.
+- [x] OAuth incluye protecciones de state/PKCE.
+- [x] Aislamiento de runs y threads probado.
+- [x] 122 tests Rust pasan.
+- [x] 7 tests Python pasan.
+- [x] Frontend compila para producción.
+- [x] API compila en release.
+- [x] `npm audit --omit=dev` sin vulnerabilidades reportadas al 2026-06-25.
+- [x] Cloud Scheduler existe y está habilitado.
+- [x] Worker no es público.
+
+## Pendiente o riesgoso
+
+- [ ] `APP_ENV=production` no está configurado en la API desplegada.
+- [ ] Billing enforcement no está configurado explícitamente.
+- [ ] Mercado Pago no está configurado en la revisión auditada.
+- [ ] API permite hasta 20 instancias.
+- [ ] Firestore PITR desactivado.
+- [ ] Firestore delete protection desactivado.
+- [ ] No se observaron alertas operativas configuradas.
+- [ ] El check oficial falla por Clippy.
+- [ ] Checkout versionado todavía utiliza redirección.
+- [ ] Desconexión y eliminación están deshabilitadas en UI.
+- [ ] Retención declarada no tiene job destructivo.
+- [ ] Sesiones no expiran ni se revocan server-side.
+- [ ] Logout solo elimina cookie.
+- [ ] Errores crudos pueden llegar al navegador.
+- [ ] Copy de IA no es completamente consistente con el comportamiento real.
+- [ ] No hay CI visible en el repositorio.
+- [ ] No hay tests frontend/E2E.
+- [ ] No hay headers de seguridad explícitos en el servidor web.
+
+---
+
+# 24. Criterio de “production-ready” para esta etapa
+
+Mira puede considerarse production-ready para una **beta pagada controlada** cuando:
+
+- [ ] Puede cobrar sin duplicar, perder o inventar estados.
+- [ ] Puede bloquear acceso cuando corresponde.
+- [ ] Puede recuperar el estado desde Mercado Pago.
+- [ ] Puede expirar y revocar sesiones.
+- [ ] Puede desconectar Gmail.
+- [ ] Puede borrar datos de forma verificable.
+- [ ] Explica honestamente cómo usa IA y datos.
+- [ ] No filtra errores internos al usuario.
+- [ ] Tiene respaldo y recuperación probados.
+- [ ] Alguien recibe alertas cuando falla.
+- [ ] Existe un procedimiento para operar incidentes.
+- [ ] El release puede validarse y revertirse.
+- [ ] El producto sigue siendo suficientemente simple para operarlo con pocos usuarios.
+
+No requiere todavía:
+
+- Alta disponibilidad multi-región.
+- Kubernetes.
+- Microservicios adicionales.
+- Loki/Prometheus/Grafana autohospedados.
+- SOC 2 o ISO 27001.
+- Panel admin sofisticado.
+- Supabase.
+- Multiproveedor.
+- Escalado horizontal.
+
+La meta de esta etapa no es construir una plataforma perfecta. Es lograr que los primeros usuarios puedan pagar, conectar su correo, obtener valor y confiar en que los fallos serán detectados, explicados y recuperables.

@@ -1,10 +1,13 @@
-import { CheckCircle2, Save, Sparkles, Tags, Trash2 } from "lucide-react";
+import { CheckCircle2, Sparkles, Tags } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { FilterPreset, OrgConfig } from "../../api/types";
 import { split } from "../../lib/format";
+import { DateRangePopover } from "./DateRangePopover";
+import { todayInHelpdeskTz } from "./dateUtils";
 import { LabelPickerModal } from "./LabelPickerModal";
 import { INBOX_TOKEN, tokenDisplayName } from "./labels";
-import { RangeField } from "./RangeField";
+import { SavedFiltersPopover } from "./SavedFiltersPopover";
+import { TimeRangePopover } from "./TimeRangePopover";
 
 type Props = {
   loading: boolean;
@@ -14,18 +17,6 @@ type Props = {
   onSavePreset?: (payload: unknown) => void;
   onDeletePreset?: (id: string) => void;
 };
-
-// Fecha de hoy en la zona horaria del helpdesk (America/Santiago), formato YYYY-MM-DD.
-// Se evalúa en la zona local del desk para evitar el corrimiento de día de toISOString() (UTC).
-const HELPDESK_TZ = "America/Santiago";
-function todayInHelpdeskTz(): string {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: HELPDESK_TZ,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(new Date());
-}
 
 export function FilterBar({
   loading,
@@ -49,7 +40,6 @@ export function FilterBar({
   const [labelModalOpen, setLabelModalOpen] = useState(false);
 
   // Presets guardados
-  const [presetName, setPresetName] = useState("");
   const [selectedPresetId, setSelectedPresetId] = useState("");
 
   // Legacy state — only used when orgConfig is not available
@@ -132,9 +122,8 @@ export function FilterBar({
     }
   }
 
-  function handleSavePreset() {
-    const name = presetName.trim();
-    if (!name || !onSavePreset) return;
+  function handleSavePreset(name: string) {
+    if (!onSavePreset) return;
     onSavePreset({
       name,
       include_labels: includeLabels,
@@ -144,45 +133,42 @@ export function FilterBar({
       ignored_keywords: hasConfig ? [] : split(ignoredKeywords),
       is_default: false,
     });
-    setPresetName("");
   }
 
   return (
     <form className="filter-bar" onSubmit={handleSubmit}>
-      <RangeField
-        label="Fechas"
-        type="date"
+      <DateRangePopover
         fromValue={dateFromVal}
         toValue={dateToVal}
-        onFromChange={setDateFrom}
-        onToChange={setDateTo}
+        onChange={(from, to) => {
+          setDateFrom(from);
+          setDateTo(to);
+        }}
       />
-      <RangeField
-        label="Horario"
-        type="time"
+      <TimeRangePopover
         fromValue={timeFrom}
         toValue={timeTo}
-        onFromChange={setTimeFrom}
-        onToChange={setTimeTo}
+        onChange={(from, to) => {
+          setTimeFrom(from);
+          setTimeTo(to);
+        }}
       />
 
       {labels.length > 0 && (
-        <div className="field">
-          <span className="field-label">Bandejas y etiquetas</span>
-          <button
-            type="button"
-            className="label-picker-trigger"
-            onClick={() => setLabelModalOpen(true)}
-          >
-            <Tags size={16} />
-            <span className="lp-trigger-text">
-              {includeLabels.length === 0
-                ? "Recibidos (por defecto)"
-                : includeLabels.map((token) => tokenDisplayName(token, labels)).join(", ")}
-            </span>
-            <span className="lp-trigger-count">{includeLabels.length}</span>
-          </button>
-        </div>
+        <button
+          type="button"
+          className="label-picker-trigger"
+          aria-label="Bandejas y etiquetas a analizar"
+          onClick={() => setLabelModalOpen(true)}
+        >
+          <Tags size={16} />
+          <span className="lp-trigger-text">
+            {includeLabels.length === 0
+              ? "Recibidos"
+              : includeLabels.map((token) => tokenDisplayName(token, labels)).join(", ")}
+          </span>
+          <span className="lp-trigger-count">{includeLabels.length}</span>
+        </button>
       )}
 
       <LabelPickerModal
@@ -194,58 +180,21 @@ export function FilterBar({
       />
 
       {(filterPresets.length > 0 || onSavePreset) && (
-        <div className="field filter-presets">
-          <span className="field-label">Filtros guardados</span>
-          <div className="preset-row">
-            <select
-              value={selectedPresetId}
-              onChange={(event) => {
-                const preset = filterPresets.find((item) => item.id === event.target.value);
-                if (preset) applyPreset(preset);
-                else setSelectedPresetId("");
-              }}
-            >
-              <option value="">Sin preset</option>
-              {filterPresets.map((preset) => (
-                <option key={preset.id} value={preset.id}>
-                  {preset.name}
-                  {preset.is_default ? " (por defecto)" : ""}
-                </option>
-              ))}
-            </select>
-            {selectedPresetId && onDeletePreset && (
-              <button
-                type="button"
-                className="preset-icon-btn"
-                title="Eliminar preset"
-                onClick={() => {
-                  onDeletePreset(selectedPresetId);
-                  setSelectedPresetId("");
-                }}
-              >
-                <Trash2 size={15} />
-              </button>
-            )}
-            {onSavePreset && (
-              <>
-                <input
-                  value={presetName}
-                  onChange={(event) => setPresetName(event.target.value)}
-                  placeholder="Nombre del filtro"
-                />
-                <button
-                  type="button"
-                  className="preset-icon-btn"
-                  title="Guardar filtro actual"
-                  onClick={handleSavePreset}
-                  disabled={!presetName.trim()}
-                >
-                  <Save size={15} />
-                </button>
-              </>
-            )}
-          </div>
-        </div>
+        <SavedFiltersPopover
+          presets={filterPresets}
+          selectedId={selectedPresetId}
+          onApply={applyPreset}
+          onClear={() => setSelectedPresetId("")}
+          onSave={onSavePreset ? handleSavePreset : undefined}
+          onDelete={
+            onDeletePreset
+              ? (id) => {
+                  onDeletePreset(id);
+                  if (id === selectedPresetId) setSelectedPresetId("");
+                }
+              : undefined
+          }
+        />
       )}
 
       {/* Mode indicator or legacy fields */}

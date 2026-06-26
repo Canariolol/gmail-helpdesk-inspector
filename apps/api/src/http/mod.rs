@@ -586,6 +586,14 @@ async fn get_public_plans() -> Json<Vec<BillingPlan>> {
 #[derive(Debug, Deserialize)]
 struct CreateCheckoutSubscriptionRequest {
     plan_id: String,
+    /// Token de tarjeta generado por el SDK de Mercado Pago en el navegador
+    /// (checkout embebido). Si viene, la suscripción se crea autorizada sin
+    /// redirección. Si falta, se conserva el flujo con redirección (init_point).
+    #[serde(default)]
+    card_token_id: Option<String>,
+    /// Email del pagador capturado por el Brick; puede diferir de la cuenta.
+    #[serde(default)]
+    payer_email: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -622,11 +630,48 @@ async fn create_checkout_subscription(
     };
 
     if let Some(access_token) = &state.config.billing.mercadopago_access_token {
-        let mp = create_mercadopago_preapproval(&state, access_token, &checkout).await?;
-        checkout.status = CheckoutSessionStatus::ProviderCreated;
+        let card_token = request.card_token_id.as_deref();
+        let payer_email = request
+            .payer_email
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(&checkout.account_email);
+        let mp = create_mercadopago_preapproval(
+            &state,
+            access_token,
+            &checkout,
+            card_token,
+            payer_email,
+        )
+        .await?;
         checkout.provider_subscription_id = Some(mp.id.clone());
-        checkout.checkout_url = mp.init_point.or(mp.sandbox_init_point);
         checkout.updated_at = Utc::now();
+
+        if matches!(
+            map_mercadopago_status(mp.status.as_deref()),
+            SubscriptionStatus::Active
+        ) {
+            // Checkout embebido: la tarjeta quedó autorizada. Activamos la
+            // suscripción de inmediato (el webhook luego la mantiene en sync),
+            // así el usuario no espera la confirmación asíncrona.
+            checkout.status = CheckoutSessionStatus::Activated;
+            let now = Utc::now();
+            let mut subscription = active_subscription_for_trial(
+                checkout.org_id.clone(),
+                checkout.plan_id.clone(),
+                Some(mp.id.clone()),
+                now,
+            );
+            // Planes con prueba quedan en Trialing; el resto, activos de una.
+            if !matches!(subscription.status, SubscriptionStatus::Trialing) {
+                subscription.status = SubscriptionStatus::Active;
+            }
+            state.storage.upsert_subscription(&subscription).await?;
+        } else {
+            // Sin token (o pago aún pendiente): flujo con redirección / espera.
+            checkout.status = CheckoutSessionStatus::ProviderCreated;
+            checkout.checkout_url = mp.init_point.or(mp.sandbox_init_point);
+        }
     } else {
         return Err(ApiError::service_unavailable(
             "Mercado Pago no está configurado",
@@ -3550,6 +3595,8 @@ async fn create_mercadopago_preapproval(
     state: &AppState,
     access_token: &str,
     checkout: &CheckoutSession,
+    card_token_id: Option<&str>,
+    payer_email: &str,
 ) -> Result<MercadoPagoPreapprovalResponse, ApiError> {
     let plan = plan_by_id(&checkout.plan_id);
     let start_date = if plan.trial_days > 0 {
@@ -3557,27 +3604,39 @@ async fn create_mercadopago_preapproval(
     } else {
         Utc::now().to_rfc3339()
     };
+    let mut body = json!({
+        "reason": format!("{} - Helpdesk Inspector", plan.name),
+        "external_reference": checkout.id,
+        "payer_email": payer_email,
+        "auto_recurring": {
+            "frequency": 1,
+            "frequency_type": "months",
+            "start_date": start_date,
+            "transaction_amount": checkout.amount_clp,
+            "currency_id": "CLP"
+        },
+        // Retorno del navegador -> web app (ruta NO proxyada por server.mjs).
+        "back_url": format!("{}/checkout-return?session_id={}", state.config.web_base_url, checkout.id),
+        // Webhook de eventos -> API.
+        "notification_url": format!("{}/billing/mercadopago/webhook", state.config.api_base_url),
+    });
+    if let Some(token) = card_token_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        // Checkout embebido: con tarjeta tokenizada la suscripción se autoriza
+        // sin redirección.
+        body["card_token_id"] = json!(token);
+        body["status"] = json!("authorized");
+    } else {
+        // Sin tarjeta: flujo clásico con redirección al init_point de Mercado Pago.
+        body["status"] = json!("pending");
+    }
     state
         .http
         .post("https://api.mercadopago.com/preapproval")
         .bearer_auth(access_token)
-        .json(&json!({
-            "reason": format!("{} - Helpdesk Inspector", plan.name),
-            "external_reference": checkout.id,
-            "payer_email": checkout.account_email,
-            "auto_recurring": {
-                "frequency": 1,
-                "frequency_type": "months",
-                "start_date": start_date,
-                "transaction_amount": checkout.amount_clp,
-                "currency_id": "CLP"
-            },
-            // Retorno del navegador -> web app (ruta NO proxyada por server.mjs).
-            "back_url": format!("{}/checkout-return?session_id={}", state.config.web_base_url, checkout.id),
-            // Webhook de eventos -> API.
-            "notification_url": format!("{}/billing/mercadopago/webhook", state.config.api_base_url),
-            "status": "pending"
-        }))
+        .json(&body)
         .send()
         .await?
         .json_or_external_error("Mercado Pago preapproval")
