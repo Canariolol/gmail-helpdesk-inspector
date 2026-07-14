@@ -207,7 +207,7 @@ gcloud run deploy "$API_SERVICE" \
   --cpu 1 \
   --memory 512Mi \
   --no-cpu-throttling \
-  --set-env-vars "APP_STORAGE=firestore,GCP_PROJECT_ID=${GCP_PROJECT_ID},FIRESTORE_DATABASE_ID=(default),AI_WORKER_URL=${WORKER_URL},AI_WORKER_AUDIENCE=${WORKER_URL},WEB_BASE_URL=https://placeholder.invalid,API_BASE_URL=https://placeholder.invalid,APP_COOKIE_SECURE=true,APP_COOKIE_SAMESITE=None,GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID},GOOGLE_REDIRECT_URL=https://placeholder.invalid/auth/google/callback,GMAIL_MAX_THREADS=100" \
+  --set-env-vars "APP_STORAGE=firestore,GCP_PROJECT_ID=${GCP_PROJECT_ID},FIRESTORE_DATABASE_ID=(default),AI_WORKER_URL=${WORKER_URL},AI_WORKER_AUDIENCE=${WORKER_URL},WEB_BASE_URL=https://placeholder.invalid,API_BASE_URL=https://placeholder.invalid,APP_COOKIE_SECURE=true,APP_COOKIE_SAMESITE=None,GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID},GOOGLE_REDIRECT_URL=https://placeholder.invalid/gmail/connect/callback,GMAIL_MAX_THREADS=100" \
   --set-secrets "GOOGLE_CLIENT_SECRET=google-client-secret:latest,APP_ENCRYPTION_KEY=app-encryption-key:latest,APP_SESSION_SECRET=app-session-secret:latest"
 
 export API_URL="$(gcloud run services describe "$API_SERVICE" --region "$GCP_REGION" --format='value(status.url)')"
@@ -247,13 +247,13 @@ Actualiza la API con la URL final del frontend y el redirect que pasa por el pro
 ```bash
 gcloud run services update "$API_SERVICE" \
   --region "$GCP_REGION" \
-  --update-env-vars "WEB_BASE_URL=${WEB_URL},GOOGLE_REDIRECT_URL=${WEB_URL}/auth/google/callback"
+  --update-env-vars "WEB_BASE_URL=${WEB_URL},GOOGLE_REDIRECT_URL=${WEB_URL}/gmail/connect/callback"
 ```
 
 Agrega `GOOGLE_REDIRECT_URL` en tu OAuth Client de Google Cloud:
 
 ```text
-${WEB_URL}/auth/google/callback
+${WEB_URL}/gmail/connect/callback
 ```
 
 ## 8. Smoke test
@@ -272,17 +272,19 @@ Abre `WEB_URL` en el navegador e inicia sesion con Google.
 
 ## 9. Dominio propio
 
-Para este proyecto usa dos subdominios:
+Para este proyecto usa un solo dominio publico para usuarios:
 
-- Web: `helpdesk.tu-dominio.cl` -> servicio `ghmi-web`.
-- API: `api-helpdesk.tu-dominio.cl` -> servicio `ghmi-api`.
+- Web publica: `mira.ninfasolutions.com` -> servicio `ghmi-web`.
+- API publica de usuario: proxied same-origin por `ghmi-web` hacia `ghmi-api`.
+- Webhook Mercado Pago: directo al servicio API de Cloud Run.
 
-El worker queda privado y no necesita dominio propio.
+El worker queda privado y no necesita dominio propio. La API tampoco necesita
+dominio custom para el lanzamiento inicial si el webhook usa la URL `run.app`.
 
 ```bash
-export BASE_DOMAIN="tu-dominio.cl"
-export WEB_DOMAIN="helpdesk.${BASE_DOMAIN}"
-export API_DOMAIN="api-helpdesk.${BASE_DOMAIN}"
+export BASE_DOMAIN="ninfasolutions.com"
+export WEB_DOMAIN="mira.${BASE_DOMAIN}"
+export WEB_URL="https://${WEB_DOMAIN}"
 ```
 
 Verifica propiedad del dominio base en Google:
@@ -299,11 +301,6 @@ gcloud beta run domain-mappings create \
   --service "$WEB_SERVICE" \
   --domain "$WEB_DOMAIN" \
   --region "$GCP_REGION"
-
-gcloud beta run domain-mappings create \
-  --service "$API_SERVICE" \
-  --domain "$API_DOMAIN" \
-  --region "$GCP_REGION"
 ```
 
 Obtén los registros DNS que debes crear:
@@ -311,11 +308,6 @@ Obtén los registros DNS que debes crear:
 ```bash
 gcloud beta run domain-mappings describe \
   --domain "$WEB_DOMAIN" \
-  --region "$GCP_REGION" \
-  --format="yaml(status.resourceRecords)"
-
-gcloud beta run domain-mappings describe \
-  --domain "$API_DOMAIN" \
   --region "$GCP_REGION" \
   --format="yaml(status.resourceRecords)"
 ```
@@ -326,11 +318,11 @@ Actualiza la API para que use los dominios finales:
 
 ```bash
 export WEB_URL="https://${WEB_DOMAIN}"
-export API_URL="https://${API_DOMAIN}"
+export API_URL="$(gcloud run services describe "$API_SERVICE" --region "$GCP_REGION" --format='value(status.url)')"
 
 gcloud run services update "$API_SERVICE" \
   --region "$GCP_REGION" \
-  --update-env-vars "WEB_BASE_URL=${WEB_URL},API_BASE_URL=${API_URL},GOOGLE_REDIRECT_URL=${WEB_URL}/auth/google/callback"
+  --update-env-vars "WEB_BASE_URL=${WEB_URL},API_BASE_URL=${API_URL},GOOGLE_REDIRECT_URL=${WEB_URL}/gmail/connect/callback"
 ```
 
 Reconstruye y redespliega la web. Para evitar cookies third-party entre dos dominios `*.run.app`, la web debe llamar a la API por el mismo origen y el servidor web proxy reenvia a Cloud Run API:
@@ -348,9 +340,15 @@ gcloud run deploy "$WEB_SERVICE" \
   --set-env-vars "API_PROXY_TARGET=${API_URL}"
 ```
 
+Configura Mercado Pago live con este webhook:
+
+```text
+${API_URL}/billing/mercadopago/webhook
+```
+
 En el OAuth Client de Google agrega:
 
-- URI de redireccionamiento: `https://${WEB_DOMAIN}/auth/google/callback`.
+- URI de redireccionamiento: `https://${WEB_DOMAIN}/gmail/connect/callback`.
 - Origen JavaScript autorizado: `https://${WEB_DOMAIN}`.
 
 ## 10. Programador diario (Cloud Scheduler)
@@ -428,13 +426,13 @@ Si el callback de Google funciona pero la web vuelve al login y `/auth/me` respo
 
 1. En modo recomendado, la web debe estar construida con `VITE_API_BASE_URL=` y desplegada con `API_PROXY_TARGET=${API_URL}`.
 2. La API debe tener `WEB_BASE_URL` igual al origen exacto de la web.
-3. El OAuth Client debe usar como redirect la URL de la web: `${WEB_URL}/auth/google/callback`.
+3. El OAuth Client debe usar como redirect la URL de la web: `${WEB_URL}/gmail/connect/callback`.
 4. La API debe usar ese mismo redirect:
 
 ```bash
 gcloud run services update "$API_SERVICE" \
   --region "$GCP_REGION" \
-  --update-env-vars "WEB_BASE_URL=${WEB_URL},GOOGLE_REDIRECT_URL=${WEB_URL}/auth/google/callback"
+  --update-env-vars "WEB_BASE_URL=${WEB_URL},GOOGLE_REDIRECT_URL=${WEB_URL}/gmail/connect/callback"
 ```
 
 Si aun llamas directo desde web a API en dominios distintos, la API debe tener cookies cross-site activas:

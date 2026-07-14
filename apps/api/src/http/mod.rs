@@ -4,7 +4,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     convert::Infallible,
     sync::Arc,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use axum::{
@@ -45,8 +45,8 @@ use crate::{
     },
     billing::{
         Account, BillingPlan, BillingPlanId, CheckoutSession, CheckoutSessionStatus,
-        EntitlementSnapshot, SubscriptionStatus, UNLIMITED_ANALYZED_PER_RUN, UsageLedger,
-        active_subscription_for_trial, free_plan, plan_by_id, public_plans,
+        EntitlementSnapshot, Subscription, SubscriptionStatus, UNLIMITED_ANALYZED_PER_RUN,
+        UsageLedger, active_subscription_for_trial, free_plan, plan_by_id, public_plans,
         subscription_allows_access,
     },
     config::AppConfig,
@@ -610,6 +610,15 @@ async fn create_checkout_subscription(
     let bundle = get_or_provision_org_config(&state, &session.google_account_email).await?;
     let plan_id = BillingPlanId::parse(&request.plan_id)
         .ok_or_else(|| ApiError::bad_request("plan_id inválido"))?;
+    let existing_subscription = state
+        .storage
+        .get_subscription_for_org(&bundle.org.id)
+        .await?;
+    if checkout_blocked_by_active_subscription(existing_subscription.as_ref(), Utc::now()) {
+        return Err(ApiError::conflict(
+            "ya tienes una suscripción activa; cambia de plan desde tu cuenta",
+        ));
+    }
     let plan = plan_by_id(&plan_id);
     let now = Utc::now();
     let mut checkout = CheckoutSession {
@@ -680,6 +689,15 @@ async fn create_checkout_subscription(
 
     state.storage.upsert_checkout_session(&checkout).await?;
     Ok(Json(CheckoutSessionResponse { session: checkout }))
+}
+
+fn checkout_blocked_by_active_subscription(
+    subscription: Option<&Subscription>,
+    now: chrono::DateTime<Utc>,
+) -> bool {
+    subscription.is_some_and(|subscription| {
+        subscription_allows_access(Some(subscription), now) && !subscription.cancel_at_period_end
+    })
 }
 
 async fn get_checkout_session(
@@ -3635,6 +3653,7 @@ async fn create_mercadopago_preapproval(
     state
         .http
         .post("https://api.mercadopago.com/preapproval")
+        .header("X-Idempotency-Key", &checkout.id)
         .bearer_auth(access_token)
         .json(&body)
         .send()
@@ -3718,6 +3737,7 @@ fn validate_mercadopago_signature(
 ) -> Result<(), ApiError> {
     let (timestamp, received_hash) =
         parse_mercadopago_signature(x_signature).ok_or_else(ApiError::unauthorized)?;
+    validate_mercadopago_timestamp(timestamp, SystemTime::now())?;
     let mut parts = Vec::new();
     if let Some(data_id) = signed_data_id
         .map(str::trim)
@@ -3739,6 +3759,21 @@ fn validate_mercadopago_signature(
     let received = hex_to_bytes(received_hash).ok_or_else(ApiError::unauthorized)?;
     mac.verify_slice(&received)
         .map_err(|_| ApiError::unauthorized())
+}
+
+fn validate_mercadopago_timestamp(timestamp: &str, now: SystemTime) -> Result<(), ApiError> {
+    let signed_ms = timestamp
+        .parse::<u128>()
+        .map_err(|_| ApiError::unauthorized())?;
+    let now_ms = now
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| ApiError::unauthorized())?
+        .as_millis();
+    let drift_ms = signed_ms.abs_diff(now_ms);
+    if drift_ms > Duration::from_secs(5 * 60).as_millis() {
+        return Err(ApiError::unauthorized());
+    }
+    Ok(())
 }
 
 fn parse_mercadopago_signature(header_value: &str) -> Option<(&str, &str)> {
@@ -4528,9 +4563,13 @@ mod tests {
         let secret = "mp-webhook-secret";
         let data_id = "PREAPPROVAL-123";
         let request_id = "2066ca19-c6f1-498a-be75-1923005edd06";
-        let ts = "1742505638683";
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+            .to_string();
         let manifest =
-            "id:preapproval-123;request-id:2066ca19-c6f1-498a-be75-1923005edd06;ts:1742505638683;";
+            format!("id:preapproval-123;request-id:2066ca19-c6f1-498a-be75-1923005edd06;ts:{ts};");
         type HmacSha256 = Hmac<Sha256>;
         let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
         mac.update(manifest.as_bytes());
@@ -4540,6 +4579,32 @@ mod tests {
             validate_mercadopago_signature(&signature, request_id, Some(data_id), secret).is_ok()
         );
         assert!(validate_mercadopago_signature(secret, request_id, Some(data_id), secret).is_err());
+    }
+
+    #[test]
+    fn mercadopago_signature_rejects_stale_timestamp() {
+        let old_ts = "1742505638683";
+        let now = UNIX_EPOCH + Duration::from_millis(1742505638683 + 301_000);
+
+        assert!(validate_mercadopago_timestamp(old_ts, now).is_err());
+    }
+
+    #[test]
+    fn checkout_blocks_active_subscription_but_allows_scheduled_cancel() {
+        let now = Utc::now();
+        let mut active = subscription("org-1", "owner@example.com");
+        active.status = SubscriptionStatus::Active;
+        active.cancel_at_period_end = false;
+
+        let mut scheduled_cancel = active.clone();
+        scheduled_cancel.cancel_at_period_end = true;
+
+        assert!(checkout_blocked_by_active_subscription(Some(&active), now));
+        assert!(!checkout_blocked_by_active_subscription(
+            Some(&scheduled_cancel),
+            now
+        ));
+        assert!(!checkout_blocked_by_active_subscription(None, now));
     }
 
     #[tokio::test]

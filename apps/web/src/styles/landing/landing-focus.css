@@ -5,13 +5,13 @@
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   position: relative;
   isolation: isolate; /* mantiene las capas de fondo (z negativo) dentro del contexto */
-  /* Gradiente cálido sutil en vez de un blanco plano. */
-  background: linear-gradient(180deg, #fff7ef 0%, var(--surface) 24%, var(--surface) 68%, #fdf4ea 100%);
+  background:
+    linear-gradient(180deg, #fff7ef 0%, #ffffff 24%, #f7fbf8 52%, #fffaf5 100%);
   color: var(--text);
   overflow-x: hidden; /* permite franjas full-bleed sin scroll horizontal */
 }
 
-/* Aurora: resplandores naranjas difusos detrás del hero y la demo. */
+/* Capas suaves para que el hero no caiga sobre un blanco plano. */
 .lp-focus::before {
   content: "";
   position: absolute;
@@ -20,9 +20,9 @@
   z-index: -2;
   pointer-events: none;
   background:
-    radial-gradient(58% 48% at 16% -4%, rgba(251, 146, 60, 0.22), transparent 70%),
-    radial-gradient(52% 44% at 88% 4%, rgba(249, 115, 22, 0.15), transparent 70%),
-    radial-gradient(46% 42% at 50% 26%, rgba(253, 186, 116, 0.16), transparent 72%);
+    linear-gradient(135deg, rgba(251, 146, 60, 0.18), transparent 42%),
+    linear-gradient(225deg, rgba(13, 148, 136, 0.12), transparent 46%),
+    linear-gradient(180deg, rgba(255, 237, 213, 0.72), rgba(255, 255, 255, 0));
 }
 
 /* Grano: textura muy tenue para quitar el aspecto plano. */
@@ -39,11 +39,11 @@
 
 @media (prefers-reduced-motion: no-preference) {
   .lp-focus::before {
-    animation: lp-aurora 18s ease-in-out infinite alternate;
+    animation: lp-bg-drift 18s ease-in-out infinite alternate;
   }
 }
 
-@keyframes lp-aurora {
+@keyframes lp-bg-drift {
   to {
     transform: translate3d(0, 20px, 0) scale(1.05);
   }
@@ -197,9 +197,13 @@
 .lp-focus-advantages {
   display: grid;
   gap: var(--space-5);
-  max-width: 760px;
-  margin: 0 auto;
-  padding-block: var(--space-7);
+  margin-inline: calc(-50vw + 50%);
+  width: 100vw;
+  padding: clamp(var(--space-7), 7vw, 96px) max(var(--space-5), calc((100vw - 760px) / 2));
+  background:
+    linear-gradient(180deg, rgba(240, 253, 250, 0.72), rgba(255, 255, 255, 0.88)),
+    linear-gradient(90deg, rgba(219, 234, 254, 0.45), rgba(255, 237, 213, 0.36));
+  border-block: 1px solid rgba(228, 211, 194, 0.72);
 }
 
 .lp-focus-adv {
@@ -243,7 +247,11 @@
   grid-template-columns: 1fr 1fr;
   gap: var(--space-7);
   align-items: center;
-  padding-block: var(--space-7);
+  margin-inline: calc(-50vw + 50%);
+  width: 100vw;
+  padding: clamp(var(--space-7), 7vw, 96px) max(var(--space-5), calc((100vw - 1080px) / 2));
+  background:
+    linear-gradient(135deg, rgba(255, 247, 237, 0.92), rgba(255, 255, 255, 0.74) 48%, rgba(236, 253, 245, 0.72));
 }
 
 .lp-focus-reports-copy {
@@ -297,11 +305,16 @@
 
 /* Secciones genéricas (pasos) --------------------------------------------- */
 .lp-focus-section {
-  padding-block: var(--space-7);
+  margin-inline: calc(-50vw + 50%);
+  width: 100vw;
+  padding: clamp(var(--space-7), 7vw, 96px) max(var(--space-5), calc((100vw - 1080px) / 2));
   text-align: center;
   display: grid;
   justify-items: center;
   gap: var(--space-3);
+  background:
+    linear-gradient(180deg, #ffffff, #f8fafc);
+  border-block: 1px solid rgba(228, 211, 194, 0.64);
 }
 
 .lp-focus-eyebrow {
@@ -372,7 +385,11 @@
   display: grid;
   justify-items: center;
   gap: var(--space-5);
-  padding-block: var(--space-7) clamp(var(--space-7), 7vw, 110px);
+  margin-inline: calc(-50vw + 50%);
+  width: 100vw;
+  padding: clamp(var(--space-7), 7vw, 96px) var(--space-5) clamp(var(--space-7), 7vw, 110px);
+  background:
+    linear-gradient(180deg, rgba(255, 250, 245, 0.95), rgba(255, 237, 213, 0.58));
 }
 
 .lp-focus-final h2 {

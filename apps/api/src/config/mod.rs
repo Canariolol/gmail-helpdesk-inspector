@@ -131,11 +131,7 @@ impl AppConfig {
                 .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
                 .unwrap_or(production),
         };
-        if production && billing.mercadopago_access_token.is_none() {
-            return Err(anyhow!(
-                "MERCADOPAGO_ACCESS_TOKEN is required when APP_ENV=production"
-            ));
-        }
+        validate_billing_config(&billing, production)?;
 
         if app_storage != "memory" {
             require("GCP_PROJECT_ID")?;
@@ -305,6 +301,20 @@ fn validate_secret_not_default(
     Ok(value.to_string())
 }
 
+fn validate_billing_config(billing: &BillingConfig, production: bool) -> anyhow::Result<()> {
+    if production && billing.mercadopago_access_token.is_none() {
+        return Err(anyhow!(
+            "MERCADOPAGO_ACCESS_TOKEN is required when APP_ENV=production"
+        ));
+    }
+    if production && billing.mercadopago_webhook_secret.is_none() {
+        return Err(anyhow!(
+            "MERCADOPAGO_WEBHOOK_SECRET is required when APP_ENV=production"
+        ));
+    }
+    Ok(())
+}
+
 fn is_production_env(value: &str) -> bool {
     matches!(
         value.trim().to_ascii_lowercase().as_str(),
@@ -448,6 +458,21 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("must not use a development default"));
+    }
+
+    #[test]
+    fn production_requires_mercadopago_webhook_secret() {
+        let billing = BillingConfig {
+            mercadopago_access_token: Some("TEST-access-token".to_string()),
+            mercadopago_webhook_secret: None,
+            enforcement_enabled: true,
+        };
+
+        let err = validate_billing_config(&billing, true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("MERCADOPAGO_WEBHOOK_SECRET"));
+        assert!(validate_billing_config(&billing, false).is_ok());
     }
 
     #[test]

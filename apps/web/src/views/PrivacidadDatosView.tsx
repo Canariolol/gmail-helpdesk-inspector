@@ -214,7 +214,7 @@ export function PrivacidadDatosView() {
           <DisabledActionCard
             icon={<Trash2 size={19} />}
             title="Borrar datos/cuenta"
-            description="Eliminar configuración, políticas y datos derivados de la organización beta. Requiere confirmación fuerte."
+            description="Eliminar configuración, políticas y datos derivados de la organización. Requiere confirmación fuerte."
             reason={data.actions.delete_account_data.reason}
             tone="danger"
           />

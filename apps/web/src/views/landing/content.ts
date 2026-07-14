@@ -5,7 +5,7 @@ export const BRAND = {
   name: "Mira Helpdesk",
   short: "Mira",
   // La cuenta se crea con WorkOS; Gmail se conecta después, aparte.
-  betaTag: "Beta privada · sin reemplazar tu correo",
+  publicTag: "Versión inicial · sin reemplazar tu correo",
 };
 
 export interface HeroCopy {
@@ -19,7 +19,7 @@ export interface HeroCopy {
 
 export const HERO: { focus: HeroCopy } = {
   focus: {
-    kicker: BRAND.betaTag,
+    kicker: BRAND.publicTag,
     title: "¿Cuántas respondiste",
     highlight: "de verdad?",
     subtitle: "Convierte tu casilla de Gmail en métricas auditables. Sin reemplazar tu correo.",

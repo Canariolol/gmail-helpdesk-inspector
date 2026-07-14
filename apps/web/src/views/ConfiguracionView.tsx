@@ -735,7 +735,7 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
                         onChange={() => set("retentionDays", days)}
                       />
                       <span>
-                        {days} días{days === 30 && " (recomendado para beta)"}
+                        {days} días{days === 30 && " (recomendado)"}
                       </span>
                     </label>
                   ))}
@@ -750,7 +750,7 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
                   <strong>¿Qué NO se modifica?</strong> Nada de tu Gmail. La app solo tiene permiso de lectura.
                 </p>
                 <p style={{ color: "var(--text-muted)" }}>
-                  Durante la beta, los flujos destructivos se activarán de forma controlada. Puedes cambiar esta
+                  En esta versión inicial, los flujos destructivos se activarán de forma controlada. Puedes cambiar esta
                   configuración en cualquier momento; los análisis ya realizados conservan su fecha original.
                 </p>
               </div>

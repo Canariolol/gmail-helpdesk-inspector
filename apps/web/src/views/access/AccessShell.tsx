@@ -15,7 +15,7 @@ export function AccessShell({ children, wide = false }: AccessShellProps) {
         <span>{BRAND.short}</span>
       </header>
       <main className={`access-card${wide ? " access-card-wide" : ""}`}>{children}</main>
-      <footer className="access-shell-footer">{BRAND.name} · Beta privada</footer>
+      <footer className="access-shell-footer">{BRAND.name} · Versión inicial</footer>
     </div>
   );
 }

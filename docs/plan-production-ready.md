@@ -1,9 +1,9 @@
 # Plan de preparación para producción — Mira Helpdesk
 
 > Fecha de creación: 2026-06-25  
-> Objetivo: lanzar una beta pagada y controlada en pocos días, manteniendo el producto simple y evitando infraestructura prematura.  
+> Objetivo: lanzar una versión inicial pagada y controlada en pocos días, manteniendo el producto simple y evitando infraestructura prematura.  
 > Alcance: pagos, configuración de producción, seguridad, privacidad, control de datos, observabilidad, operación y release.  
-> Fuera de alcance inmediato: conexión multiproveedor, migración completa a Supabase, plataforma de observabilidad autohospedada y escalado horizontal.
+> Fuera de alcance inmediato: conexión multiproveedor completa, migración completa a Supabase, plataforma de observabilidad autohospedada y escalado horizontal.
 
 ---
 
@@ -15,7 +15,7 @@ Este archivo es el checklist maestro de preparación para producción.
 
 - `[ ]` Pendiente.
 - `[x]` Terminado y verificado.
-- `[-]` Decidido conscientemente como deuda aceptada para la beta.
+- `[-]` Decidido conscientemente como deuda aceptada para la versión inicial.
 
 ### Regla para marcar una tarea como terminada
 
@@ -40,7 +40,7 @@ Ejemplos de evidencia:
 | Prioridad | Significado |
 |---|---|
 | **P0** | Bloqueador para comenzar a cobrar a usuarios externos. |
-| **P1** | Debe quedar listo durante la beta inicial o inmediatamente después del lanzamiento. |
+| **P1** | Debe quedar listo antes del lanzamiento si afecta conversión/confianza, o inmediatamente después si es operativo. |
 | **P2** | Mejora importante, pero puede esperar a que exista uso real. |
 | **P3** | Escalabilidad o madurez posterior. No debe retrasar el lanzamiento. |
 
@@ -50,7 +50,7 @@ Ejemplos de evidencia:
 
 ## 1.1 Alcance de la primera versión
 
-- [ ] Definir explícitamente el lanzamiento como **beta pagada por invitación**.
+- [x] Definir explícitamente el lanzamiento como **versión inicial pagada y controlada**.
 - [ ] Definir el máximo inicial de organizaciones permitidas.
   - Recomendación: entre 3 y 10 organizaciones.
 - [ ] Definir si todos los usuarios serán incorporados mediante onboarding acompañado.
@@ -58,11 +58,12 @@ Ejemplos de evidencia:
   - Para este lanzamiento: Gmail y Google Workspace.
   - Microsoft e IMAP permanecen fuera de alcance.
 - [ ] Definir si los reportes automáticos estarán habilitados desde el primer día.
-- [ ] Definir un único canal de soporte para la beta.
+- [ ] Definir un único canal de soporte para la versión inicial.
   - Correo recomendado: `soporte@<dominio>`.
 - [ ] Definir horario y plazo objetivo de respuesta de soporte.
 - [ ] Definir quién puede autorizar accesos internos privilegiados.
-- [ ] Revisar que la landing, precios, términos y onboarding digan claramente “beta”.
+- [ ] Revisar que la landing, precios, términos y onboarding no usen lenguaje de “beta”.
+- [ ] Retocar la landing para que la primera impresión se sienta completa y confiable, sin rediseño grande.
 
 ### Criterio de aceptación
 
@@ -72,7 +73,7 @@ Ejemplos de evidencia:
 
 ## 1.2 Política de deuda aceptada
 
-- [ ] Crear una lista corta de riesgos aceptados para la beta.
+- [ ] Crear una lista corta de riesgos aceptados para la versión inicial.
 - [ ] Cada riesgo aceptado debe tener:
   - Responsable.
   - Mitigación temporal.
@@ -80,12 +81,22 @@ Ejemplos de evidencia:
   - Condición que obliga a resolverlo.
 - [ ] No aceptar como deuda ningún riesgo P0.
 
-Ejemplos razonables de deuda beta:
+Ejemplos razonables de deuda aceptada:
 
 - `[-]` Rate limiter distribuido, mientras la API esté limitada a una instancia.
 - `[-]` Migración a Supabase, mientras Firestore tenga respaldo y recuperación habilitados.
 - `[-]` Panel administrativo completo, mientras exista un procedimiento operativo manual.
 - `[-]` Tests E2E exhaustivos, mientras los flujos críticos tengan pruebas manuales repetibles.
+
+## 1.3 Decisión actual de alcance
+
+- [x] El release público no se comunica como beta.
+- [x] Gmail y Google Workspace son el alcance de correo del lanzamiento inicial.
+- [-] Multiproveedor completo no bloquea el lanzamiento inicial.
+  - Motivo: requiere refactor de adaptador, credenciales, UX y pruebas de proveedores.
+  - Mitigación: no prometer Microsoft/IMAP en landing, precios, onboarding ni términos.
+  - Condición para subir prioridad: primer cliente de pago bloqueado por Microsoft 365, IMAP o hosting genérico.
+- [x] Retoque visual de landing permitido antes del lanzamiento si se mantiene acotado a copy/CSS.
 
 ---
 
@@ -512,7 +523,7 @@ Para cada proveedor:
   - `invalid_grant`.
 - [ ] Corregir mensajes en español.
 - [ ] Corregir textos contradictorios.
-- [ ] Confirmar que “beta” aparece donde corresponde.
+- [ ] Confirmar que no aparece “beta” en copy público, precios, términos ni onboarding.
 - [ ] Confirmar que no se promete funcionalidad futura.
 
 ---
@@ -681,7 +692,7 @@ Prioridad: **P0**
 Sugerencia inicial:
 
 - RPO: 24 horas o mejor.
-- RTO: 4 horas para beta.
+- RTO: 4 horas para la versión inicial.
 
 ## 9.2 Permisos
 
@@ -803,7 +814,7 @@ Decisión inicial recomendada:
 - Cloud Monitoring para métricas y alertas.
 - Uptime Checks para disponibilidad.
 - Métricas basadas en logs para eventos de negocio.
-- Sin Loki/Prometheus/Grafana autohospedados durante la beta inicial.
+- Sin Loki/Prometheus/Grafana autohospedados durante la versión inicial.
 
 ## 11.1 Logs estructurados
 
@@ -929,7 +940,7 @@ Prioridad: **P2**
 - [ ] Usar Grafana Alloy como collector si aporta valor.
 - [ ] Mantener datos sensibles fuera de atributos y spans.
 
-## 12.3 Evitar durante la beta inicial
+## 12.3 Evitar durante la versión inicial
 
 - [ ] No desplegar Loki autohospedado.
 - [ ] No desplegar Prometheus autohospedado.
@@ -1201,7 +1212,7 @@ Prioridad: **P0**
 ## 17.2 Términos y condiciones
 
 - [ ] Descripción del servicio.
-- [ ] Estado beta.
+- [ ] Estado del servicio inicial y sus límites reales.
 - [ ] Obligaciones del usuario.
 - [ ] Autorización sobre la casilla conectada.
 - [ ] Uso permitido.
@@ -1414,7 +1425,9 @@ Prioridad: **P1**
 - [ ] Corregir sesión/logout.
 - [ ] Implementar desconexión Gmail.
 - [ ] Definir y habilitar borrado.
+- [ ] Alinear copy público: sin “beta”, sin prometer multiproveedor.
 - [ ] Alinear copy y documentos sobre IA.
+- [ ] Retocar landing pública para reducir fondos vacíos y reforzar confianza.
 
 ## Fase B — Protección operativa
 
@@ -1456,13 +1469,15 @@ Usar esta tabla para mantener una visión ejecutiva:
 | Área | Prioridad | Estado | Responsable | Evidencia | Observaciones |
 |---|---:|---|---|---|---|
 | Checkout embebido | P0 | Pendiente |  |  |  |
-| Webhook Mercado Pago | P0 | Pendiente |  |  |  |
-| Configuración production | P0 | Pendiente |  |  |  |
+| Webhook Mercado Pago | P0 | En progreso |  | `cargo test --manifest-path apps/api/Cargo.toml` — 125 passed | Firma HMAC, timestamp 5 min, idempotency key y secreto obligatorio implementados; falta sandbox real. |
+| Configuración de entornos | P0 | En progreso |  | `docker compose --env-file .env.sandbox.example -f docker-compose.yml -f docker-compose.tunnel.yml config --services` | Sandbox con `mira-dev.ninfasolutions.com`; producción con `mira.ninfasolutions.com` y webhook directo a Cloud Run API. |
+| Configuración production | P0 | En progreso |  | `cargo test --manifest-path apps/api/Cargo.toml` — 125 passed | Producción rechaza `MERCADOPAGO_ACCESS_TOKEN` y `MERCADOPAGO_WEBHOOK_SECRET` faltantes. |
 | Sesiones y logout | P0 | Pendiente |  |  |  |
 | Sanitización de errores | P0 | Pendiente |  |  |  |
 | Desconexión Gmail | P0 | Pendiente |  |  |  |
 | Borrado de datos | P0 | Pendiente |  |  |  |
 | Privacidad y términos | P0 | En progreso |  |  |  |
+| Landing/copy público | P1 | En progreso |  |  | Sin lenguaje de beta; retoque visual liviano. |
 | PITR Firestore | P0 | Pendiente |  |  |  |
 | Uptime y alertas | P0 | Pendiente |  |  |  |
 | CI verde | P0 | Pendiente |  |  | Clippy falla actualmente. |
@@ -1520,7 +1535,7 @@ Este bloque es una fotografía inicial y debe actualizarse a medida que cambie e
 
 # 24. Criterio de “production-ready” para esta etapa
 
-Mira puede considerarse production-ready para una **beta pagada controlada** cuando:
+Mira puede considerarse production-ready para una **versión inicial pagada y controlada** cuando:
 
 - [ ] Puede cobrar sin duplicar, perder o inventar estados.
 - [ ] Puede bloquear acceso cuando corresponde.

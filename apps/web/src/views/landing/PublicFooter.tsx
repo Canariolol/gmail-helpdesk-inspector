@@ -34,7 +34,7 @@ export function PublicFooter() {
         <span>
           © {YEAR} {BRAND.name}
         </span>
-        <span>Beta privada · no afiliado a Google LLC.</span>
+        <span>Versión inicial · no afiliado a Google LLC.</span>
       </div>
     </footer>
   );

@@ -99,7 +99,7 @@ export function ResumenView(props: Props) {
             <strong>No se pudo iniciar el análisis</strong>
             <p>{props.analysisError}</p>
             {props.analysisError.toLowerCase().includes("demasiadas") && (
-              <span>El límite protege la beta privada y evita ejecuciones duplicadas. Intenta más tarde o usa el scheduler configurado.</span>
+              <span>El límite protege el servicio y evita ejecuciones duplicadas. Intenta más tarde o usa el scheduler configurado.</span>
             )}
           </div>
         </div>

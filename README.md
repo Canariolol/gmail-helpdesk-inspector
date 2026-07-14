@@ -88,14 +88,14 @@ It commonly expires after about one hour.
 The current app is no longer configured only through per-run filters. Account
 authentication uses WorkOS AuthKit. Gmail OAuth is a separate mailbox connection
 step and is only used with the readonly Gmail scope after the account has an
-active subscription or trial. `GET /me/org/config` provisions a private-beta
+active subscription or trial. `GET /me/org/config` provisions an initial-release
 organization, an owner membership, one mailbox record, a mutable policy draft
 and an immutable policy version.
 Analysis runs created from policy store a snapshot with org/mailbox ids, policy
 version/hash, Gmail scope snapshot, retention expiry and data minimization mode.
 Legacy per-run filters are still accepted for local/backward compatibility.
 
-Key defaults for the private beta:
+Key defaults for the initial release:
 
 - One Gmail mailbox per organization for now.
 - WorkOS AuthKit is the account login layer; Gmail OAuth is only the mailbox
@@ -132,7 +132,7 @@ Useful public/provider endpoints:
 | `GET /public/plans` | Public billing plan catalog for pricing UI |
 | `POST /billing/mercadopago/webhook` | Mercado Pago subscription notification receiver |
 
-Pagination note: `GET /analysis-runs` and `GET /analysis-runs/:id/threads` remain backward-compatible arrays without query params. With `limit`/`page_token`, they return `{ items, next_page_token, total_count }` for beta-scale pagination.
+Pagination note: `GET /analysis-runs` and `GET /analysis-runs/:id/threads` remain backward-compatible arrays without query params. With `limit`/`page_token`, they return `{ items, next_page_token, total_count }` for initial-release scale pagination.
 
 ## Scheduled Daily Analysis & Email Report
 
@@ -206,7 +206,7 @@ Missed weekdays are not backfilled automatically — use the endpoint with
 - While the Google OAuth app is in **Testing** publishing status, refresh
   tokens expire after 7 days; the failure email will ask the user to log in
   again. Publish/verify the OAuth app before broad SaaS launch.
-- The current rate limiter is in-memory per API instance. For private beta, run
+- The current rate limiter is in-memory per API instance. For the initial release, run
   one API instance or replace it with a distributed limiter before scaling out.
 - The AI worker is stateless: the API sends per-run policy context once per
   classification batch and again only for threads escalated to detailed audit.
@@ -216,11 +216,12 @@ Missed weekdays are not backfilled automatically — use the endpoint with
 
 ## Deployment Runbook
 
-For private beta deployment guidance, see:
+For initial release deployment guidance, see:
 
+- `docs/env-domains.md`
 - `docs/deployment-beta-runbook.md`
 
-It covers Cloud Run service order, verified environment variables, OAuth, scheduler modes, smoke tests, rollback, and known beta risks.
+They cover sandbox/live variables, `mira.ninfasolutions.com`, Cloud Run service order, OAuth, scheduler modes, smoke tests, rollback, and known initial-release risks.
 
 ## Development Checks
 
