@@ -119,7 +119,6 @@ pub struct CheckoutSession {
     pub status: CheckoutSessionStatus,
     pub provider: String,
     pub provider_subscription_id: Option<String>,
-    pub checkout_url: Option<String>,
     pub currency_id: String,
     pub amount_clp: u32,
     pub usd_reference_monthly: u32,

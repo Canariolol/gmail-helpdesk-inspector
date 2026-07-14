@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
   Ban,
@@ -16,7 +16,7 @@ import {
   Unplug,
   XCircle,
 } from "lucide-react";
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { api } from "../api/client";
 import type { DataSummary } from "../api/types";
 
@@ -31,6 +31,7 @@ function formatDate(iso: string | null): string {
 
 function humanizeReason(reason: string): string {
   if (reason === "pending_backend_contract") return "Contrato backend pendiente";
+  if (reason === "requires_confirmation") return "Requiere confirmación";
   return reason.split("_").join(" ");
 }
 
@@ -94,11 +95,27 @@ function DisabledActionCard({
 }
 
 export function PrivacidadDatosView() {
+  const queryClient = useQueryClient();
+  const [confirmingDeletion, setConfirmingDeletion] = useState(false);
+  const [deletionConfirmation, setDeletionConfirmation] = useState("");
   const summary = useQuery({
     queryKey: ["data-summary"],
     queryFn: () => api<DataSummary>("/me/data-summary"),
     retry: false,
     staleTime: 30_000,
+  });
+  const deleteAnalysisData = useMutation({
+    mutationFn: () =>
+      api<void>("/me/analysis-data", {
+        method: "DELETE",
+        body: JSON.stringify({ confirmation: deletionConfirmation }),
+      }),
+    onSuccess: () => {
+      setConfirmingDeletion(false);
+      setDeletionConfirmation("");
+      queryClient.invalidateQueries({ queryKey: ["data-summary"] });
+      queryClient.invalidateQueries({ queryKey: ["runs"] });
+    },
   });
 
   if (summary.isLoading) {
@@ -137,7 +154,7 @@ export function PrivacidadDatosView() {
           <h2>Privacidad y datos</h2>
           <p>
             Revisa qué acceso tiene la app, qué datos derivados conserva y qué acciones de desconexión o borrado
-            se habilitarán con confirmaciones explícitas.
+            requieren confirmaciones explícitas antes de ejecutarse.
           </p>
         </div>
         <BoolBadge value={readonlyScope} trueLabel="Gmail readonly" falseLabel="Scope no confirmado" />
@@ -204,13 +221,54 @@ export function PrivacidadDatosView() {
             reason={data.actions.disconnect_gmail.reason}
             tone="warning"
           />
-          <DisabledActionCard
-            icon={<Trash2 size={19} />}
-            title="Borrar análisis"
-            description="Eliminar resultados derivados de análisis, sujeto a definición de alcance: por run o todos los runs."
-            reason={data.actions.delete_analysis_data.reason}
-            tone="danger"
-          />
+          {data.actions.delete_analysis_data.available ? (
+            <div className="privacy-action-card danger">
+              <div className="privacy-action-head">
+                <div className="privacy-action-icon" aria-hidden="true"><Trash2 size={19} /></div>
+                <div>
+                  <strong>Borrar todos mis análisis</strong>
+                  <p>Elimina análisis, hilos, mensajes derivados, auditorías IA y revisiones. No devuelve cuota ni borra tu cuenta.</p>
+                </div>
+              </div>
+              {!confirmingDeletion ? (
+                <button type="button" className="btn-ghost" onClick={() => setConfirmingDeletion(true)}>
+                  Borrar análisis
+                </button>
+              ) : (
+                <div className="cuenta-confirm">
+                  <label htmlFor="delete-analysis-confirmation">Escribe <strong>BORRAR MIS ANALISIS</strong> para confirmar.</label>
+                  <input
+                    id="delete-analysis-confirmation"
+                    value={deletionConfirmation}
+                    onChange={(event) => setDeletionConfirmation(event.target.value)}
+                    autoComplete="off"
+                  />
+                  {deleteAnalysisData.error && <span role="alert">{deleteAnalysisData.error.message}</span>}
+                  <div className="cuenta-confirm-actions">
+                    <button
+                      type="button"
+                      className="btn-ghost"
+                      disabled={deletionConfirmation.trim() !== "BORRAR MIS ANALISIS" || deleteAnalysisData.isPending}
+                      onClick={() => deleteAnalysisData.mutate()}
+                    >
+                      {deleteAnalysisData.isPending ? "Borrando…" : "Eliminar definitivamente"}
+                    </button>
+                    <button type="button" className="access-text-btn" onClick={() => setConfirmingDeletion(false)}>
+                      Volver
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : (
+            <DisabledActionCard
+              icon={<Trash2 size={19} />}
+              title="Borrar análisis"
+              description="Eliminar resultados derivados de análisis, sujeto a definición de alcance: por run o todos los runs."
+              reason={data.actions.delete_analysis_data.reason}
+              tone="danger"
+            />
+          )}
           <DisabledActionCard
             icon={<Trash2 size={19} />}
             title="Borrar datos/cuenta"

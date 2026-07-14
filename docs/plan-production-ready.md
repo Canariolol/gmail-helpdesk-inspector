@@ -110,17 +110,21 @@ No comenzar a cobrar a usuarios externos hasta completar todos los puntos siguie
 - [ ] `APP_ENV=production` activo.
 - [ ] API limitada temporalmente a una instancia.
 - [ ] Flujo de pago probado de extremo a extremo.
-- [ ] Errores internos sanitizados.
-- [ ] Sesiones con expiración y revocación server-side.
-- [ ] Desconexión de Gmail disponible.
-- [ ] Procedimiento de borrado de datos disponible.
+- [x] Errores internos sanitizados.
+- [x] Sesiones con expiración y revocación server-side.
+  - Evidencia: 30 días absolutos, logout revoca la fila de sesión y tests de cookie revocada/expirada.
+- [x] Desconexión de Gmail disponible.
+  - Evidencia: revoca en Google, invalida tokens en todas las sesiones de la cuenta y bloquea análisis nuevos.
+- [x] Procedimiento de borrado de análisis disponible.
+  - Evidencia: confirmación escrita, borrado idempotente de runs y sus datos derivados; la eliminación de cuenta sigue pendiente.
 - [ ] PITR o mecanismo de respaldo equivalente habilitado.
 - [ ] Alertas mínimas operativas activas.
 - [ ] Uptime checks activos.
 - [ ] Política de privacidad publicada.
 - [ ] Términos y condiciones publicados.
 - [ ] Copy sobre uso de IA consistente con el comportamiento real.
-- [ ] Check de release completo en verde.
+- [x] Check de release local en verde.
+  - Evidencia: `scripts/check-all.sh` — Rust fmt, 135 tests, Clippy, 7 tests del worker y build web.
 - [ ] Smoke test final realizado en producción.
 - [ ] Procedimiento de rollback probado o documentado.
 
@@ -136,6 +140,12 @@ No comenzar a cobrar a usuarios externos hasta completar todos los puntos siguie
 Prioridad: **P0**
 
 ## 3.1 Contrato funcional del checkout embebido
+
+Contrato implementado (pendiente de prueba sandbox): `Card Payment Brick` tokeniza la tarjeta
+en el navegador; el frontend envía únicamente `card_token_id` y email del pagador; la API crea
+`/preapproval` con `status=authorized`. No hay `init_point`, URL de checkout ni redirect. La API
+concede el acceso solo tras recibir `authorized`, y el webhook continúa siendo la sincronización
+de estados con Mercado Pago.
 
 - [ ] Documentar el flujo exacto del checkout embebido.
 - [ ] Definir qué componente de Mercado Pago se utilizará.
@@ -293,16 +303,16 @@ Prioridad: **P0**
 
 ## 4.2 Validaciones de arranque
 
-- [ ] Hacer que producción rechace `APP_STORAGE=memory`.
-- [ ] Hacer que producción rechace billing activo sin credenciales completas.
-- [ ] Hacer que producción rechace webhook sin secreto.
-- [ ] Hacer que producción rechace URLs HTTP.
-- [ ] Validar `APP_COOKIE_SECURE=true`.
-- [ ] Validar valores permitidos de `APP_COOKIE_SAMESITE`.
-- [ ] Validar que `WEB_BASE_URL` y `API_BASE_URL` tengan orígenes esperados.
-- [ ] Validar que `GOOGLE_REDIRECT_URL` corresponda al entorno.
-- [ ] Validar que `WORKOS_REDIRECT_URI` corresponda al entorno.
-- [ ] Validar que `AI_WORKER_AUDIENCE` exista cuando el worker es privado.
+- [x] Hacer que producción rechace `APP_STORAGE=memory`.
+- [x] Hacer que producción rechace billing activo sin credenciales completas.
+- [x] Hacer que producción rechace webhook sin secreto.
+- [x] Hacer que producción rechace URLs HTTP.
+- [x] Validar `APP_COOKIE_SECURE=true`.
+- [x] Validar valores permitidos de `APP_COOKIE_SAMESITE`.
+- [x] Validar que `WEB_BASE_URL` y `API_BASE_URL` tengan orígenes esperados.
+- [x] Validar que `GOOGLE_REDIRECT_URL` corresponda al entorno.
+- [x] Validar que `WORKOS_REDIRECT_URI` corresponda al entorno.
+- [x] Validar que `AI_WORKER_AUDIENCE` exista cuando el worker es privado.
 
 ## 4.3 Escalado temporal
 
@@ -348,23 +358,26 @@ Prioridad: **P0**
 
 ## 5.1 Modelo de sesión
 
-- [ ] Añadir `expires_at` a la sesión server-side.
-- [ ] Añadir `revoked_at` o estado equivalente.
-- [ ] Validar expiración en cada request autenticado.
-- [ ] Rechazar sesiones revocadas.
-- [ ] Evitar depender únicamente del `Max-Age` de la cookie.
-- [ ] Definir duración de sesión.
+Decisión implementada: una sesión web dura 30 días desde el login, sin extensión por actividad.
+Las sesiones antiguas sin `expires_at` requieren iniciar sesión otra vez al desplegar esta versión.
+
+- [x] Añadir `expires_at` a la sesión server-side.
+- [x] Añadir `revoked_at` o estado equivalente.
+- [x] Validar expiración en cada request autenticado.
+- [x] Rechazar sesiones revocadas.
+- [x] Evitar depender únicamente del `Max-Age` de la cookie.
+- [x] Definir duración de sesión.
   - Recomendación inicial: 7–30 días según sensibilidad y UX.
-- [ ] Definir si la actividad extiende la sesión.
-- [ ] Definir una duración absoluta máxima.
+- [x] Definir si la actividad extiende la sesión.
+- [x] Definir una duración absoluta máxima.
 - [ ] Registrar `last_seen_at` solo si aporta valor operativo.
 
 ## 5.2 Logout
 
-- [ ] Invalidar la sesión en el servidor al cerrar sesión.
-- [ ] Borrar la cookie del navegador.
-- [ ] Probar reutilización de una cookie copiada después del logout.
-- [ ] La cookie reutilizada debe responder 401.
+- [x] Invalidar la sesión en el servidor al cerrar sesión.
+- [x] Borrar la cookie del navegador.
+- [x] Probar reutilización de una cookie copiada después del logout.
+- [x] La cookie reutilizada debe responder 401.
 - [ ] Implementar “cerrar todas las sesiones” para soporte/admin o usuario.
 - [ ] Documentar qué ocurre al cambiar contraseña en WorkOS.
 - [ ] Evaluar invalidación cuando WorkOS suspende al usuario.
@@ -398,10 +411,10 @@ Prioridad: **P0**
 ## 5.5 CSRF
 
 - [ ] Determinar si todas las llamadas autenticadas son same-origin.
-- [ ] Validar `Origin` o `Referer` en requests mutables.
-- [ ] Rechazar orígenes desconocidos.
+- [x] Validar `Origin` en requests mutables.
+- [x] Rechazar orígenes desconocidos.
 - [ ] Evaluar token CSRF si se conserva `SameSite=None`.
-- [ ] Probar POST/PATCH/DELETE desde un origen externo.
+- [x] Probar un POST desde un origen externo.
 - [ ] Asegurar especialmente:
   - Cancelación de suscripción.
   - Cambio de plan.
@@ -433,11 +446,9 @@ Prioridad: **P0**
 
 - [ ] Definir catálogo de códigos públicos.
 - [ ] Separar mensaje técnico y mensaje al usuario.
-- [ ] No devolver `error.to_string()` directamente.
-- [ ] No devolver bodies de proveedores.
-- [ ] No devolver URLs internas.
-- [ ] No devolver nombres de colecciones o documentos.
-- [ ] No devolver stack traces.
+- [x] No devolver `error.to_string()` directamente.
+- [x] No devolver bodies de proveedores.
+- [x] No devolver URLs internas, nombres de colecciones o stack traces mediante errores inesperados.
 - [ ] Mantener mensajes 401/403/404 consistentes.
 - [ ] Evitar confirmar existencia de recursos de otro usuario.
 
@@ -593,38 +604,37 @@ Prioridad: **P0**
 
 ## 8.1 Desconectar Gmail
 
-- [ ] Añadir acción disponible en UI.
-- [ ] Exigir confirmación.
-- [ ] Revocar el token en Google cuando sea posible.
-- [ ] Marcar mailbox como revocada.
-- [ ] Eliminar o inutilizar access token.
-- [ ] Eliminar o inutilizar refresh token.
-- [ ] Desactivar scheduler.
-- [ ] Bloquear nuevos análisis.
-- [ ] Mantener o eliminar datos históricos según elección explícita.
-- [ ] Mostrar claramente qué datos permanecen.
-- [ ] Permitir reconectar.
+- [x] Añadir acción disponible en UI.
+- [x] Exigir confirmación.
+- [x] Revocar el token en Google cuando sea posible.
+- [x] Marcar mailbox como revocada.
+- [x] Eliminar o inutilizar access token.
+- [x] Eliminar o inutilizar refresh token.
+- [x] Desactivar scheduler al dejarlo sin credenciales Gmail.
+- [x] Bloquear nuevos análisis.
+- [x] Mantener datos históricos; la UI lo explica antes de confirmar.
+- [x] Permitir reconectar.
 - [ ] Probar reconexión con la misma cuenta.
 - [ ] Probar reconexión con otra cuenta, si se permite.
 
 ## 8.2 Borrar análisis
 
 - [ ] Definir borrado de un run.
-- [ ] Definir borrado de todos los runs.
-- [ ] Eliminar:
+- [x] Definir borrado de todos los runs del usuario.
+- [x] Eliminar:
   - Analysis run.
   - Threads.
   - Messages derivados.
   - AI audits.
   - Manual reviews asociadas.
   - Overrides cuya semántica dependa del run.
-- [ ] Recalcular uso solo si la política comercial lo exige.
-- [ ] Definir si borrar datos devuelve cuota.
+- [x] No recalcular uso: borrar datos no devuelve cuota consumida.
+- [x] Definir que borrar datos no devuelve cuota.
   - Recomendación: no devolver cuota consumida.
-- [ ] Confirmación fuerte.
-- [ ] Operación idempotente.
+- [x] Confirmación fuerte: frase escrita `BORRAR MIS ANALISIS`.
+- [x] Operación idempotente.
 - [ ] Registro de auditoría de la eliminación.
-- [ ] Evitar dejar documentos huérfanos.
+- [x] Evitar dejar documentos huérfanos: Firestore borra primero subcolecciones conocidas.
 
 ## 8.3 Borrar cuenta y organización
 
@@ -1040,12 +1050,12 @@ Prioridad: **P0**
 - [ ] Tests de webhook fuera de orden.
 - [ ] Tests de expiración de sesión.
 - [ ] Tests de logout revocable.
-- [ ] Tests CSRF/origen.
-- [ ] Tests de desconexión Gmail.
-- [ ] Tests de borrado de análisis.
+- [x] Tests CSRF/origen.
+- [x] Tests de desconexión Gmail.
+- [x] Tests de borrado de análisis.
 - [ ] Tests de borrado de cuenta.
 - [ ] Tests de retención.
-- [ ] Tests de sanitización de errores.
+- [x] Tests de sanitización de errores.
 - [ ] Tests de concurrencia de usage ledger.
 
 ## 14.4 E2E mínimo
@@ -1468,19 +1478,19 @@ Usar esta tabla para mantener una visión ejecutiva:
 
 | Área | Prioridad | Estado | Responsable | Evidencia | Observaciones |
 |---|---:|---|---|---|---|
-| Checkout embebido | P0 | Pendiente |  |  |  |
-| Webhook Mercado Pago | P0 | En progreso |  | `cargo test --manifest-path apps/api/Cargo.toml` — 125 passed | Firma HMAC, timestamp 5 min, idempotency key y secreto obligatorio implementados; falta sandbox real. |
+| Checkout embebido | P0 | En progreso |  | `scripts/check-all.sh` — verde | Card Payment Brick → token → `/preapproval` `authorized`, sin redirect; falta sandbox real. |
+| Webhook Mercado Pago | P0 | En progreso |  | `scripts/check-all.sh` — 135 Rust tests | Firma HMAC, timestamp 5 min, idempotency key y secreto obligatorio implementados; falta sandbox real. |
 | Configuración de entornos | P0 | En progreso |  | `docker compose --env-file .env.sandbox.example -f docker-compose.yml -f docker-compose.tunnel.yml config --services` | Sandbox con `mira-dev.ninfasolutions.com`; producción con `mira.ninfasolutions.com` y webhook directo a Cloud Run API. |
-| Configuración production | P0 | En progreso |  | `cargo test --manifest-path apps/api/Cargo.toml` — 125 passed | Producción rechaza `MERCADOPAGO_ACCESS_TOKEN` y `MERCADOPAGO_WEBHOOK_SECRET` faltantes. |
-| Sesiones y logout | P0 | Pendiente |  |  |  |
-| Sanitización de errores | P0 | Pendiente |  |  |  |
-| Desconexión Gmail | P0 | Pendiente |  |  |  |
-| Borrado de datos | P0 | Pendiente |  |  |  |
+| Configuración production | P0 | Listo local |  | `cargo test` — 135 Rust tests | Producción exige Firestore, URLs HTTPS coherentes, cookies seguras, billing y secretos de Mercado Pago/Audience. |
+| Sesiones y logout | P0 | Listo local |  | `scripts/check-all.sh` — 135 Rust tests | Expiración absoluta 30 días y logout revocable; falta prueba en despliegue. |
+| Sanitización de errores | P0 | Listo local |  | `scripts/check-all.sh` — 135 Rust tests | Errores inesperados y de proveedores no exponen detalles al navegador; falta catálogo/correlación. |
+| Desconexión Gmail | P0 | Listo local |  | `scripts/check-all.sh` — 135 Rust tests | Revocación Google, tokens borrados, scheduler desactivado y confirmación UI. |
+| Borrado de datos | P0 | En progreso |  | `scripts/check-all.sh` — 135 Rust tests | Borrado de todos los análisis disponible; falta borrado de cuenta y prueba Firestore real. |
 | Privacidad y términos | P0 | En progreso |  |  |  |
 | Landing/copy público | P1 | En progreso |  |  | Sin lenguaje de beta; retoque visual liviano. |
 | PITR Firestore | P0 | Pendiente |  |  |  |
 | Uptime y alertas | P0 | Pendiente |  |  |  |
-| CI verde | P0 | Pendiente |  |  | Clippy falla actualmente. |
+| CI verde | P0 | En progreso |  | `scripts/check-all.sh` — verde | Falta confirmar la ejecución remota al abrir el PR. |
 | Panel admin | P1 | Pendiente |  |  |  |
 | Hardening contenedores | P1 | Pendiente |  |  |  |
 | Retención automática | P1 | Pendiente |  |  |  |
@@ -1521,11 +1531,11 @@ Este bloque es una fotografía inicial y debe actualizarse a medida que cambie e
 - [ ] No se observaron alertas operativas configuradas.
 - [ ] El check oficial falla por Clippy.
 - [ ] Checkout versionado todavía utiliza redirección.
-- [ ] Desconexión y eliminación están deshabilitadas en UI.
+- [x] Desconexión Gmail y borrado de análisis disponibles con confirmación; falta borrado de cuenta.
 - [ ] Retención declarada no tiene job destructivo.
-- [ ] Sesiones no expiran ni se revocan server-side.
-- [ ] Logout solo elimina cookie.
-- [ ] Errores crudos pueden llegar al navegador.
+- [x] Sesiones expiran a los 30 días y se revocan server-side.
+- [x] Logout revoca la sesión además de borrar la cookie.
+- [x] Errores inesperados y de proveedores se sanitizan antes de llegar al navegador.
 - [ ] Copy de IA no es completamente consistente con el comportamiento real.
 - [ ] No hay CI visible en el repositorio.
 - [ ] No hay tests frontend/E2E.
@@ -1540,11 +1550,11 @@ Mira puede considerarse production-ready para una **versión inicial pagada y co
 - [ ] Puede cobrar sin duplicar, perder o inventar estados.
 - [ ] Puede bloquear acceso cuando corresponde.
 - [ ] Puede recuperar el estado desde Mercado Pago.
-- [ ] Puede expirar y revocar sesiones.
-- [ ] Puede desconectar Gmail.
-- [ ] Puede borrar datos de forma verificable.
+- [x] Puede expirar y revocar sesiones.
+- [x] Puede desconectar Gmail.
+- [x] Puede borrar análisis derivados de forma verificable.
 - [ ] Explica honestamente cómo usa IA y datos.
-- [ ] No filtra errores internos al usuario.
+- [x] No filtra errores inesperados ni de proveedores al usuario.
 - [ ] Tiene respaldo y recuperación probados.
 - [ ] Alguien recibe alertas cuando falla.
 - [ ] Existe un procedimiento para operar incidentes.

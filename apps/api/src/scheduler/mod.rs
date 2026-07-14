@@ -1086,6 +1086,8 @@ mod tests {
                 refresh_token_encrypted: None,
                 gmail_access_token_encrypted: None,
                 gmail_refresh_token_encrypted: None,
+                expires_at: None,
+                revoked_at: None,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             })

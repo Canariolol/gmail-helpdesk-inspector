@@ -16,7 +16,10 @@ use std::sync::Arc;
 use anyhow::Context;
 use axum::{
     Router,
+    extract::{Request, State},
     http::{HeaderName, HeaderValue, Method, header},
+    middleware::Next,
+    response::{IntoResponse, Response},
 };
 use config::AppConfig;
 use firestore::FirestoreStorage;
@@ -108,7 +111,35 @@ pub fn build_app_from_state(state: AppState) -> Router {
         ])
         .allow_credentials(true);
 
-    http::router(state)
+    http::router(state.clone())
         .layer(cors)
+        .layer(axum::middleware::from_fn_with_state(
+            state,
+            reject_cross_origin_mutation,
+        ))
         .layer(TraceLayer::new_for_http())
+}
+
+async fn reject_cross_origin_mutation(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let unsafe_method = matches!(
+        *request.method(),
+        Method::POST | Method::PUT | Method::PATCH | Method::DELETE
+    );
+    let origin_is_trusted = request
+        .headers()
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .is_none_or(|origin| origin == state.config.web_base_url);
+    if unsafe_method && !origin_is_trusted {
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            axum::Json(serde_json::json!({ "error": "Origen no permitido" })),
+        )
+            .into_response();
+    }
+    next.run(request).await
 }

@@ -12,6 +12,9 @@ use sha2::{Digest, Sha256};
 
 type HmacSha256 = Hmac<Sha256>;
 
+const SESSION_TTL_DAYS: i64 = 30;
+const SESSION_MAX_AGE_SECONDS: i64 = SESSION_TTL_DAYS * 24 * 60 * 60;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserSession {
     pub id: String,
@@ -26,6 +29,10 @@ pub struct UserSession {
     pub gmail_access_token_encrypted: Option<String>,
     #[serde(default)]
     pub gmail_refresh_token_encrypted: Option<String>,
+    #[serde(default)]
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
@@ -87,8 +94,25 @@ pub fn verify_session_cookie(cookie_value: &str, secret: &str) -> Option<String>
     }
 }
 
+pub fn session_expires_at(now: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chrono::Utc> {
+    now + chrono::Duration::days(SESSION_TTL_DAYS)
+}
+
+pub fn session_is_active(session: &UserSession, now: chrono::DateTime<chrono::Utc>) -> bool {
+    session.revoked_at.is_none()
+        && session
+            .expires_at
+            .is_some_and(|expires_at| expires_at > now)
+}
+
 pub fn session_cookie(value: &str, same_site: &str, secure: bool) -> String {
-    cookie("ghmi_session", value, 2_592_000, same_site, secure)
+    cookie(
+        "ghmi_session",
+        value,
+        SESSION_MAX_AGE_SECONDS,
+        same_site,
+        secure,
+    )
 }
 
 pub fn oauth_cookie(value: &str, same_site: &str, secure: bool) -> String {

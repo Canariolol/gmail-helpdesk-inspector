@@ -1,8 +1,11 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use anyhow::anyhow;
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use tokio::sync::RwLock;
 
 use crate::{
@@ -45,6 +48,7 @@ pub trait StorageRepository: Send + Sync {
     async fn get_account_by_email(&self, email: &str) -> anyhow::Result<Option<Account>>;
     async fn upsert_user_session(&self, session: &UserSession) -> anyhow::Result<()>;
     async fn get_user_session(&self, id: &str) -> anyhow::Result<Option<UserSession>>;
+    async fn disconnect_gmail(&self, owner_email: &str, now: DateTime<Utc>) -> anyhow::Result<()>;
     /// Sesión más reciente del usuario que tenga refresh token; la usa el
     /// análisis programado para operar sin cookie de sesión.
     async fn find_latest_session_with_refresh_token(
@@ -88,6 +92,7 @@ pub trait StorageRepository: Send + Sync {
     async fn update_analysis_run(&self, run: &AnalysisRun) -> anyhow::Result<()>;
     async fn get_analysis_run(&self, id: &str) -> anyhow::Result<Option<AnalysisRun>>;
     async fn list_analysis_runs(&self, user_email: &str) -> anyhow::Result<Vec<AnalysisRun>>;
+    async fn delete_analysis_data(&self, owner_email: &str) -> anyhow::Result<()>;
     async fn upsert_thread(
         &self,
         thread: &EmailThread,
@@ -180,6 +185,15 @@ fn override_storage_key(owner_email: &str, gmail_thread_id: &str) -> String {
     )
 }
 
+pub fn clear_gmail_connection(session: &mut UserSession, now: DateTime<Utc>) {
+    session.gmail_account_email = None;
+    session.gmail_access_token_encrypted = None;
+    session.gmail_refresh_token_encrypted = None;
+    session.access_token_encrypted.clear();
+    session.refresh_token_encrypted = None;
+    session.updated_at = now;
+}
+
 #[async_trait]
 impl StorageRepository for MemoryStorage {
     async fn upsert_account(&self, account: &Account) -> anyhow::Result<()> {
@@ -227,6 +241,18 @@ impl StorageRepository for MemoryStorage {
 
     async fn get_user_session(&self, id: &str) -> anyhow::Result<Option<UserSession>> {
         Ok(self.inner.read().await.sessions.get(id).cloned())
+    }
+
+    async fn disconnect_gmail(&self, owner_email: &str, now: DateTime<Utc>) -> anyhow::Result<()> {
+        for session in self.inner.write().await.sessions.values_mut() {
+            if session
+                .google_account_email
+                .eq_ignore_ascii_case(owner_email)
+            {
+                clear_gmail_connection(session, now);
+            }
+        }
+        Ok(())
     }
 
     async fn find_latest_session_with_refresh_token(
@@ -456,6 +482,33 @@ impl StorageRepository for MemoryStorage {
         runs.sort_by_key(|run| run.created_at);
         runs.reverse();
         Ok(runs)
+    }
+
+    async fn delete_analysis_data(&self, owner_email: &str) -> anyhow::Result<()> {
+        let owner = owner_email.trim();
+        let mut inner = self.inner.write().await;
+        let run_ids: HashSet<String> = inner
+            .runs
+            .values()
+            .filter(|run| run.user_email.eq_ignore_ascii_case(owner))
+            .map(|run| run.id.clone())
+            .collect();
+        inner.runs.retain(|id, _| !run_ids.contains(id));
+        inner
+            .threads
+            .retain(|_, thread| !run_ids.contains(&thread.analysis_run_id));
+        for run_id in &run_ids {
+            let prefix = format!("{run_id}:");
+            inner.messages.retain(|key, _| !key.starts_with(&prefix));
+            inner.audits.retain(|key, _| !key.starts_with(&prefix));
+        }
+        inner
+            .reviews
+            .retain(|(run_id, _)| !run_ids.contains(run_id));
+        inner
+            .manual_review_overrides
+            .retain(|_, review| !review.owner_email.eq_ignore_ascii_case(owner));
+        Ok(())
     }
 
     async fn upsert_thread(
@@ -917,6 +970,8 @@ mod tests {
             refresh_token_encrypted: refresh.map(ToOwned::to_owned),
             gmail_access_token_encrypted: Some("access".to_string()),
             gmail_refresh_token_encrypted: refresh.map(ToOwned::to_owned),
+            expires_at: None,
+            revoked_at: None,
             created_at: at,
             updated_at: at,
         }
@@ -963,6 +1018,46 @@ mod tests {
             .await
             .unwrap();
         assert!(found.is_none());
+    }
+
+    #[tokio::test]
+    async fn disconnect_gmail_clears_every_session_for_the_owner() {
+        let storage = MemoryStorage::default();
+        storage
+            .upsert_user_session(&session("first", "owner@example.com", Some("r1"), 10))
+            .await
+            .unwrap();
+        storage
+            .upsert_user_session(&session("second", "owner@example.com", Some("r2"), 5))
+            .await
+            .unwrap();
+        storage
+            .upsert_user_session(&session("other", "other@example.com", Some("r3"), 0))
+            .await
+            .unwrap();
+
+        storage
+            .disconnect_gmail("OWNER@example.com", Utc::now())
+            .await
+            .unwrap();
+
+        for id in ["first", "second"] {
+            let session = storage.get_user_session(id).await.unwrap().unwrap();
+            assert!(session.gmail_account_email.is_none());
+            assert!(session.gmail_access_token_encrypted.is_none());
+            assert!(session.gmail_refresh_token_encrypted.is_none());
+            assert!(session.access_token_encrypted.is_empty());
+            assert!(session.refresh_token_encrypted.is_none());
+        }
+        assert!(
+            storage
+                .get_user_session("other")
+                .await
+                .unwrap()
+                .unwrap()
+                .gmail_account_email
+                .is_some()
+        );
     }
 
     #[tokio::test]

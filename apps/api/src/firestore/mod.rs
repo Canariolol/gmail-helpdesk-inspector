@@ -28,7 +28,7 @@ use crate::{
     scheduler::model::{ScheduleConfig, ScheduleState},
     storage::{
         ManualReviewInheritanceMigrationResult, ManualReviewMetricsMigrationResult,
-        StorageRepository,
+        StorageRepository, clear_gmail_connection,
     },
 };
 
@@ -247,6 +247,44 @@ impl FirestoreStorage {
         Ok(values)
     }
 
+    async fn list_document_ids(
+        &self,
+        parent: &str,
+        collection: &str,
+    ) -> anyhow::Result<Vec<String>> {
+        let token = self.token().await?;
+        let url = if parent.is_empty() {
+            format!("{}/{}", self.root(), collection)
+        } else {
+            format!("{}/{}/{}", self.root(), parent, collection)
+        };
+        let mut ids = Vec::new();
+        let mut page_token: Option<String> = None;
+        loop {
+            let mut request = self
+                .client
+                .get(&url)
+                .bearer_auth(&token)
+                .query(&[("pageSize", "300")]);
+            if let Some(page_token) = page_token.as_deref() {
+                request = request.query(&[("pageToken", page_token)]);
+            }
+            let response: FirestoreListResponse =
+                request.send().await?.error_for_status()?.json().await?;
+            ids.extend(
+                response
+                    .documents
+                    .into_iter()
+                    .filter_map(|doc| doc.name.rsplit('/').next().map(ToOwned::to_owned)),
+            );
+            page_token = response.next_page_token.filter(|token| !token.is_empty());
+            if page_token.is_none() {
+                break;
+            }
+        }
+        Ok(ids)
+    }
+
     async fn delete(&self, path: &str) -> anyhow::Result<()> {
         let token = self.token().await?;
         let response = self
@@ -292,6 +330,26 @@ impl StorageRepository for FirestoreStorage {
 
     async fn get_user_session(&self, id: &str) -> anyhow::Result<Option<UserSession>> {
         self.get(&format!("users/{id}")).await
+    }
+
+    async fn disconnect_gmail(
+        &self,
+        owner_email: &str,
+        now: chrono::DateTime<Utc>,
+    ) -> anyhow::Result<()> {
+        // `list` pagina hasta 300 sesiones. Para el despliegue actual basta;
+        // si creciera, este barrido debe usar una consulta paginada por correo.
+        let sessions: Vec<UserSession> = self.list("", "users").await?;
+        for mut session in sessions {
+            if session
+                .google_account_email
+                .eq_ignore_ascii_case(owner_email)
+            {
+                clear_gmail_connection(&mut session, now);
+                self.put(&format!("users/{}", session.id), &session).await?;
+            }
+        }
+        Ok(())
     }
 
     async fn find_latest_session_with_refresh_token(
@@ -475,6 +533,40 @@ impl StorageRepository for FirestoreStorage {
         runs.sort_by_key(|run| run.created_at);
         runs.reverse();
         Ok(runs)
+    }
+
+    async fn delete_analysis_data(&self, owner_email: &str) -> anyhow::Result<()> {
+        let runs = self.list_analysis_runs(owner_email).await?;
+        for run in runs {
+            let run_path = format!("analysisRuns/{}", run.id);
+            for thread in self.list_threads(&run.id).await? {
+                let thread_path = format!("{run_path}/threads/{}", thread.id);
+                for message in self.list_messages(&run.id, &thread.id).await? {
+                    self.delete(&format!("{thread_path}/messages/{}", message.id))
+                        .await?;
+                }
+                for audit_id in self.list_document_ids(&thread_path, "aiAudits").await? {
+                    self.delete(&format!("{thread_path}/aiAudits/{audit_id}"))
+                        .await?;
+                }
+                self.delete(&thread_path).await?;
+            }
+            let reviews: Vec<ManualReview> = self.list(&run_path, "manualReviews").await?;
+            for review in reviews {
+                self.delete(&format!("{run_path}/manualReviews/{}", review.id))
+                    .await?;
+            }
+            self.delete(&run_path).await?;
+        }
+        let overrides_path = format!(
+            "ownerProfiles/{}/manualReviewOverrides",
+            hash_owner_email(owner_email)
+        );
+        for override_id in self.list_document_ids("", &overrides_path).await? {
+            self.delete(&format!("{overrides_path}/{override_id}"))
+                .await?;
+        }
+        Ok(())
     }
 
     async fn upsert_thread(

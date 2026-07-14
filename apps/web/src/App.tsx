@@ -19,16 +19,9 @@ import type { AppView } from "./components/layout/Sidebar";
 import { AccessShell } from "./views/access/AccessShell";
 import { deriveAccessState, isBlockedStatus } from "./views/access/accessState";
 import { BlockedBanner } from "./views/access/BlockedBanner";
-import { CheckoutPendingGate } from "./views/access/CheckoutPendingGate";
 import { CheckoutView } from "./views/access/CheckoutView";
 import { GmailConnectGate } from "./views/access/GmailConnectGate";
 import { LoadingGate } from "./views/access/LoadingGate";
-import {
-  clearPendingCheckout,
-  readPendingCheckout,
-  savePendingCheckout,
-} from "./views/access/pendingCheckout";
-import type { PendingCheckout } from "./views/access/pendingCheckout";
 import { PlansModal } from "./views/access/PlansModal";
 import { PricingGate } from "./views/access/PricingGate";
 import { UsageLimitBanner } from "./views/access/UsageLimitBanner";
@@ -61,17 +54,12 @@ export function App() {
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
   const [threadFilter, setThreadFilter] = useState<string>("all");
-  const [pendingCheckout, setPendingCheckout] = useState<PendingCheckout | null>(() =>
-    readPendingCheckout(),
-  );
   const [showPlansModal, setShowPlansModal] = useState(false);
   // Plan elegido para el checkout embebido; muestra el formulario de tarjeta.
   const [checkoutPlan, setCheckoutPlan] = useState<BillingPlan | null>(null);
   // Marca de tiempo del último guardado de revisión exitoso; alimenta la
   // confirmación transitoria del formulario de revisión.
   const [reviewSavedAt, setReviewSavedAt] = useState<number | null>(null);
-
-  const hasPendingCheckout = pendingCheckout !== null;
 
   const me = useQuery({
     queryKey: ["me"],
@@ -85,12 +73,6 @@ export function App() {
     enabled: me.isSuccess,
     retry: false,
     staleTime: 30_000,
-    // Mientras hay un checkout en curso, espera a que el webhook de Mercado Pago active el plan.
-    refetchInterval: (query) => {
-      const data = query.state.data;
-      if (!data || !hasPendingCheckout) return false;
-      return data.entitlement.allowed ? false : 5000;
-    },
   });
 
   const plans = useQuery({
@@ -138,47 +120,6 @@ export function App() {
       setSelectedRunId(runs.data[0].id);
     }
   }, [runs.data, selectedRunId]);
-
-  // Limpia el checkout en curso una vez que el plan queda activo o entra en bloqueo.
-  useEffect(() => {
-    if (!account.data || !pendingCheckout) return;
-    const entitlement = account.data.entitlement;
-    if (entitlement.allowed || isBlockedStatus(entitlement.subscription_status)) {
-      clearPendingCheckout();
-      setPendingCheckout(null);
-    }
-  }, [account.data, pendingCheckout]);
-
-  // Retorno de Mercado Pago: ?session_id=... → reconstruir el estado de "checkout pendiente".
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const sessionId = params.get("session_id");
-    if (!sessionId) return;
-    let cancelled = false;
-    api<CheckoutSessionResponse>(`/checkout/sessions/${sessionId}`)
-      .then((response) => {
-        if (cancelled) return;
-        const session = response.session;
-        const pending: PendingCheckout = {
-          id: session.id,
-          checkoutUrl: session.checkout_url ?? "",
-          planId: session.plan_id,
-          planName: session.plan_id,
-          createdAt: Date.now(),
-        };
-        savePendingCheckout(pending);
-        setPendingCheckout(pending);
-      })
-      .catch(() => {
-        /* sesión de checkout no encontrada: el polling de la cuenta resolverá igual */
-      })
-      .finally(() => {
-        window.history.replaceState({}, document.title, "/");
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   const selectedRun = runs.data?.find((run) => run.id === selectedRunId) ?? null;
 
@@ -290,56 +231,24 @@ export function App() {
   });
 
   const checkout = useMutation({
-    mutationFn: (payload: { planId: BillingPlanId; cardTokenId?: string; payerEmail?: string }) =>
+    mutationFn: (payload: { planId: BillingPlanId; cardTokenId: string; payerEmail: string }) =>
       api<CheckoutSessionResponse>("/checkout/subscriptions", {
         method: "POST",
         body: JSON.stringify({
           plan_id: payload.planId,
-          ...(payload.cardTokenId
-            ? { card_token_id: payload.cardTokenId, payer_email: payload.payerEmail }
-            : {}),
+          card_token_id: payload.cardTokenId,
+          payer_email: payload.payerEmail,
         }),
       }),
     onSuccess: (response) => {
       const session = response.session;
-      const plan = plans.data?.find((item) => item.id === session.plan_id);
 
       // Checkout embebido autorizado: la suscripción ya quedó activa.
       if (session.status === "activated") {
         setCheckoutPlan(null);
-        clearPendingCheckout();
-        setPendingCheckout(null);
         queryClient.invalidateQueries({ queryKey: ["account"] });
         queryClient.invalidateQueries({ queryKey: ["usage"] });
-        return;
       }
-
-      // Fallback con redirección (sin tarjeta tokenizada).
-      if (session.checkout_url) {
-        const pending: PendingCheckout = {
-          id: session.id,
-          checkoutUrl: session.checkout_url,
-          planId: session.plan_id,
-          planName: plan?.name ?? session.plan_id,
-          createdAt: Date.now(),
-        };
-        savePendingCheckout(pending);
-        setPendingCheckout(pending);
-        window.location.href = session.checkout_url;
-        return;
-      }
-
-      // Pago en revisión: dejamos el checkout pendiente y el polling de la cuenta resuelve.
-      const pending: PendingCheckout = {
-        id: session.id,
-        checkoutUrl: "",
-        planId: session.plan_id,
-        planName: plan?.name ?? session.plan_id,
-        createdAt: Date.now(),
-      };
-      savePendingCheckout(pending);
-      setPendingCheckout(pending);
-      setCheckoutPlan(null);
     },
   });
 
@@ -359,6 +268,14 @@ export function App() {
   const cancelSubscription = useMutation({
     mutationFn: () => api<EntitlementSnapshot>("/me/subscription/cancel", { method: "POST" }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["account"] }),
+  });
+
+  const disconnectGmail = useMutation({
+    mutationFn: () => api<void>("/gmail/disconnect", { method: "POST" }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["account"] });
+      queryClient.invalidateQueries({ queryKey: ["org-config"] });
+    },
   });
 
   const filterPresets = useQuery({
@@ -432,19 +349,6 @@ export function App() {
     changePlan.mutate(planId);
   };
 
-  const handleRetryCheckout = () => {
-    if (pendingCheckout?.checkoutUrl) {
-      window.location.href = pendingCheckout.checkoutUrl;
-    }
-  };
-
-  const handleBackToPlans = () => {
-    clearPendingCheckout();
-    setPendingCheckout(null);
-    setCheckoutPlan(null);
-    checkout.reset();
-  };
-
   // Al cambiar o cerrar el hilo limpiamos el estado de la mutación para que no
   // arrastre un error/éxito previo al abrir otra trazabilidad.
   const handleSelectThread = (id: string) => {
@@ -486,7 +390,7 @@ export function App() {
     );
   }
 
-  const accessState = deriveAccessState(accountData, hasPendingCheckout);
+  const accessState = deriveAccessState(accountData);
   const checkoutError = checkout.error?.message ?? null;
   // El estado de carga del pago vive ahora en CheckoutView; las tarjetas de
   // PricingGate solo abren el checkout embebido, sin spinner propio.
@@ -514,16 +418,6 @@ export function App() {
         loadingPlanId={checkoutLoadingPlanId}
         error={checkoutError}
         onLogout={handleLogout}
-      />
-    );
-  }
-
-  if (accessState.kind === "checkout_pending") {
-    return (
-      <CheckoutPendingGate
-        planName={pendingCheckout?.planName ?? planName ?? "tu plan"}
-        onRetry={handleRetryCheckout}
-        onBackToPlans={handleBackToPlans}
       />
     );
   }
@@ -641,7 +535,14 @@ export function App() {
             onOpenChangePlan={() => setShowPlansModal(true)}
             onCancel={() => cancelSubscription.mutate()}
             cancelPending={cancelSubscription.isPending}
-            error={checkout.error?.message ?? cancelSubscription.error?.message ?? null}
+            onDisconnectGmail={() => disconnectGmail.mutate()}
+            gmailDisconnectPending={disconnectGmail.isPending}
+            error={
+              checkout.error?.message ??
+              cancelSubscription.error?.message ??
+              disconnectGmail.error?.message ??
+              null
+            }
           />
         )}
         {effectiveView === "configuracion" && (

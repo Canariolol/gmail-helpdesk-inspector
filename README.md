@@ -116,12 +116,13 @@ Useful authenticated endpoints:
 | `GET /auth/workos/login` | Start WorkOS AuthKit account login/signup |
 | `GET /me/account` | Read account, Gmail connection, and entitlement state |
 | `GET /me/usage` | Read current billing-period usage ledger |
-| `POST /checkout/subscriptions` | Create a Mercado Pago subscription checkout in CLP |
-| `GET /checkout/sessions/:id` | Read checkout session state |
+| `POST /checkout/subscriptions` | Create an embedded Mercado Pago subscription in CLP |
 | `GET /gmail/connect/login` | Connect the audited Gmail mailbox with readonly scope |
+| `POST /gmail/disconnect` | Revoke the Gmail connection and clear its stored credentials |
 | `GET /me/org/config` | Read/provision organization policy config |
 | `PUT /me/org/config` | Patch policy draft and create a new policy version when it changes |
 | `GET /me/data-summary` | Read-only privacy/data summary |
+| `DELETE /me/analysis-data` | Permanently delete the authenticated user's derived analysis data after confirmation |
 | `GET /me/operations/status` | Read-only scheduler/operations status |
 | `GET /me/operations/history` | Read-only recent operational history with redacted errors |
 

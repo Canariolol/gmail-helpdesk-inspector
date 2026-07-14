@@ -16,6 +16,8 @@ interface CuentaViewProps {
   /** Cancela al fin del período. */
   onCancel: () => void;
   cancelPending: boolean;
+  onDisconnectGmail: () => void;
+  gmailDisconnectPending: boolean;
   error: string | null;
 }
 
@@ -58,9 +60,12 @@ export function CuentaView({
   onOpenChangePlan,
   onCancel,
   cancelPending,
+  onDisconnectGmail,
+  gmailDisconnectPending,
   error,
 }: CuentaViewProps) {
   const [confirmingCancel, setConfirmingCancel] = useState(false);
+  const [confirmingGmailDisconnect, setConfirmingGmailDisconnect] = useState(false);
   const entitlement = account.entitlement;
   const planName = entitlement.plan?.name ?? null;
   const planId = entitlement.plan?.id ?? null;
@@ -167,6 +172,47 @@ export function CuentaView({
                 </>
               )}
             </div>
+          </div>
+        )}
+
+        {account.gmail_connected && (
+          <div className="cuenta-plan">
+            <p className="cuenta-plan-name">
+              Gmail conectado <strong>{account.gmail_account_email}</strong>
+            </p>
+            {!confirmingGmailDisconnect ? (
+              <button
+                type="button"
+                className="btn-ghost"
+                onClick={() => setConfirmingGmailDisconnect(true)}
+              >
+                <Ban size={16} /> Desconectar Gmail
+              </button>
+            ) : (
+              <div className="cuenta-confirm">
+                <span>Dejarás de analizar esta casilla. Los análisis existentes se conservan. ¿Desconectar?</span>
+                <div className="cuenta-confirm-actions">
+                  <button
+                    type="button"
+                    className="btn-ghost"
+                    disabled={gmailDisconnectPending}
+                    onClick={() => {
+                      onDisconnectGmail();
+                      setConfirmingGmailDisconnect(false);
+                    }}
+                  >
+                    {gmailDisconnectPending ? "Desconectando…" : "Sí, desconectar"}
+                  </button>
+                  <button
+                    type="button"
+                    className="access-text-btn"
+                    onClick={() => setConfirmingGmailDisconnect(false)}
+                  >
+                    Volver
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         )}
       </section>

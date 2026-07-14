@@ -8,7 +8,6 @@ import type { AccountStatus, SubscriptionStatus } from "../../api/types";
  */
 export type AccessState =
   | { kind: "pricing" }
-  | { kind: "checkout_pending" }
   | { kind: "blocked"; status: SubscriptionStatus }
   | { kind: "connect_gmail" }
   | { kind: "ready" };
@@ -16,17 +15,11 @@ export type AccessState =
 /** Estados de suscripción que bloquean el acceso pero mantienen la cuenta (pago requerido). */
 const BLOCKED_STATUSES: readonly SubscriptionStatus[] = ["past_due", "cancelled", "expired"];
 
-/** Estados en los que un checkout en curso aún puede resolverse a "activo". */
-const RESOLVABLE_STATUSES: readonly (SubscriptionStatus | null)[] = [null, "pending", "trialing"];
-
 export function isBlockedStatus(status: SubscriptionStatus | null): boolean {
   return status !== null && BLOCKED_STATUSES.includes(status);
 }
 
-export function deriveAccessState(
-  account: AccountStatus,
-  hasPendingCheckout: boolean,
-): AccessState {
+export function deriveAccessState(account: AccountStatus): AccessState {
   const entitlement = account.entitlement;
 
   if (entitlement.allowed) {
@@ -37,11 +30,6 @@ export function deriveAccessState(
 
   if (isBlockedStatus(status)) {
     return { kind: "blocked", status: status as SubscriptionStatus };
-  }
-
-  // Volvió de Mercado Pago y el webhook aún no activa la suscripción.
-  if (hasPendingCheckout && RESOLVABLE_STATUSES.includes(status)) {
-    return { kind: "checkout_pending" };
   }
 
   return { kind: "pricing" };

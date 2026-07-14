@@ -184,9 +184,8 @@ export interface AccountStatus {
 
 export interface CheckoutSession {
   id: string;
-  checkout_url: string | null;
   plan_id: BillingPlanId;
-  status: "pending" | "provider_created" | "activated" | "failed";
+  status: "pending" | "activated" | "failed";
   currency_id: "CLP";
   amount_clp: number;
   usd_reference_monthly: number;

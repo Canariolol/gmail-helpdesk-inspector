@@ -2,6 +2,7 @@ use std::env;
 
 use anyhow::{Context, anyhow};
 use serde::Deserialize;
+use url::Url;
 
 const DEFAULT_ENCRYPTION_KEY: &str = "development-only-change-me-32-bytes";
 const DEFAULT_SESSION_SECRET: &str = "development-only-session-secret";
@@ -187,13 +188,29 @@ impl AppConfig {
             "APP_COOKIE_SAMESITE",
             if cookie_secure { "None" } else { "Lax" },
         );
+        let web_base_url = env_or("WEB_BASE_URL", "http://localhost:5173");
+        let ai_worker_url = env_or("AI_WORKER_URL", "http://localhost:8090");
+        let ai_worker_audience = empty_to_none(env::var("AI_WORKER_AUDIENCE").ok());
+        validate_production_runtime(
+            production,
+            &app_storage,
+            &billing,
+            &web_base_url,
+            &api_base_url,
+            cookie_secure,
+            &cookie_same_site,
+            &google.redirect_url,
+            &workos.redirect_uri,
+            &ai_worker_url,
+            ai_worker_audience.as_deref(),
+        )?;
 
         Ok(Self {
             api_port: env::var("PORT")
                 .unwrap_or_else(|_| env_or("API_PORT", "8080"))
                 .parse()
                 .context("invalid API_PORT")?,
-            web_base_url: env_or("WEB_BASE_URL", "http://localhost:5173"),
+            web_base_url,
             api_base_url,
             cookie_secure,
             cookie_same_site,
@@ -220,8 +237,8 @@ impl AppConfig {
                 ),
             },
             ai: AiConfig {
-                worker_url: env_or("AI_WORKER_URL", "http://localhost:8090"),
-                worker_audience: empty_to_none(env::var("AI_WORKER_AUDIENCE").ok()),
+                worker_url: ai_worker_url,
+                worker_audience: ai_worker_audience,
                 apply_confidence_threshold: env_or("AI_APPLY_CONFIDENCE_THRESHOLD", "0.92")
                     .parse()
                     .context("invalid AI_APPLY_CONFIDENCE_THRESHOLD")?,
@@ -313,6 +330,79 @@ fn validate_billing_config(billing: &BillingConfig, production: bool) -> anyhow:
         ));
     }
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_production_runtime(
+    production: bool,
+    app_storage: &str,
+    billing: &BillingConfig,
+    web_base_url: &str,
+    api_base_url: &str,
+    cookie_secure: bool,
+    cookie_same_site: &str,
+    google_redirect_url: &str,
+    workos_redirect_uri: &str,
+    ai_worker_url: &str,
+    ai_worker_audience: Option<&str>,
+) -> anyhow::Result<()> {
+    if !production {
+        return Ok(());
+    }
+    if app_storage != "firestore" {
+        return Err(anyhow!(
+            "APP_STORAGE must be firestore when APP_ENV=production"
+        ));
+    }
+    if !billing.enforcement_enabled {
+        return Err(anyhow!(
+            "BILLING_ENFORCEMENT_ENABLED must be true when APP_ENV=production"
+        ));
+    }
+    if !cookie_secure {
+        return Err(anyhow!(
+            "APP_COOKIE_SECURE must be true when APP_ENV=production"
+        ));
+    }
+    if !matches!(cookie_same_site, "Lax" | "Strict" | "None") {
+        return Err(anyhow!(
+            "APP_COOKIE_SAMESITE must be Lax, Strict, or None when APP_ENV=production"
+        ));
+    }
+
+    https_origin("WEB_BASE_URL", web_base_url, true)?;
+    let api_origin = https_origin("API_BASE_URL", api_base_url, true)?;
+    if https_origin("GOOGLE_REDIRECT_URL", google_redirect_url, false)? != api_origin {
+        return Err(anyhow!(
+            "GOOGLE_REDIRECT_URL must use the API origin in production"
+        ));
+    }
+    if https_origin("WORKOS_REDIRECT_URI", workos_redirect_uri, false)? != api_origin {
+        return Err(anyhow!(
+            "WORKOS_REDIRECT_URI must use the API origin in production"
+        ));
+    }
+    https_origin("AI_WORKER_URL", ai_worker_url, false)?;
+    if ai_worker_audience.is_none() {
+        return Err(anyhow!(
+            "AI_WORKER_AUDIENCE is required when APP_ENV=production"
+        ));
+    }
+    Ok(())
+}
+
+fn https_origin(key: &str, value: &str, require_base_path: bool) -> anyhow::Result<String> {
+    let url = Url::parse(value).with_context(|| format!("{key} must be a valid URL"))?;
+    if url.scheme() != "https" || url.cannot_be_a_base() || url.host_str().is_none() {
+        return Err(anyhow!("{key} must use HTTPS in production"));
+    }
+    if require_base_path && (url.path() != "/" || url.query().is_some() || url.fragment().is_some())
+    {
+        return Err(anyhow!(
+            "{key} must be an origin without a path in production"
+        ));
+    }
+    Ok(url.origin().ascii_serialization())
 }
 
 fn is_production_env(value: &str) -> bool {
@@ -473,6 +563,73 @@ mod tests {
             .to_string();
         assert!(err.contains("MERCADOPAGO_WEBHOOK_SECRET"));
         assert!(validate_billing_config(&billing, false).is_ok());
+    }
+
+    #[test]
+    fn production_rejects_memory_storage_and_insecure_runtime_values() {
+        let billing = BillingConfig {
+            mercadopago_access_token: Some("access".to_string()),
+            mercadopago_webhook_secret: Some("webhook".to_string()),
+            enforcement_enabled: true,
+        };
+        let err = validate_production_runtime(
+            true,
+            "memory",
+            &billing,
+            "https://app.example.com",
+            "https://api.example.com",
+            true,
+            "None",
+            "https://api.example.com/gmail/connect/callback",
+            "https://api.example.com/auth/workos/callback",
+            "https://worker.example.com",
+            Some("https://worker.example.com"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("APP_STORAGE"));
+
+        let err = validate_production_runtime(
+            true,
+            "firestore",
+            &billing,
+            "http://app.example.com",
+            "https://api.example.com",
+            true,
+            "None",
+            "https://api.example.com/gmail/connect/callback",
+            "https://api.example.com/auth/workos/callback",
+            "https://worker.example.com",
+            Some("https://worker.example.com"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("WEB_BASE_URL"));
+    }
+
+    #[test]
+    fn production_accepts_safe_runtime_values() {
+        let billing = BillingConfig {
+            mercadopago_access_token: Some("access".to_string()),
+            mercadopago_webhook_secret: Some("webhook".to_string()),
+            enforcement_enabled: true,
+        };
+        assert!(
+            validate_production_runtime(
+                true,
+                "firestore",
+                &billing,
+                "https://app.example.com",
+                "https://api.example.com",
+                true,
+                "None",
+                "https://api.example.com/gmail/connect/callback",
+                "https://api.example.com/auth/workos/callback",
+                "https://worker.example.com",
+                Some("https://worker.example.com"),
+            )
+            .is_ok()
+        );
     }
 
     #[test]

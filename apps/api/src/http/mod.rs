@@ -15,7 +15,7 @@ use axum::{
         IntoResponse, Redirect, Sse,
         sse::{Event, KeepAlive},
     },
-    routing::{get, patch, post, put},
+    routing::{delete, get, patch, post, put},
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
@@ -41,7 +41,8 @@ use crate::{
     },
     auth::{
         GoogleTokenResponse, UserSession, clear_oauth_cookie, clear_session_cookie, decrypt_token,
-        encrypt_token, oauth_cookie, session_cookie, sign_session_id, verify_session_cookie,
+        encrypt_token, oauth_cookie, session_cookie, session_expires_at, session_is_active,
+        sign_session_id, verify_session_cookie,
     },
     billing::{
         Account, BillingPlan, BillingPlanId, CheckoutSession, CheckoutSessionStatus,
@@ -130,6 +131,7 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/google/callback", get(gmail_connect_callback))
         .route("/gmail/connect/login", get(gmail_connect_login))
         .route("/gmail/connect/callback", get(gmail_connect_callback))
+        .route("/gmail/disconnect", post(gmail_disconnect))
         .route("/auth/logout", post(auth_logout))
         .route("/auth/me", get(auth_me))
         .route("/me/account", get(get_account_status))
@@ -139,11 +141,11 @@ pub fn router(state: AppState) -> Router {
             "/checkout/subscriptions",
             post(create_checkout_subscription),
         )
-        .route("/checkout/sessions/{id}", get(get_checkout_session))
         .route("/me/subscription/cancel", post(cancel_subscription))
         .route("/me/subscription/change-plan", post(change_plan))
         .route("/billing/mercadopago/webhook", post(mercadopago_webhook))
         .route("/me/data-summary", get(get_data_summary))
+        .route("/me/analysis-data", delete(delete_analysis_data))
         .route("/me/operations/status", get(get_operations_status))
         .route("/me/operations/history", get(get_operations_history))
         .route("/me/org/config", get(get_org_config).put(update_org_config))
@@ -341,6 +343,8 @@ async fn auth_workos_callback(
         refresh_token_encrypted: None,
         gmail_access_token_encrypted: None,
         gmail_refresh_token_encrypted: None,
+        expires_at: Some(session_expires_at(now)),
+        revoked_at: None,
         created_at: now,
         updated_at: now,
     };
@@ -526,7 +530,68 @@ async fn gmail_connect_callback(
     Ok((StatusCode::FOUND, headers))
 }
 
-async fn auth_logout(State(state): State<AppState>) -> impl IntoResponse {
+async fn gmail_disconnect(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    let session = require_session(&state, &headers).await?;
+    let encrypted_token = session
+        .gmail_refresh_token_encrypted
+        .as_deref()
+        .or(session.gmail_access_token_encrypted.as_deref())
+        .or(session.refresh_token_encrypted.as_deref())
+        .or((!session.access_token_encrypted.trim().is_empty())
+            .then_some(session.access_token_encrypted.as_str()));
+
+    if let Some(encrypted_token) = encrypted_token {
+        let token =
+            decrypt_token(encrypted_token, &state.config.encryption_key).map_err(|error| {
+                tracing::error!(
+                    ?error,
+                    "no se pudo descifrar el token de Gmail para revocarlo"
+                );
+                ApiError::service_unavailable("No pudimos desconectar Gmail; inténtalo de nuevo")
+            })?;
+        let response = state
+            .http
+            .post("https://oauth2.googleapis.com/revoke")
+            .form(&[("token", token.as_str())])
+            .send()
+            .await
+            .map_err(|error| {
+                tracing::warn!(?error, "falló la revocación de Gmail");
+                ApiError::service_unavailable("No pudimos desconectar Gmail; inténtalo de nuevo")
+            })?;
+        if !response.status().is_success() && response.status().as_u16() != 400 {
+            tracing::warn!(status = %response.status(), "Google rechazó la revocación de Gmail");
+            return Err(ApiError::service_unavailable(
+                "No pudimos desconectar Gmail; inténtalo de nuevo",
+            ));
+        }
+    }
+
+    let now = Utc::now();
+    state
+        .storage
+        .disconnect_gmail(&session.google_account_email, now)
+        .await?;
+    let mut bundle = get_or_provision_org_config(&state, &session.google_account_email).await?;
+    bundle.mailbox.revoked_at = Some(now);
+    bundle.draft.schedule_report_policy.scheduler_enabled = false;
+    state.storage.upsert_org_config(&bundle).await?;
+    sync_schedule_config_from_policy(&state, &bundle).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn auth_logout(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    let mut session = require_session(&state, &headers).await?;
+    session.revoked_at = Some(Utc::now());
+    session.updated_at = Utc::now();
+    state.storage.upsert_user_session(&session).await?;
+
     let mut headers = HeaderMap::new();
     headers.insert(
         header::SET_COOKIE,
@@ -536,7 +601,7 @@ async fn auth_logout(State(state): State<AppState>) -> impl IntoResponse {
         ))
         .unwrap(),
     );
-    (StatusCode::NO_CONTENT, headers)
+    Ok((StatusCode::NO_CONTENT, headers))
 }
 
 async fn auth_me(
@@ -587,8 +652,7 @@ async fn get_public_plans() -> Json<Vec<BillingPlan>> {
 struct CreateCheckoutSubscriptionRequest {
     plan_id: String,
     /// Token de tarjeta generado por el SDK de Mercado Pago en el navegador
-    /// (checkout embebido). Si viene, la suscripción se crea autorizada sin
-    /// redirección. Si falta, se conserva el flujo con redirección (init_point).
+    /// (checkout embebido). Los datos PCI nunca pasan por la API.
     #[serde(default)]
     card_token_id: Option<String>,
     /// Email del pagador capturado por el Brick; puede diferir de la cuenta.
@@ -610,6 +674,12 @@ async fn create_checkout_subscription(
     let bundle = get_or_provision_org_config(&state, &session.google_account_email).await?;
     let plan_id = BillingPlanId::parse(&request.plan_id)
         .ok_or_else(|| ApiError::bad_request("plan_id inválido"))?;
+    let card_token_id = request
+        .card_token_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ApiError::bad_request("debes completar los datos de tu tarjeta"))?;
     let existing_subscription = state
         .storage
         .get_subscription_for_org(&bundle.org.id)
@@ -629,7 +699,6 @@ async fn create_checkout_subscription(
         status: CheckoutSessionStatus::Pending,
         provider: "mercadopago".to_string(),
         provider_subscription_id: None,
-        checkout_url: None,
         currency_id: "CLP".to_string(),
         amount_clp: plan.clp_monthly,
         usd_reference_monthly: plan.usd_reference_monthly,
@@ -638,54 +707,49 @@ async fn create_checkout_subscription(
         updated_at: now,
     };
 
-    if let Some(access_token) = &state.config.billing.mercadopago_access_token {
-        let card_token = request.card_token_id.as_deref();
-        let payer_email = request
-            .payer_email
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or(&checkout.account_email);
-        let mp = create_mercadopago_preapproval(
-            &state,
-            access_token,
-            &checkout,
-            card_token,
-            payer_email,
-        )
-        .await?;
-        checkout.provider_subscription_id = Some(mp.id.clone());
-        checkout.updated_at = Utc::now();
+    let access_token = state
+        .config
+        .billing
+        .mercadopago_access_token
+        .as_deref()
+        .ok_or_else(|| ApiError::service_unavailable("Mercado Pago no está configurado"))?;
+    let payer_email = request
+        .payer_email
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&checkout.account_email);
+    let mp =
+        create_mercadopago_preapproval(&state, access_token, &checkout, card_token_id, payer_email)
+            .await?;
+    checkout.provider_subscription_id = Some(mp.id.clone());
+    checkout.updated_at = Utc::now();
 
-        if matches!(
-            map_mercadopago_status(mp.status.as_deref()),
-            SubscriptionStatus::Active
-        ) {
-            // Checkout embebido: la tarjeta quedó autorizada. Activamos la
-            // suscripción de inmediato (el webhook luego la mantiene en sync),
-            // así el usuario no espera la confirmación asíncrona.
-            checkout.status = CheckoutSessionStatus::Activated;
-            let now = Utc::now();
-            let mut subscription = active_subscription_for_trial(
-                checkout.org_id.clone(),
-                checkout.plan_id.clone(),
-                Some(mp.id.clone()),
-                now,
-            );
-            // Planes con prueba quedan en Trialing; el resto, activos de una.
-            if !matches!(subscription.status, SubscriptionStatus::Trialing) {
-                subscription.status = SubscriptionStatus::Active;
-            }
-            state.storage.upsert_subscription(&subscription).await?;
-        } else {
-            // Sin token (o pago aún pendiente): flujo con redirección / espera.
-            checkout.status = CheckoutSessionStatus::ProviderCreated;
-            checkout.checkout_url = mp.init_point.or(mp.sandbox_init_point);
-        }
-    } else {
-        return Err(ApiError::service_unavailable(
-            "Mercado Pago no está configurado",
+    if !matches!(
+        map_mercadopago_status(mp.status.as_deref()),
+        SubscriptionStatus::Active
+    ) {
+        checkout.status = CheckoutSessionStatus::Failed;
+        state.storage.upsert_checkout_session(&checkout).await?;
+        return Err(ApiError::bad_request(
+            "Mercado Pago no pudo autorizar la tarjeta; revisa los datos e inténtalo otra vez",
         ));
     }
+
+    // La tarjeta ya quedó autorizada en el checkout embebido. El webhook mantiene
+    // el estado sincronizado, pero no hace falta redirigir ni bloquear a la persona.
+    checkout.status = CheckoutSessionStatus::Activated;
+    let now = Utc::now();
+    let mut subscription = active_subscription_for_trial(
+        checkout.org_id.clone(),
+        checkout.plan_id.clone(),
+        Some(mp.id),
+        now,
+    );
+    if !matches!(subscription.status, SubscriptionStatus::Trialing) {
+        subscription.status = SubscriptionStatus::Active;
+    }
+    state.storage.upsert_subscription(&subscription).await?;
 
     state.storage.upsert_checkout_session(&checkout).await?;
     Ok(Json(CheckoutSessionResponse { session: checkout }))
@@ -698,26 +762,6 @@ fn checkout_blocked_by_active_subscription(
     subscription.is_some_and(|subscription| {
         subscription_allows_access(Some(subscription), now) && !subscription.cancel_at_period_end
     })
-}
-
-async fn get_checkout_session(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> Result<Json<CheckoutSessionResponse>, ApiError> {
-    let session = require_session(&state, &headers).await?;
-    let checkout = state
-        .storage
-        .get_checkout_session(&id)
-        .await?
-        .ok_or(ApiError::not_found("checkout session not found"))?;
-    if !checkout
-        .account_email
-        .eq_ignore_ascii_case(&session.google_account_email)
-    {
-        return Err(ApiError::not_found("checkout session not found"));
-    }
-    Ok(Json(CheckoutSessionResponse { session: checkout }))
 }
 
 async fn cancel_subscription(
@@ -978,6 +1022,29 @@ struct DataActionStatus {
     reason: &'static str,
 }
 
+#[derive(Debug, Deserialize)]
+struct DeleteAnalysisDataRequest {
+    confirmation: String,
+}
+
+async fn delete_analysis_data(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<DeleteAnalysisDataRequest>,
+) -> Result<StatusCode, ApiError> {
+    let session = require_session(&state, &headers).await?;
+    if request.confirmation.trim() != "BORRAR MIS ANALISIS" {
+        return Err(ApiError::bad_request(
+            "escribe BORRAR MIS ANALISIS para confirmar",
+        ));
+    }
+    state
+        .storage
+        .delete_analysis_data(&session.google_account_email)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn get_data_summary(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1037,8 +1104,8 @@ async fn get_data_summary(
                 reason: "pending_backend_contract",
             },
             delete_analysis_data: DataActionStatus {
-                available: false,
-                reason: "pending_backend_contract",
+                available: true,
+                reason: "requires_confirmation",
             },
             delete_account_data: DataActionStatus {
                 available: false,
@@ -2529,20 +2596,18 @@ pub(crate) async fn execute_analysis(
             let prepared = &mut prepared_threads[*index];
             let decision = batch.decisions.get(&prepared.thread.gmail_thread_id);
             let should_escalate = match decision {
-                Some(decision) => {
+                Some(decision)
                     if !batch_decision_requires_detailed(
                         &prepared.thread,
                         decision,
                         auto_apply_threshold,
                         prepared.force_detailed,
-                    ) {
-                        apply_batch_decision(&mut prepared.thread, decision);
-                        false
-                    } else {
-                        true
-                    }
+                    ) =>
+                {
+                    apply_batch_decision(&mut prepared.thread, decision);
+                    false
                 }
-                None => true,
+                _ => true,
             };
             if should_escalate {
                 detailed_indexes.insert(*index);
@@ -3602,10 +3667,6 @@ async fn add_analysis_usage(
 struct MercadoPagoPreapprovalResponse {
     id: String,
     #[serde(default)]
-    init_point: Option<String>,
-    #[serde(default)]
-    sandbox_init_point: Option<String>,
-    #[serde(default)]
     status: Option<String>,
 }
 
@@ -3613,43 +3674,16 @@ async fn create_mercadopago_preapproval(
     state: &AppState,
     access_token: &str,
     checkout: &CheckoutSession,
-    card_token_id: Option<&str>,
+    card_token_id: &str,
     payer_email: &str,
 ) -> Result<MercadoPagoPreapprovalResponse, ApiError> {
-    let plan = plan_by_id(&checkout.plan_id);
-    let start_date = if plan.trial_days > 0 {
-        (Utc::now() + chrono::Duration::days(plan.trial_days as i64)).to_rfc3339()
-    } else {
-        Utc::now().to_rfc3339()
-    };
-    let mut body = json!({
-        "reason": format!("{} - Helpdesk Inspector", plan.name),
-        "external_reference": checkout.id,
-        "payer_email": payer_email,
-        "auto_recurring": {
-            "frequency": 1,
-            "frequency_type": "months",
-            "start_date": start_date,
-            "transaction_amount": checkout.amount_clp,
-            "currency_id": "CLP"
-        },
-        // Retorno del navegador -> web app (ruta NO proxyada por server.mjs).
-        "back_url": format!("{}/checkout-return?session_id={}", state.config.web_base_url, checkout.id),
-        // Webhook de eventos -> API.
-        "notification_url": format!("{}/billing/mercadopago/webhook", state.config.api_base_url),
-    });
-    if let Some(token) = card_token_id
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        // Checkout embebido: con tarjeta tokenizada la suscripción se autoriza
-        // sin redirección.
-        body["card_token_id"] = json!(token);
-        body["status"] = json!("authorized");
-    } else {
-        // Sin tarjeta: flujo clásico con redirección al init_point de Mercado Pago.
-        body["status"] = json!("pending");
-    }
+    let body = mercadopago_preapproval_body(
+        checkout,
+        payer_email,
+        card_token_id,
+        &state.config.web_base_url,
+        &state.config.api_base_url,
+    );
     state
         .http
         .post("https://api.mercadopago.com/preapproval")
@@ -3661,6 +3695,39 @@ async fn create_mercadopago_preapproval(
         .json_or_external_error("Mercado Pago preapproval")
         .await
         .map_err(ApiError::from)
+}
+
+fn mercadopago_preapproval_body(
+    checkout: &CheckoutSession,
+    payer_email: &str,
+    card_token_id: &str,
+    web_base_url: &str,
+    api_base_url: &str,
+) -> serde_json::Value {
+    let plan = plan_by_id(&checkout.plan_id);
+    let mut auto_recurring = json!({
+        "frequency": 1,
+        "frequency_type": "months",
+        "start_date": Utc::now().to_rfc3339(),
+        "transaction_amount": checkout.amount_clp,
+        "currency_id": "CLP"
+    });
+    if plan.trial_days > 0 {
+        auto_recurring["free_trial"] = json!({
+            "frequency": plan.trial_days,
+            "frequency_type": "days"
+        });
+    }
+    json!({
+        "reason": format!("{} - Helpdesk Inspector", plan.name),
+        "external_reference": checkout.id,
+        "payer_email": payer_email,
+        "auto_recurring": auto_recurring,
+        "back_url": web_base_url,
+        "notification_url": format!("{api_base_url}/billing/mercadopago/webhook"),
+        "card_token_id": card_token_id,
+        "status": "authorized"
+    })
 }
 
 async fn update_mercadopago_preapproval(
@@ -3705,7 +3772,7 @@ fn map_mercadopago_status(status: Option<&str>) -> SubscriptionStatus {
     match status.unwrap_or_default() {
         "authorized" => SubscriptionStatus::Active,
         "paused" => SubscriptionStatus::PastDue,
-        "cancelled" => SubscriptionStatus::Cancelled,
+        "canceled" | "cancelled" => SubscriptionStatus::Cancelled,
         _ => SubscriptionStatus::Pending,
     }
 }
@@ -3901,7 +3968,12 @@ async fn require_session(state: &AppState, headers: &HeaderMap) -> Result<UserSe
     if session.is_none() {
         tracing::warn!(session_id, "auth rejected: session not found in storage");
     }
-    session.ok_or(ApiError::unauthorized())
+    let session = session.ok_or(ApiError::unauthorized())?;
+    if !session_is_active(&session, Utc::now()) {
+        tracing::warn!(session_id, "auth rejected: session expired or revoked");
+        return Err(ApiError::unauthorized());
+    }
+    Ok(session)
 }
 
 fn extract_named_cookie(cookies: &str, expected_name: &str) -> Option<String> {
@@ -3996,6 +4068,23 @@ impl ApiError {
             details: None,
         }
     }
+
+    fn internal() -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: "Ocurrió un error inesperado. Inténtalo nuevamente.".to_string(),
+            details: None,
+        }
+    }
+
+    fn external_service_unavailable() -> Self {
+        Self {
+            status: StatusCode::BAD_GATEWAY,
+            message: "Un servicio externo no respondió correctamente. Inténtalo nuevamente."
+                .to_string(),
+            details: None,
+        }
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -4009,22 +4098,16 @@ impl IntoResponse for ApiError {
 }
 
 impl From<anyhow::Error> for ApiError {
-    fn from(error: anyhow::Error) -> Self {
-        Self {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: error.to_string(),
-            details: None,
-        }
+    fn from(_error: anyhow::Error) -> Self {
+        tracing::error!("la solicitud API falló con un error interno");
+        Self::internal()
     }
 }
 
 impl From<reqwest::Error> for ApiError {
-    fn from(error: reqwest::Error) -> Self {
-        Self {
-            status: StatusCode::BAD_GATEWAY,
-            message: error.to_string(),
-            details: None,
-        }
+    fn from(_error: reqwest::Error) -> Self {
+        tracing::warn!("un proveedor externo no respondió correctamente");
+        Self::external_service_unavailable()
     }
 }
 
@@ -4105,6 +4188,19 @@ mod tests {
         assert_eq!(retrieval_max_for(true, 5, 50), 15);
         // Plan de pago (sin tope): respeta el max_threads_per_run de policy.
         assert_eq!(retrieval_max_for(false, 999, 50), 50);
+    }
+
+    #[tokio::test]
+    async fn unexpected_errors_do_not_expose_internal_details() {
+        let response =
+            ApiError::from(anyhow::anyhow!("provider body contains secret-token")).into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body: serde_json::Value = response_json(response).await;
+        assert_eq!(
+            body["error"],
+            "Ocurrió un error inesperado. Inténtalo nuevamente."
+        );
+        assert!(!body.to_string().contains("secret-token"));
     }
 
     struct TestApp {
@@ -4195,6 +4291,8 @@ mod tests {
             refresh_token_encrypted: Some("refresh".to_string()),
             gmail_access_token_encrypted: Some("access".to_string()),
             gmail_refresh_token_encrypted: Some("refresh".to_string()),
+            expires_at: Some(session_expires_at(now)),
+            revoked_at: None,
             created_at: now,
             updated_at: now,
         }
@@ -4558,6 +4656,170 @@ mod tests {
         assert_eq!(body[2]["trial_days"], 0);
     }
 
+    #[tokio::test]
+    async fn logout_revokes_the_server_side_session() {
+        let fixture = seeded_app().await;
+        let response = fixture
+            .app
+            .clone()
+            .oneshot(request(
+                Method::POST,
+                "/auth/logout",
+                Some(&fixture.alice_cookie),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let response = fixture
+            .app
+            .oneshot(request(
+                Method::GET,
+                "/auth/me",
+                Some(&fixture.alice_cookie),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn mutations_reject_an_untrusted_origin() {
+        let fixture = seeded_app().await;
+        let response = fixture
+            .app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/auth/logout")
+                    .header(header::COOKIE, &fixture.alice_cookie)
+                    .header(header::ORIGIN, "https://untrusted.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn expired_sessions_are_rejected_server_side() {
+        let config = test_app_config();
+        let storage = MemoryStorage::default();
+        let mut expired = session("expired-session", "expired@example.com");
+        expired.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
+        storage.upsert_user_session(&expired).await.unwrap();
+        let cookie = signed_cookie(&expired.id, &config.session_secret);
+        let app = crate::build_app(config, Arc::new(storage));
+
+        let response = app
+            .oneshot(request(Method::GET, "/auth/me", Some(&cookie), None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn disconnect_gmail_removes_tokens_from_all_owner_sessions() {
+        let fixture = seeded_app().await;
+        let mut current = fixture
+            .storage
+            .get_user_session("alice-session")
+            .await
+            .unwrap()
+            .unwrap();
+        current.access_token_encrypted.clear();
+        current.refresh_token_encrypted = None;
+        current.gmail_access_token_encrypted = None;
+        current.gmail_refresh_token_encrypted = None;
+        fixture.storage.upsert_user_session(&current).await.unwrap();
+
+        let mut historical = session("alice-old", "alice@example.com");
+        historical.access_token_encrypted.clear();
+        historical.refresh_token_encrypted = None;
+        historical.gmail_access_token_encrypted = None;
+        historical.gmail_refresh_token_encrypted = None;
+        fixture
+            .storage
+            .upsert_user_session(&historical)
+            .await
+            .unwrap();
+
+        let response = fixture
+            .app
+            .oneshot(request(
+                Method::POST,
+                "/gmail/disconnect",
+                Some(&fixture.alice_cookie),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        for id in ["alice-session", "alice-old"] {
+            let session = fixture.storage.get_user_session(id).await.unwrap().unwrap();
+            assert!(!gmail_connected(&session));
+        }
+        let bundle = fixture
+            .storage
+            .get_org_config_for_user("alice@example.com")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(bundle.mailbox.revoked_at.is_some());
+        assert!(
+            fixture
+                .storage
+                .list_schedule_configs()
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|config| config.user_email == "alice@example.com")
+                .is_some_and(|config| !config.enabled)
+        );
+    }
+
+    #[test]
+    fn embedded_preapproval_uses_card_token_and_native_trial_without_redirect_url() {
+        let now = Utc::now();
+        let checkout = CheckoutSession {
+            id: "checkout-1".to_string(),
+            org_id: "org-1".to_string(),
+            account_email: "owner@example.com".to_string(),
+            plan_id: BillingPlanId::Pro,
+            status: CheckoutSessionStatus::Pending,
+            provider: "mercadopago".to_string(),
+            provider_subscription_id: None,
+            currency_id: "CLP".to_string(),
+            amount_clp: 29_990,
+            usd_reference_monthly: 29,
+            trial_days: 30,
+            created_at: now,
+            updated_at: now,
+        };
+
+        let body = mercadopago_preapproval_body(
+            &checkout,
+            "payer@example.com",
+            "card-token",
+            "https://mira.example",
+            "https://api.example",
+        );
+
+        assert_eq!(body["status"], "authorized");
+        assert_eq!(body["card_token_id"], "card-token");
+        assert_eq!(body["auto_recurring"]["free_trial"]["frequency"], 30);
+        assert_eq!(
+            body["auto_recurring"]["free_trial"]["frequency_type"],
+            "days"
+        );
+        assert_eq!(body["back_url"], "https://mira.example");
+        assert!(body.get("init_point").is_none());
+    }
+
     #[test]
     fn mercadopago_signature_uses_hmac_manifest() {
         let secret = "mp-webhook-secret";
@@ -4803,10 +5065,65 @@ mod tests {
         assert_eq!(body["stored_data"]["analysis_runs_count"], 1);
         assert_eq!(body["stored_data"]["threads_count"], 1);
         assert_eq!(body["stored_data"]["messages_count"], 1);
+        assert_eq!(body["actions"]["delete_analysis_data"]["available"], true);
         assert_eq!(body["actions"]["disconnect_gmail"]["available"], false);
         assert_eq!(
             body["actions"]["disconnect_gmail"]["reason"],
             "pending_backend_contract"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_analysis_data_requires_confirmation_and_only_deletes_the_owner_data() {
+        let fixture = seeded_app().await;
+        let rejected = fixture
+            .app
+            .clone()
+            .oneshot(request(
+                Method::DELETE,
+                "/me/analysis-data",
+                Some(&fixture.alice_cookie),
+                Some(json!({ "confirmation": "BORRAR" })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+
+        let response = fixture
+            .app
+            .oneshot(request(
+                Method::DELETE,
+                "/me/analysis-data",
+                Some(&fixture.alice_cookie),
+                Some(json!({ "confirmation": "BORRAR MIS ANALISIS" })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(
+            fixture
+                .storage
+                .list_analysis_runs("alice@example.com")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            fixture
+                .storage
+                .list_messages("run-alice", "thread-alice")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            fixture
+                .storage
+                .list_analysis_runs("bob@example.com")
+                .await
+                .unwrap()
+                .len(),
+            1
         );
     }
 
