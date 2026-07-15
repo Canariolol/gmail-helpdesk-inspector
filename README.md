@@ -44,6 +44,20 @@ through Amazon Bedrock when enabled by the organization policy.
 
 4. Open `http://127.0.0.1:5173`.
 
+For development with hot reload, install the Rust watcher once and start the
+three services directly on the host:
+
+```bash
+cargo install cargo-watch --locked
+./scripts/local-dev.sh
+```
+
+Use the same optional environment override as Docker when needed:
+
+```bash
+APP_ENV_OVERRIDE=.env.sandbox.local ./scripts/local-dev.sh
+```
+
 ## Firestore Notes
 
 Runtime storage targets Firestore directly. The API supports three Firestore
