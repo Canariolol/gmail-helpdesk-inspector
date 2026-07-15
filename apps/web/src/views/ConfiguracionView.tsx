@@ -50,6 +50,8 @@ type WizardDraft = {
   validSignalKeywordsText: string;
   aiEnabled: boolean;
   aiConsentChecked: boolean;
+  maxAuditMessages: number;
+  maxBodyCharsPerMessage: number;
   schedulerEnabled: boolean;
   reportRecipientsText: string;
   reportMode: "metrics_only" | "metrics_and_review_items";
@@ -82,6 +84,8 @@ function initDraft(config: OrgConfig | null): WizardDraft {
       validSignalKeywordsText: "",
       aiEnabled: true,
       aiConsentChecked: true,
+      maxAuditMessages: 14,
+      maxBodyCharsPerMessage: 280,
       schedulerEnabled: false,
       reportRecipientsText: "",
       reportMode: "metrics_only",
@@ -100,6 +104,8 @@ function initDraft(config: OrgConfig | null): WizardDraft {
     validSignalKeywordsText: (draft.analysis_policy.valid_signal_keywords ?? []).join("\n"),
     aiEnabled: draft.ai_policy.enabled,
     aiConsentChecked: draft.ai_policy.enabled,
+    maxAuditMessages: draft.ai_policy.max_audit_messages,
+    maxBodyCharsPerMessage: draft.ai_policy.max_body_chars_per_message,
     schedulerEnabled: draft.schedule_report_policy.scheduler_enabled,
     reportRecipientsText: draft.schedule_report_policy.report_recipients.join("\n"),
     reportMode: draft.schedule_report_policy.report_content.mode,
@@ -131,8 +137,8 @@ function buildPutBody(d: WizardDraft, finalize = false) {
       consent_confirmed: d.aiConsentChecked,
       auto_apply_threshold: 0.92,
       manual_review_threshold: 0.72,
-      max_audit_messages: 14,
-      max_body_chars_per_message: 280,
+      max_audit_messages: d.maxAuditMessages,
+      max_body_chars_per_message: d.maxBodyCharsPerMessage,
     },
     schedule_report_policy: {
       scheduler_enabled: d.schedulerEnabled,
@@ -364,11 +370,10 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
         <div className="card" style={{ display: "grid", gap: 12 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <AlertTriangle size={20} color="var(--chip-amber-fg)" />
-            <strong>Backend de configuración no disponible</strong>
+            <strong>No pudimos cargar la configuración</strong>
           </div>
           <p style={{ color: "var(--text-muted)", fontSize: "var(--fs-sm)" }}>
-            El endpoint <code>/me/org/config</code> aún no está implementado. Los análisis siguen funcionando
-            en modo legacy desde la vista Resumen.
+            Revisa tu conexión e inténtalo nuevamente.
           </p>
         </div>
       </div>
@@ -602,16 +607,16 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
               <div className="wizard-ai-card">
                 <h4>¿Qué datos procesa?</h4>
                 <ul>
-                  <li>Fragmento del asunto y primeras líneas (máx. 280 caracteres por mensaje)</li>
-                  <li>Hasta 14 mensajes por hilo</li>
+                  <li>Participantes, fecha, asunto y texto del mensaje reducido a un máximo de {draft.maxBodyCharsPerMessage} caracteres</li>
+                  <li>Hasta {draft.maxAuditMessages} mensajes por hilo</li>
                   <li>
-                    <strong>NO</strong> se envían cuerpos completos
+                    Un mensaje corto puede incluirse completo dentro de ese límite; los excerpts pueden contener texto sensible
                   </li>
                   <li>
-                    <strong>NO</strong> se procesan adjuntos; los excerpts pueden contener texto sensible si está en el correo
+                    <strong>NO</strong> se procesan adjuntos, imágenes ni headers completos
                   </li>
                 </ul>
-                <p>Procesado por el proveedor IA configurado. Puedes desactivarla en cualquier momento desde esta pantalla.</p>
+                <p>Procesado por Amazon Bedrock. Puedes desactivarla en cualquier momento desde esta pantalla.</p>
               </div>
               <label className="checkline" style={{ cursor: "pointer" }}>
                 <input
@@ -628,12 +633,12 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
               {draft.aiEnabled ? (
                 <p className="wizard-help" style={{ fontSize: "var(--fs-sm)" }}>
                   Mientras esté activa, fragmentos minimizados de tus hilos de soporte se procesan mediante el
-                  proveedor IA configurado para clasificación automática. El cambio aplica al próximo análisis.
+                  proveedor Amazon Bedrock para clasificación automática. El cambio aplica al próximo análisis.
                 </p>
               ) : (
                 <p className="wizard-help">
                   Desactivaste la auditoría IA. Los hilos con clasificación incierta irán a revisión manual.
-                  Puedes reactivarla cuando quieras; el cambio aplica al próximo análisis.
+                  Puedes reactivarla cuando quieras; al hacerlo confirmas su uso para los próximos análisis.
                 </p>
               )}
             </div>

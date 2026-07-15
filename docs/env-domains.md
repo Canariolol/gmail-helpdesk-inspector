@@ -27,6 +27,7 @@ Caddy recibe el trafico del tunnel y enruta:
 URLs sandbox a registrar:
 
 - WorkOS callback: `https://mira-dev.ninfasolutions.com/auth/workos/callback`
+- WorkOS webhook: `https://mira-dev.ninfasolutions.com/auth/workos/webhook`
 - Google OAuth redirect: `https://mira-dev.ninfasolutions.com/gmail/connect/callback`
 - Mercado Pago webhook sandbox: `https://mira-dev.ninfasolutions.com/billing/mercadopago/webhook`
 - Mercado Pago public key/access token: credenciales `TEST-*`.
@@ -55,6 +56,17 @@ VITE_MERCADOPAGO_PUBLIC_KEY=<public-key-de-mercado-pago>
 API_PROXY_TARGET=https://<ghmi-api-run-app-url>
 BILLING_ENFORCEMENT_ENABLED=true
 ```
+
+`WORKOS_WEBHOOK_SECRET` se inyecta como secreto (no en este bloque). Registra
+en WorkOS el endpoint directo de API y únicamente los eventos `user.deleted` y
+`session.revoked`:
+
+```text
+https://<ghmi-api-run-app-url>/auth/workos/webhook
+```
+
+Tras desplegar, usa «Send test event» de WorkOS para ambos eventos y confirma
+en logs `operation=workos_webhook`; no envíes payloads ni secretos a logs.
 
 Webhook live de Mercado Pago:
 

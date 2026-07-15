@@ -7,6 +7,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
+    app_env: str = Field(default="development", alias="APP_ENV")
     aws_bearer_token_bedrock: str = Field(default="", alias="AWS_BEARER_TOKEN_BEDROCK")
     aws_region: str = Field(default="us-east-1", alias="AWS_REGION")
     bedrock_model_id: str = Field(

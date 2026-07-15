@@ -73,6 +73,10 @@ export function AyudaView() {
           <li>El permiso de Gmail usado por la aplicación es exclusivamente <code>gmail.readonly</code>.</li>
           <li>Mira no envía, etiqueta, archiva, edita ni elimina correos.</li>
           <li>Los cuerpos completos se usan solo durante el análisis/auditoría y no se persisten en Firestore.</li>
+          <li>
+            La auditoría IA viene activa para mejorar la clasificación. Puedes desactivarla desde
+            <em> Configuración</em>; los casos inciertos pasarán a revisión manual y el cambio se aplicará al próximo análisis.
+          </li>
           <li>Las métricas guardan trazabilidad: puedes revisar qué hilos componen cada número.</li>
         </ul>
       </section>

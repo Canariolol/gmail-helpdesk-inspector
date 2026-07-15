@@ -1,7 +1,8 @@
-# Privacy
+# Privacy — borrador técnico
 
-This MVP is designed for private/local use against a Gmail account controlled by
-the operator.
+Este documento describe el comportamiento técnico actual de Mira Helpdesk. No
+es todavía una política de privacidad publicada: faltan responsable, contacto,
+retención y revisión legal.
 
 ## Gmail Access
 
@@ -22,16 +23,22 @@ Firestore stores normalized metadata only:
 - dates
 - participants
 - subject and snippets
-- selected headers
+- `Auto-Submitted` cuando existe, para detectar mensajes automáticos
 - classification decisions and reasons
 - audit findings
 - aggregate metrics and AI token usage
 
-Full email bodies are fetched temporarily during analysis and AI audit, sent as
-plain text to the worker, and discarded after the audit response is processed.
+Los cuerpos se obtienen temporalmente durante el análisis. Para auditoría IA se
+envían participantes, fecha, asunto y texto limitado por mensaje; un mensaje
+corto puede caber completo dentro de ese límite. Luego se descartan tras la
+respuesta de auditoría y no se persisten como cuerpos completos.
 
 ## AI Audit
 
 The Bedrock worker receives text-only thread content. Attachments, images,
 base64 payloads, and multimodal artifacts are intentionally excluded.
 
+AI auditing is enabled by default for a new organization. It can be disabled
+from Configuration; when it is disabled, ambiguous threads remain available for
+manual review. Re-enabling it requires explicit confirmation and applies to
+future analyses.

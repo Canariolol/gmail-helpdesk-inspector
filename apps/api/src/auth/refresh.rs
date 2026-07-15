@@ -28,7 +28,7 @@ pub async fn refresh_google_access_token(
         ])
         .send()
         .await
-        .map_err(|error| anyhow!("Google token refresh request failed: {error}"))?;
+        .map_err(|_| anyhow!("Google token refresh request failed"))?;
     let status = response.status().as_u16();
     let body = response.text().await.unwrap_or_default();
     classify_refresh_response(status, &body)
@@ -41,7 +41,7 @@ pub(crate) fn classify_refresh_response(
     if (200..300).contains(&status) {
         return serde_json::from_str(body).map_err(|error| {
             RefreshError::Other(anyhow!(
-                "Google token refresh returned invalid JSON: {error}; body: {body}"
+                "Google token refresh returned invalid JSON: {error}"
             ))
         });
     }
@@ -52,7 +52,7 @@ pub(crate) fn classify_refresh_response(
         return Err(RefreshError::InvalidGrant);
     }
     Err(RefreshError::Other(anyhow!(
-        "Google token refresh failed with {status}: {body}"
+        "Google token refresh failed with {status}"
     )))
 }
 
@@ -92,13 +92,13 @@ mod tests {
     }
 
     #[test]
-    fn other_failures_keep_status_and_body() {
-        let error = classify_refresh_response(500, "boom").unwrap_err();
+    fn other_failures_keep_status_without_provider_body() {
+        let error = classify_refresh_response(500, "provider body with secret-token").unwrap_err();
         match error {
             RefreshError::Other(inner) => {
                 let message = inner.to_string();
                 assert!(message.contains("500"));
-                assert!(message.contains("boom"));
+                assert!(!message.contains("secret-token"));
             }
             RefreshError::InvalidGrant => panic!("expected Other"),
         }

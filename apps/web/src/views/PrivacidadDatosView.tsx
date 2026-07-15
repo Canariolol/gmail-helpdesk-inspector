@@ -30,7 +30,8 @@ function formatDate(iso: string | null): string {
 }
 
 function humanizeReason(reason: string): string {
-  if (reason === "pending_backend_contract") return "Contrato backend pendiente";
+  if (reason === "available_in_account") return "Disponible en Cuenta";
+  if (reason === "account_deletion_policy_pending") return "El borrado de cuenta aún está en definición";
   if (reason === "requires_confirmation") return "Requiere confirmación";
   return reason.split("_").join(" ");
 }
@@ -191,12 +192,16 @@ export function PrivacidadDatosView() {
           <DataRow label="Minimización" value={data.privacy.data_minimization_mode} />
           <DataRow label="Auditoría IA" value={<BoolBadge value={data.privacy.ai_enabled} trueLabel="Activa" falseLabel="Desactivada" />} />
           <DataRow label="Consentimiento IA" value={formatDate(data.privacy.ai_consent_granted_at)} />
-          <DataRow label="Retención" value={`${data.privacy.retention_days} días`} />
+          <DataRow label="Plazo configurado" value={`${data.privacy.retention_days} días`} />
           <DataRow label="Reportes" value={data.privacy.report_mode === "metrics_only" ? "Solo métricas" : "Métricas + elementos en revisión"} />
         </div>
         <p className="privacy-note">
           Los cuerpos completos no se persisten como fuente de datos de producto. Los excerpts usados para IA se minimizan
           según la política vigente del análisis.
+        </p>
+        <p className="privacy-note warning">
+          El plazo configurado todavía no activa un borrado automático. Puedes solicitar el borrado de tus análisis desde
+          esta pantalla; el borrado de cuenta sigue en definición.
         </p>
       </section>
 
@@ -210,14 +215,14 @@ export function PrivacidadDatosView() {
       <section className="card privacy-panel">
         <h3><Trash2 size={18} /> Acciones de datos</h3>
         <p className="privacy-note">
-          Estas acciones están visibles para transparencia, pero se mantienen deshabilitadas hasta aprobar el contrato
-          backend, efectos exactos y confirmaciones de seguridad.
+          Las acciones disponibles requieren confirmación. El borrado de cuenta sigue deshabilitado hasta definir sus
+          efectos, retención y protecciones de seguridad.
         </p>
         <div className="privacy-actions">
           <DisabledActionCard
             icon={<Unplug size={19} />}
             title="Desconectar Gmail"
-            description="Revocar acceso OAuth y detener nuevos análisis automáticos. No se ejecuta todavía desde esta pantalla."
+            description="Revoca acceso OAuth y detiene nuevos análisis automáticos. Esta acción se realiza desde Cuenta."
             reason={data.actions.disconnect_gmail.reason}
             tone="warning"
           />

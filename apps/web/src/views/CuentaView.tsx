@@ -1,4 +1,4 @@
-import { ArrowUpRight, Ban, Check, RefreshCw, ShieldAlert } from "lucide-react";
+import { ArrowUpRight, Ban, Check, LogOut, RefreshCw, ShieldAlert } from "lucide-react";
 import { useState } from "react";
 import type { AccountStatus, BillingPlan, BillingPlanId, SubscriptionStatus } from "../api/types";
 import { isBlockedStatus } from "./access/accessState";
@@ -18,6 +18,8 @@ interface CuentaViewProps {
   cancelPending: boolean;
   onDisconnectGmail: () => void;
   gmailDisconnectPending: boolean;
+  onLogoutAll: () => void;
+  logoutAllPending: boolean;
   error: string | null;
 }
 
@@ -62,10 +64,13 @@ export function CuentaView({
   cancelPending,
   onDisconnectGmail,
   gmailDisconnectPending,
+  onLogoutAll,
+  logoutAllPending,
   error,
 }: CuentaViewProps) {
   const [confirmingCancel, setConfirmingCancel] = useState(false);
   const [confirmingGmailDisconnect, setConfirmingGmailDisconnect] = useState(false);
+  const [confirmingLogoutAll, setConfirmingLogoutAll] = useState(false);
   const entitlement = account.entitlement;
   const planName = entitlement.plan?.name ?? null;
   const planId = entitlement.plan?.id ?? null;
@@ -220,6 +225,40 @@ export function CuentaView({
             )}
           </div>
         )}
+
+        <div className="cuenta-plan">
+          <p className="cuenta-plan-name">Sesiones</p>
+          {!confirmingLogoutAll ? (
+            <button
+              type="button"
+              className="btn-ghost"
+              onClick={() => setConfirmingLogoutAll(true)}
+            >
+              <LogOut size={16} /> Cerrar todas las sesiones
+            </button>
+          ) : (
+            <div className="cuenta-confirm">
+              <span>Se cerrará esta sesión y cualquier otra sesión web activa. ¿Continuar?</span>
+              <div className="cuenta-confirm-actions">
+                <button
+                  type="button"
+                  className="btn-ghost"
+                  disabled={logoutAllPending}
+                  onClick={onLogoutAll}
+                >
+                  {logoutAllPending ? "Cerrando…" : "Sí, cerrar todas"}
+                </button>
+                <button
+                  type="button"
+                  className="access-text-btn"
+                  onClick={() => setConfirmingLogoutAll(false)}
+                >
+                  Volver
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
       </section>
 
       {blocked && (

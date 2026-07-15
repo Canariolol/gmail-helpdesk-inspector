@@ -52,7 +52,7 @@ export const ADVANTAGES: Advantage[] = [
     id: "ia",
     Icon: Sparkles,
     title: "Ninfa, tu auditora con IA",
-    body: "Ninfa marca los casos dudosos por ti. La activas solo si quieres y la última palabra siempre es tuya.",
+    body: "Ninfa marca los casos dudosos por ti. Viene activada para mejorar la clasificación; puedes desactivarla cuando quieras y la última palabra siempre es tuya.",
   },
   {
     id: "friccion",

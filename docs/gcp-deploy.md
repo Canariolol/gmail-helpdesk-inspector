@@ -9,36 +9,38 @@ export API_SERVICE="ghmi-api"
 export WORKER_SERVICE="ghmi-ai-worker"
 export WEB_SERVICE="ghmi-web"
 export IMAGE_BASE="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${ARTIFACT_REPO}"
+export IMAGE_TAG="${IMAGE_TAG:-$(git rev-parse --short=12 HEAD)}"
 
-printf 'GCP_PROJECT_ID=%s\nGCP_REGION=%s\nAPI_SERVICE=%s\nIMAGE_BASE=%s\n' \
-  "$GCP_PROJECT_ID" "$GCP_REGION" "$API_SERVICE" "$IMAGE_BASE"
+printf 'GCP_PROJECT_ID=%s\nGCP_REGION=%s\nAPI_SERVICE=%s\nIMAGE_BASE=%s\nIMAGE_TAG=%s\n' \
+  "$GCP_PROJECT_ID" "$GCP_REGION" "$API_SERVICE" "$IMAGE_BASE" "$IMAGE_TAG"
 
 : "${GCP_PROJECT_ID:?Falta GCP_PROJECT_ID}"
 : "${IMAGE_BASE:?Falta IMAGE_BASE}"
+: "${IMAGE_TAG:?Falta IMAGE_TAG}"
 : "${API_SERVICE:?Falta API_SERVICE}"
 
 ## API
-docker build -f apps/api/Dockerfile -t "${IMAGE_BASE}/api:latest" .
-docker push "${IMAGE_BASE}/api:latest"
+docker build -f apps/api/Dockerfile -t "${IMAGE_BASE}/api:${IMAGE_TAG}" .
+docker push "${IMAGE_BASE}/api:${IMAGE_TAG}"
 gcloud run deploy "$API_SERVICE" \
-  --image "${IMAGE_BASE}/api:latest" \
+  --image "${IMAGE_BASE}/api:${IMAGE_TAG}" \
   --region "$GCP_REGION"
 
 ## AI worker, solo si cambió apps/ai-worker
-docker build -f apps/ai-worker/Dockerfile -t "${IMAGE_BASE}/ai-worker:latest" .
-docker push "${IMAGE_BASE}/ai-worker:latest"
+docker build -f apps/ai-worker/Dockerfile -t "${IMAGE_BASE}/ai-worker:${IMAGE_TAG}" .
+docker push "${IMAGE_BASE}/ai-worker:${IMAGE_TAG}"
 gcloud run deploy "$WORKER_SERVICE" \
-  --image "${IMAGE_BASE}/ai-worker:latest" \
+  --image "${IMAGE_BASE}/ai-worker:${IMAGE_TAG}" \
   --region "$GCP_REGION"
 
 ## Web, solo si cambió apps/web
 docker build -f apps/web/Dockerfile \
   --build-arg "VITE_API_BASE_URL=" \
   --build-arg "VITE_MERCADOPAGO_PUBLIC_KEY=${VITE_MERCADOPAGO_PUBLIC_KEY}" \
-  -t "${IMAGE_BASE}/web:latest" .
-docker push "${IMAGE_BASE}/web:latest"
+  -t "${IMAGE_BASE}/web:${IMAGE_TAG}" .
+docker push "${IMAGE_BASE}/web:${IMAGE_TAG}"
 gcloud run deploy "$WEB_SERVICE" \
-  --image "${IMAGE_BASE}/web:latest" \
+  --image "${IMAGE_BASE}/web:${IMAGE_TAG}" \
   --region "$GCP_REGION"
 
 ## Si agrego env vars
@@ -160,23 +162,24 @@ gcloud secrets list --filter='name:(google-client-secret OR app-encryption-key O
 
 ```bash
 export IMAGE_BASE="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${ARTIFACT_REPO}"
+export IMAGE_TAG="${IMAGE_TAG:-$(git rev-parse --short=12 HEAD)}"
 
 gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev"
 
 docker build -f apps/ai-worker/Dockerfile \
-  -t "${IMAGE_BASE}/ai-worker:latest" .
-docker push "${IMAGE_BASE}/ai-worker:latest"
+  -t "${IMAGE_BASE}/ai-worker:${IMAGE_TAG}" .
+docker push "${IMAGE_BASE}/ai-worker:${IMAGE_TAG}"
 
 docker build -f apps/api/Dockerfile \
-  -t "${IMAGE_BASE}/api:latest" .
-docker push "${IMAGE_BASE}/api:latest"
+  -t "${IMAGE_BASE}/api:${IMAGE_TAG}" .
+docker push "${IMAGE_BASE}/api:${IMAGE_TAG}"
 ```
 
 ## 5. Desplegar worker privado
 
 ```bash
 gcloud run deploy "$WORKER_SERVICE" \
-  --image "${IMAGE_BASE}/ai-worker:latest" \
+  --image "${IMAGE_BASE}/ai-worker:${IMAGE_TAG}" \
   --region "$GCP_REGION" \
   --service-account "$RUN_SA" \
   --no-allow-unauthenticated \
@@ -201,7 +204,7 @@ Primer despliegue para obtener URL:
 
 ```bash
 gcloud run deploy "$API_SERVICE" \
-  --image "${IMAGE_BASE}/api:latest" \
+  --image "${IMAGE_BASE}/api:${IMAGE_TAG}" \
   --region "$GCP_REGION" \
   --service-account "$RUN_SA" \
   --allow-unauthenticated \
@@ -228,20 +231,27 @@ gcloud run services update "$API_SERVICE" \
 docker build -f apps/web/Dockerfile \
   --build-arg "VITE_API_BASE_URL=" \
   --build-arg "VITE_MERCADOPAGO_PUBLIC_KEY=${VITE_MERCADOPAGO_PUBLIC_KEY}" \
-  -t "${IMAGE_BASE}/web:latest" .
-docker push "${IMAGE_BASE}/web:latest"
+  -t "${IMAGE_BASE}/web:${IMAGE_TAG}" .
+docker push "${IMAGE_BASE}/web:${IMAGE_TAG}"
 ```
 
 Despliega:
 
 ```bash
 gcloud run deploy "$WEB_SERVICE" \
-  --image "${IMAGE_BASE}/web:latest" \
+  --image "${IMAGE_BASE}/web:${IMAGE_TAG}" \
   --region "$GCP_REGION" \
   --allow-unauthenticated \
   --set-env-vars "API_PROXY_TARGET=${API_URL}"
 
 export WEB_URL="$(gcloud run services describe "$WEB_SERVICE" --region "$GCP_REGION" --format='value(status.url)')"
+```
+
+Para asociar una revisión al commit desplegado, inspecciona la imagen versionada:
+
+```bash
+gcloud run revisions list --service "$WEB_SERVICE" --region "$GCP_REGION" \
+  --format='table(metadata.name,spec.containers[0].image)'
 ```
 
 Actualiza la API con la URL final del frontend y el redirect que pasa por el proxy de la web:
@@ -333,11 +343,11 @@ Reconstruye y redespliega la web. Para evitar cookies third-party entre dos domi
 docker build -f apps/web/Dockerfile \
   --build-arg "VITE_API_BASE_URL=" \
   --build-arg "VITE_MERCADOPAGO_PUBLIC_KEY=${VITE_MERCADOPAGO_PUBLIC_KEY}" \
-  -t "${IMAGE_BASE}/web:latest" .
-docker push "${IMAGE_BASE}/web:latest"
+  -t "${IMAGE_BASE}/web:${IMAGE_TAG}" .
+docker push "${IMAGE_BASE}/web:${IMAGE_TAG}"
 
 gcloud run deploy "$WEB_SERVICE" \
-  --image "${IMAGE_BASE}/web:latest" \
+  --image "${IMAGE_BASE}/web:${IMAGE_TAG}" \
   --region "$GCP_REGION" \
   --allow-unauthenticated \
   --set-env-vars "API_PROXY_TARGET=${API_URL}"

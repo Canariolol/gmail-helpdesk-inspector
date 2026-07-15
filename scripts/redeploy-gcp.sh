@@ -173,6 +173,9 @@ if [[ "$target" == "web" || "$target" == "all" ]] && [[ -z "${VITE_MERCADOPAGO_P
   exit 1
 fi
 
+echo "Running pre-deploy checks..."
+./scripts/check-all.sh
+
 gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
 
 case "$target" in

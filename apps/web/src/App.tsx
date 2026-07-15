@@ -280,6 +280,11 @@ export function App() {
     },
   });
 
+  const logoutAllSessions = useMutation({
+    mutationFn: () => api<void>("/auth/logout-all", { method: "POST" }),
+    onSuccess: () => location.reload(),
+  });
+
   const filterPresets = useQuery({
     queryKey: ["filter-presets"],
     queryFn: () => api<FilterPreset[]>("/me/filter-presets"),
@@ -545,10 +550,13 @@ export function App() {
             cancelPending={cancelSubscription.isPending}
             onDisconnectGmail={() => disconnectGmail.mutate()}
             gmailDisconnectPending={disconnectGmail.isPending}
+            onLogoutAll={() => logoutAllSessions.mutate()}
+            logoutAllPending={logoutAllSessions.isPending}
             error={
               checkout.error?.message ??
               cancelSubscription.error?.message ??
               disconnectGmail.error?.message ??
+              logoutAllSessions.error?.message ??
               null
             }
           />

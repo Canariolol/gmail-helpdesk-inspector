@@ -1,6 +1,27 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Credencial de la casilla, independiente de cualquier sesión web. Una misma
+/// conexión permite análisis programados aunque la persona cierre sus sesiones.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GmailConnection {
+    pub owner_email: String,
+    pub gmail_account_email: String,
+    pub access_token_encrypted: String,
+    #[serde(default)]
+    pub refresh_token_encrypted: Option<String>,
+    pub connected_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
+pub fn gmail_connection_is_active(connection: Option<&GmailConnection>) -> bool {
+    connection.is_some_and(|connection| {
+        connection.revoked_at.is_none() && !connection.access_token_encrypted.trim().is_empty()
+    })
+}
+
 /// Metadata de la cuenta de Gmail leída AL CONECTAR (no al analizar): catálogo de
 /// etiquetas, alias "enviar como", recuento de filtros y perfil. Todo se obtiene
 /// bajo el scope `gmail.readonly` ya consentido.

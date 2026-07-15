@@ -1,4 +1,5 @@
 import json
+from uuid import UUID
 
 import httpx
 import pytest
@@ -84,6 +85,55 @@ def batch_payload() -> BatchAuditRequest:
             ],
         }
     )
+
+
+@pytest.mark.asyncio
+async def test_worker_redacts_bedrock_errors_and_returns_request_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ai_worker import main
+
+    async def fail_bedrock(*_args: object, **_kwargs: object):
+        raise RuntimeError("provider body contains secret-token")
+
+    monkeypatch.setattr(main, "audit_with_bedrock", fail_bedrock)
+    main.app.state.bedrock_client = object()
+    transport = httpx.ASGITransport(app=main.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/audit/thread", json=payload().model_dump(mode="json")
+        )
+
+    assert response.status_code == 502
+    assert response.json() == {"detail": "AI worker unavailable"}
+    assert "secret-token" not in response.text
+    UUID(response.headers["x-request-id"])
+
+
+@pytest.mark.asyncio
+async def test_worker_validation_error_does_not_echo_request_payload() -> None:
+    from ai_worker.main import app
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/audit/thread", json={"thread": "secret-token"})
+
+    assert response.status_code == 422
+    assert response.json() == {"detail": "Invalid audit request"}
+    assert "secret-token" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_worker_uses_only_valid_forwarded_request_ids() -> None:
+    from ai_worker.main import app
+
+    forwarded = "a0b7c4d2-83ef-4d23-bd0f-9f6a1e659edb"
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/health", headers={"x-request-id": forwarded})
+        invalid = await client.get("/health", headers={"x-request-id": "not-a-uuid"})
+
+    assert response.headers["x-request-id"] == forwarded
+    assert invalid.headers["x-request-id"] != "not-a-uuid"
+    UUID(invalid.headers["x-request-id"])
 
 
 @pytest.mark.asyncio

@@ -15,6 +15,7 @@ use crate::{
     },
     billing::subscription_allows_access,
     http::{AppState, execute_analysis, mark_run_failed},
+    mailbox::gmail_connection_is_active,
     policies::{ReportMode, retention_expires_at, setup_state},
     report::{
         ReportMailer, ResendMailer,
@@ -138,9 +139,9 @@ pub fn spawn(state: AppState) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mailer = match ResendMailer::from_config(&state.config.report) {
             Ok(mailer) => mailer,
-            Err(error) => {
+            Err(_) => {
                 tracing::error!(
-                    ?error,
+                    operation = "scheduler_start",
                     "scheduler interno desactivado: mailer mal configurado"
                 );
                 return;
@@ -158,12 +159,28 @@ pub fn spawn(state: AppState) -> tokio::task::JoinHandle<()> {
                                 if reason == "fuera de horario programado"
                         )
                     }) {
-                        let summary = serde_json::to_string(&outcomes).unwrap_or_default();
-                        tracing::info!(%summary, "tick del análisis programado completado");
+                        let completed = outcomes
+                            .iter()
+                            .filter(|outcome| matches!(outcome, ScheduledOutcome::Completed { .. }))
+                            .count();
+                        let failed = outcomes
+                            .iter()
+                            .filter(|outcome| matches!(outcome, ScheduledOutcome::Failed { .. }))
+                            .count();
+                        let skipped = outcomes.len() - completed - failed;
+                        tracing::info!(
+                            completed,
+                            failed,
+                            skipped,
+                            "tick del análisis programado completado"
+                        );
                     }
                 }
-                Err(error) => {
-                    tracing::error!(?error, "tick del análisis programado falló");
+                Err(_) => {
+                    tracing::error!(
+                        operation = "scheduler_tick",
+                        "tick del análisis programado falló"
+                    );
                 }
             }
         }
@@ -191,7 +208,10 @@ async fn load_or_seed_configs(state: &AppState) -> anyhow::Result<Vec<ScheduleCo
         updated_at: Utc::now(),
     };
     state.storage.upsert_schedule_config(&seeded).await?;
-    tracing::info!(user_email = %seeded.user_email, "scheduleConfig sembrado desde variables de entorno");
+    tracing::info!(
+        operation = "scheduler_seed",
+        "scheduleConfig sembrado desde variables de entorno"
+    );
     Ok(vec![seeded])
 }
 
@@ -209,18 +229,18 @@ async fn run_for_user(
             };
         }
         Ok(None) => {}
-        Err(error) => {
+        Err(_) => {
             return ScheduledOutcome::Failed {
                 user_email: config.user_email.clone(),
-                error: format!("no se pudo registrar el estado del análisis: {error}"),
+                error: "scheduler_state_persist_failed".to_string(),
                 notice_sent: false,
             };
         }
     }
     match analyze_and_report(state, mailer, config, window).await {
         Ok(outcome) => outcome,
-        Err(error) => {
-            let message = error.to_string();
+        Err(_) => {
+            let message = "scheduled_analysis_failed".to_string();
             store_state(
                 state,
                 config,
@@ -241,49 +261,41 @@ async fn run_for_user(
     }
 }
 
-/// Devuelve Some(motivo) si la ventana ya está cubierta; si no, escribe el
-/// claim `Running`. Lectura-verificación-escritura sin transacción: suficiente
-/// para una instancia única; con múltiples instancias el hardening sería la
-/// precondición `currentDocument` de Firestore.
+/// Reserva atómicamente la ventana o devuelve por qué otra ejecución ya la
+/// cubrió. Firestore compara `updateTime` al escribir, por lo que dos
+/// instancias no pueden obtener el mismo claim.
 async fn check_idempotency(
     state: &AppState,
     config: &ScheduleConfig,
     window: &AnalysisWindow,
 ) -> anyhow::Result<Option<String>> {
-    if let Some(existing) = state.storage.get_schedule_state(&config.user_email).await? {
-        let same_window = existing.window_date_from == window.date_from
-            && existing.window_date_to == window.date_to;
-        if same_window {
-            match existing.status {
-                ScheduleRunStatus::Completed => {
-                    return Ok(Some("ventana ya analizada".to_string()));
-                }
-                ScheduleRunStatus::Running
-                    if Utc::now() - existing.started_at
-                        < chrono::Duration::minutes(CLAIM_TTL_MINUTES) =>
-                {
-                    return Ok(Some("análisis en curso".to_string()));
-                }
-                _ => {}
-            }
-        }
-    }
     let now = Utc::now();
-    state
+    let claim = state
         .storage
-        .upsert_schedule_state(&ScheduleState {
-            user_email: config.user_email.clone(),
-            window_date_from: window.date_from.clone(),
-            window_date_to: window.date_to.clone(),
-            status: ScheduleRunStatus::Running,
-            run_id: None,
-            email_sent: false,
-            error_message: None,
-            started_at: now,
-            updated_at: now,
-        })
+        .claim_schedule_window(
+            &ScheduleState {
+                user_email: config.user_email.clone(),
+                window_date_from: window.date_from.clone(),
+                window_date_to: window.date_to.clone(),
+                status: ScheduleRunStatus::Running,
+                run_id: None,
+                email_sent: false,
+                error_message: None,
+                started_at: now,
+                updated_at: now,
+            },
+            now - chrono::Duration::minutes(CLAIM_TTL_MINUTES),
+        )
         .await?;
-    Ok(None)
+    Ok(match claim {
+        crate::storage::ScheduleWindowClaim::Claimed => None,
+        crate::storage::ScheduleWindowClaim::AlreadyCompleted => {
+            Some("ventana ya analizada".to_string())
+        }
+        crate::storage::ScheduleWindowClaim::AlreadyRunning => {
+            Some("análisis en curso".to_string())
+        }
+    })
 }
 
 async fn analyze_and_report(
@@ -325,9 +337,9 @@ async fn analyze_and_report(
             tracing::info!(%provider_id, run_id = %run.id, "reporte programado enviado");
             (true, None)
         }
-        Err(error) => {
-            tracing::error!(?error, run_id = %run.id, "no se pudo enviar el reporte programado");
-            (false, Some(format!("el envío del reporte falló: {error}")))
+        Err(_) => {
+            tracing::error!(operation = "report_delivery", run_id = %run.id, "no se pudo enviar el reporte programado");
+            (false, Some("report_delivery_failed".to_string()))
         }
     };
     // El análisis ya corrió: el estado queda Completed aunque el correo falle,
@@ -350,42 +362,52 @@ async fn analyze_and_report(
 }
 
 async fn fresh_access_token(state: &AppState, config: &ScheduleConfig) -> anyhow::Result<String> {
-    let session = state
+    let connection = state
         .storage
-        .find_latest_session_with_refresh_token(&config.user_email)
+        .get_gmail_connection(&config.user_email)
         .await?
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "no hay una sesión con refresh token para {}; inicia sesión de nuevo en la aplicación",
+                "no hay una conexión Gmail activa para {}; vuelve a conectar la casilla",
                 config.user_email
             )
         })?;
-    let encrypted_refresh = session
-        .gmail_refresh_token_encrypted
-        .clone()
-        .or(session.refresh_token_encrypted.clone())
-        .expect("session filtered by refresh token presence");
+    if !gmail_connection_is_active(Some(&connection)) {
+        return Err(anyhow::anyhow!(
+            "la conexión Gmail está revocada; vuelve a conectar la casilla"
+        ));
+    }
+    let encrypted_refresh = connection.refresh_token_encrypted.clone().ok_or_else(|| {
+        anyhow::anyhow!("la conexión Gmail no tiene refresh token; vuelve a conectar la casilla")
+    })?;
     let refresh_token = decrypt_token(&encrypted_refresh, &state.config.encryption_key)?;
     let token = refresh_google_access_token(&state.http, &state.config.google, &refresh_token)
         .await
         .map_err(|error| match error {
             RefreshError::InvalidGrant => anyhow::anyhow!(
-                "Google rechazó el refresh token; vuelve a iniciar sesión en la aplicación para renovar el acceso a Gmail"
+                "Google rechazó el refresh token; vuelve a conectar la casilla para renovar el acceso a Gmail"
             ),
             RefreshError::Other(inner) => inner,
         })?;
 
-    let mut updated = session;
-    updated.gmail_access_token_encrypted = Some(encrypt_token(
-        &token.access_token,
-        &state.config.encryption_key,
-    )?);
+    let mut updated = connection.clone();
+    updated.access_token_encrypted =
+        encrypt_token(&token.access_token, &state.config.encryption_key)?;
     if let Some(rotated) = &token.refresh_token {
-        updated.gmail_refresh_token_encrypted =
+        updated.refresh_token_encrypted =
             Some(encrypt_token(rotated, &state.config.encryption_key)?);
     }
     updated.updated_at = Utc::now();
-    state.storage.upsert_user_session(&updated).await?;
+    if state
+        .storage
+        .refresh_gmail_connection(&connection, &updated)
+        .await?
+        != crate::storage::GmailConnectionRefresh::Updated
+    {
+        return Err(anyhow::anyhow!(
+            "la conexión Gmail cambió durante el refresh; se canceló el análisis programado"
+        ));
+    }
     Ok(token.access_token)
 }
 
@@ -460,6 +482,11 @@ async fn create_scheduled_run(
             error_message: None,
         };
         state.storage.create_analysis_run(&run).await?;
+        tracing::info!(
+            operation = "scheduled_analysis_run_created",
+            run_id = %run.id,
+            "scheduled analysis run created"
+        );
         return Ok(run);
     }
 
@@ -498,6 +525,11 @@ async fn create_scheduled_run(
         error_message: None,
     };
     state.storage.create_analysis_run(&run).await?;
+    tracing::info!(
+        operation = "scheduled_analysis_run_created",
+        run_id = %run.id,
+        "scheduled analysis run created"
+    );
     Ok(run)
 }
 
@@ -587,8 +619,11 @@ async fn send_failure_notice(
     );
     match mailer.send(&recipients, &email.subject, &email.html).await {
         Ok(_) => true,
-        Err(error) => {
-            tracing::error!(?error, "no se pudo enviar el aviso de fallo");
+        Err(_) => {
+            tracing::error!(
+                operation = "failure_notice",
+                "no se pudo enviar el aviso de fallo"
+            );
             false
         }
     }
@@ -627,9 +662,9 @@ async fn store_state(
             updated_at: now,
         })
         .await;
-    if let Err(error) = result {
+    if result.is_err() {
         tracing::error!(
-            ?error,
+            operation = "scheduler_state_persist",
             "no se pudo guardar el estado del análisis programado"
         );
     }
@@ -817,7 +852,7 @@ mod tests {
                 notice_sent,
             } => {
                 assert_eq!(user_email, "a@x.cl");
-                assert!(error.contains("refresh token"));
+                assert_eq!(error, "scheduled_analysis_failed");
                 assert!(notice_sent);
             }
             other => panic!("expected Failed, got {other:?}"),
@@ -832,6 +867,10 @@ mod tests {
             .unwrap()
             .expect("state expected");
         assert_eq!(saved.status, ScheduleRunStatus::Failed);
+        assert_eq!(
+            saved.error_message.as_deref(),
+            Some("scheduled_analysis_failed")
+        );
     }
 
     #[tokio::test]
@@ -898,6 +937,31 @@ mod tests {
             .unwrap();
         // Sin sesión disponible el reintento falla, pero ya no se salta.
         assert!(matches!(outcomes[0], ScheduledOutcome::Failed { .. }));
+    }
+
+    #[tokio::test]
+    async fn concurrent_claims_only_allow_one_scheduled_run() {
+        let (state, _) = app_state(None);
+        let config = schedule_config("a@x.cl");
+        let window = AnalysisWindow {
+            date_from: "2026-06-11".to_string(),
+            date_to: "2026-06-11".to_string(),
+        };
+
+        let (first, second) = tokio::join!(
+            check_idempotency(&state, &config, &window),
+            check_idempotency(&state, &config, &window),
+        );
+        let outcomes = [first.unwrap(), second.unwrap()];
+        assert_eq!(
+            outcomes.iter().filter(|outcome| outcome.is_none()).count(),
+            1
+        );
+        assert!(
+            outcomes
+                .iter()
+                .any(|outcome| { outcome.as_deref() == Some("análisis en curso") })
+        );
     }
 
     #[tokio::test]
@@ -1080,6 +1144,7 @@ mod tests {
             .upsert_user_session(&UserSession {
                 id: "s1".to_string(),
                 workos_user_id: Some("workos-s1".to_string()),
+                workos_session_id: None,
                 google_account_email: "a@x.cl".to_string(),
                 gmail_account_email: Some("a@x.cl".to_string()),
                 access_token_encrypted: "x".to_string(),

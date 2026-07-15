@@ -61,10 +61,10 @@ impl ReportMailer for ResendMailer {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
         if !status.is_success() {
-            return Err(anyhow!("Resend rechazó el envío ({status}): {body}"));
+            return Err(anyhow!("Resend rechazó el envío ({status})"));
         }
         let parsed: ResendResponse = serde_json::from_str(&body)
-            .map_err(|error| anyhow!("Resend devolvió JSON inválido: {error}; body: {body}"))?;
+            .map_err(|error| anyhow!("Resend devolvió JSON inválido: {error}"))?;
         Ok(parsed.id)
     }
 }

@@ -10,6 +10,7 @@ const DEFAULT_SESSION_SECRET: &str = "development-only-session-secret";
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub api_port: u16,
+    pub app_env: String,
     pub web_base_url: String,
     pub api_base_url: String,
     pub cookie_secure: bool,
@@ -44,6 +45,7 @@ pub struct WorkosConfig {
     pub api_key: String,
     pub redirect_uri: String,
     pub cookie_secret: String,
+    pub webhook_secret: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -118,12 +120,9 @@ impl AppConfig {
                 "development-only-workos-cookie-secret",
                 production,
             )?,
+            webhook_secret: empty_to_none(env::var("WORKOS_WEBHOOK_SECRET").ok()),
         };
-        if production && workos.client_id.trim().is_empty() {
-            return Err(anyhow!(
-                "WORKOS_CLIENT_ID is required when APP_ENV=production"
-            ));
-        }
+        validate_workos_config(&workos, production)?;
         let billing = BillingConfig {
             mercadopago_access_token: empty_to_none(env::var("MERCADOPAGO_ACCESS_TOKEN").ok()),
             mercadopago_webhook_secret: empty_to_none(env::var("MERCADOPAGO_WEBHOOK_SECRET").ok()),
@@ -184,10 +183,7 @@ impl AppConfig {
             .ok()
             .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
             .unwrap_or_else(|| api_base_url.starts_with("https://"));
-        let cookie_same_site = env_or(
-            "APP_COOKIE_SAMESITE",
-            if cookie_secure { "None" } else { "Lax" },
-        );
+        let cookie_same_site = env_or("APP_COOKIE_SAMESITE", "Lax");
         let web_base_url = env_or("WEB_BASE_URL", "http://localhost:5173");
         let ai_worker_url = env_or("AI_WORKER_URL", "http://localhost:8090");
         let ai_worker_audience = empty_to_none(env::var("AI_WORKER_AUDIENCE").ok());
@@ -210,6 +206,7 @@ impl AppConfig {
                 .unwrap_or_else(|_| env_or("API_PORT", "8080"))
                 .parse()
                 .context("invalid API_PORT")?,
+            app_env,
             web_base_url,
             api_base_url,
             cookie_secure,
@@ -332,6 +329,20 @@ fn validate_billing_config(billing: &BillingConfig, production: bool) -> anyhow:
     Ok(())
 }
 
+fn validate_workos_config(workos: &WorkosConfig, production: bool) -> anyhow::Result<()> {
+    if production && workos.client_id.trim().is_empty() {
+        return Err(anyhow!(
+            "WORKOS_CLIENT_ID is required when APP_ENV=production"
+        ));
+    }
+    if production && workos.webhook_secret.is_none() {
+        return Err(anyhow!(
+            "WORKOS_WEBHOOK_SECRET is required when APP_ENV=production"
+        ));
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn validate_production_runtime(
     production: bool,
@@ -370,16 +381,18 @@ fn validate_production_runtime(
         ));
     }
 
-    https_origin("WEB_BASE_URL", web_base_url, true)?;
+    let web_origin = https_origin("WEB_BASE_URL", web_base_url, true)?;
     let api_origin = https_origin("API_BASE_URL", api_base_url, true)?;
-    if https_origin("GOOGLE_REDIRECT_URL", google_redirect_url, false)? != api_origin {
+    let google_origin = https_origin("GOOGLE_REDIRECT_URL", google_redirect_url, false)?;
+    if google_origin != api_origin && google_origin != web_origin {
         return Err(anyhow!(
-            "GOOGLE_REDIRECT_URL must use the API origin in production"
+            "GOOGLE_REDIRECT_URL must use the API or web origin in production"
         ));
     }
-    if https_origin("WORKOS_REDIRECT_URI", workos_redirect_uri, false)? != api_origin {
+    let workos_origin = https_origin("WORKOS_REDIRECT_URI", workos_redirect_uri, false)?;
+    if workos_origin != api_origin && workos_origin != web_origin {
         return Err(anyhow!(
-            "WORKOS_REDIRECT_URI must use the API origin in production"
+            "WORKOS_REDIRECT_URI must use the API or web origin in production"
         ));
     }
     https_origin("AI_WORKER_URL", ai_worker_url, false)?;
@@ -449,6 +462,7 @@ fn split_list(value: &str) -> Vec<String> {
 pub(crate) fn test_app_config() -> AppConfig {
     AppConfig {
         api_port: 0,
+        app_env: "test".to_string(),
         web_base_url: "http://localhost:5173".to_string(),
         api_base_url: "http://localhost:8080".to_string(),
         cookie_secure: false,
@@ -467,6 +481,7 @@ pub(crate) fn test_app_config() -> AppConfig {
             api_key: "sk_test".to_string(),
             redirect_uri: "http://localhost:8080/auth/workos/callback".to_string(),
             cookie_secret: "test-workos-cookie-secret".to_string(),
+            webhook_secret: Some("test-workos-webhook-secret".to_string()),
         },
         billing: BillingConfig {
             mercadopago_access_token: Some("TEST-access-token".to_string()),
@@ -566,6 +581,18 @@ mod tests {
     }
 
     #[test]
+    fn production_requires_workos_webhook_secret() {
+        let mut workos = test_app_config().workos;
+        workos.webhook_secret = None;
+
+        let err = validate_workos_config(&workos, true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("WORKOS_WEBHOOK_SECRET"));
+        assert!(validate_workos_config(&workos, false).is_ok());
+    }
+
+    #[test]
     fn production_rejects_memory_storage_and_insecure_runtime_values() {
         let billing = BillingConfig {
             mercadopago_access_token: Some("access".to_string()),
@@ -579,7 +606,7 @@ mod tests {
             "https://app.example.com",
             "https://api.example.com",
             true,
-            "None",
+            "Lax",
             "https://api.example.com/gmail/connect/callback",
             "https://api.example.com/auth/workos/callback",
             "https://worker.example.com",
@@ -596,7 +623,7 @@ mod tests {
             "http://app.example.com",
             "https://api.example.com",
             true,
-            "None",
+            "Lax",
             "https://api.example.com/gmail/connect/callback",
             "https://api.example.com/auth/workos/callback",
             "https://worker.example.com",
@@ -622,9 +649,34 @@ mod tests {
                 "https://app.example.com",
                 "https://api.example.com",
                 true,
-                "None",
+                "Lax",
                 "https://api.example.com/gmail/connect/callback",
                 "https://api.example.com/auth/workos/callback",
+                "https://worker.example.com",
+                Some("https://worker.example.com"),
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn production_accepts_web_origin_oauth_callbacks_for_the_same_origin_proxy() {
+        let billing = BillingConfig {
+            mercadopago_access_token: Some("access".to_string()),
+            mercadopago_webhook_secret: Some("webhook".to_string()),
+            enforcement_enabled: true,
+        };
+        assert!(
+            validate_production_runtime(
+                true,
+                "firestore",
+                &billing,
+                "https://app.example.com",
+                "https://api.example.com",
+                true,
+                "Lax",
+                "https://app.example.com/gmail/connect/callback",
+                "https://app.example.com/auth/workos/callback",
                 "https://worker.example.com",
                 Some("https://worker.example.com"),
             )

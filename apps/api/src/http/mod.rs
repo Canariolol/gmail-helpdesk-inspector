@@ -52,18 +52,18 @@ use crate::{
     },
     config::AppConfig,
     gmail::GmailClient,
-    mailbox::FilterPreset,
+    mailbox::{FilterPreset, GmailConnection, gmail_connection_is_active},
     policies::{
         AiPolicy, AnalysisPolicy, MailboxPurpose, OrgConfigBundle, OrgConfigResponse,
-        PolicyVersion, ScheduleReportPolicy, apply_ai_defaults_migration, normalize_domains,
-        normalize_list, policy_version_from_draft, provision_default_config, retention_expires_at,
-        setup_state, validate_timezone,
+        PolicyVersion, ScheduleReportPolicy, apply_ai_defaults_migration, hash_owner_email,
+        normalize_domains, normalize_list, policy_version_from_draft, provision_default_config,
+        retention_expires_at, setup_state, validate_timezone,
     },
     scheduler::{
         model::{ScheduleConfig, ScheduleState},
         window::next_fire_time_label,
     },
-    storage::StorageRepository,
+    storage::{AnalysisDataDeletionAudit, AnalysisDataDeletionStatus, StorageRepository},
 };
 
 #[derive(Debug, Deserialize)]
@@ -127,12 +127,14 @@ pub fn router(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/auth/workos/login", get(auth_workos_login))
         .route("/auth/workos/callback", get(auth_workos_callback))
+        .route("/auth/workos/webhook", post(workos_webhook))
         .route("/auth/google/login", get(gmail_connect_login))
         .route("/auth/google/callback", get(gmail_connect_callback))
         .route("/gmail/connect/login", get(gmail_connect_login))
         .route("/gmail/connect/callback", get(gmail_connect_callback))
         .route("/gmail/disconnect", post(gmail_disconnect))
         .route("/auth/logout", post(auth_logout))
+        .route("/auth/logout-all", post(auth_logout_all))
         .route("/auth/me", get(auth_me))
         .route("/me/account", get(get_account_status))
         .route("/me/usage", get(get_usage))
@@ -249,12 +251,19 @@ struct WorkosCallback {
     code: Option<String>,
     state: Option<String>,
     error: Option<String>,
-    error_description: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct WorkosAuthenticateResponse {
     user: WorkosUser,
+    #[serde(default)]
+    access_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkosAccessTokenClaims {
+    #[serde(default)]
+    sid: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -269,16 +278,29 @@ struct WorkosUser {
     name: Option<String>,
 }
 
+/// El token llega directamente del intercambio servidor-a-servidor con WorkOS;
+/// solo se lee `sid` para relacionar la sesión local con un evento revocado.
+fn workos_session_id_from_access_token(access_token: Option<&str>) -> Option<String> {
+    let payload = access_token?.split('.').nth(1)?;
+    let claims: WorkosAccessTokenClaims =
+        serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).ok()?).ok()?;
+    claims.sid.filter(|sid| !sid.trim().is_empty())
+}
+
 async fn auth_workos_callback(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(query): Query<WorkosCallback>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if let Some(error) = query.error {
-        return Err(ApiError::bad_request(&format!(
-            "WorkOS rechazó el login: {}",
-            query.error_description.unwrap_or(error)
-        )));
+    if query.error.is_some() {
+        tracing::warn!(
+            operation = "workos_login_callback",
+            error_code = "workos_login_rejected",
+            "WorkOS rechazó el inicio de sesión"
+        );
+        return Err(ApiError::bad_request(
+            "No se pudo completar el inicio de sesión. Inténtalo nuevamente.",
+        ));
     }
     let verifier_payload = headers
         .get(header::COOKIE)
@@ -337,6 +359,7 @@ async fn auth_workos_callback(
     let session = UserSession {
         id: Uuid::new_v4().to_string(),
         workos_user_id: Some(auth.user.id),
+        workos_session_id: workos_session_id_from_access_token(auth.access_token.as_deref()),
         google_account_email: account.email,
         gmail_account_email: None,
         access_token_encrypted: String::new(),
@@ -374,6 +397,59 @@ async fn auth_workos_callback(
         HeaderValue::from_str(&state.config.web_base_url).unwrap(),
     );
     Ok((StatusCode::FOUND, headers))
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkosWebhookEvent {
+    event: String,
+    data: serde_json::Value,
+}
+
+async fn workos_webhook(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: String,
+) -> Result<StatusCode, ApiError> {
+    verify_workos_webhook(&state, &headers, &body)?;
+    let event: WorkosWebhookEvent =
+        serde_json::from_str(&body).map_err(|_| ApiError::bad_request("evento WorkOS inválido"))?;
+
+    match event.event.as_str() {
+        "session.revoked" => {
+            let session_id = workos_event_data_id(&event.data)?;
+            state
+                .storage
+                .revoke_user_session_by_workos_session_id(session_id, Utc::now())
+                .await?;
+        }
+        "user.deleted" => {
+            let user_id = workos_event_data_id(&event.data)?;
+            if let Some(account) = state.storage.get_account_by_workos_user_id(user_id).await? {
+                let now = Utc::now();
+                state
+                    .storage
+                    .revoke_user_sessions(&account.email, now)
+                    .await?;
+                state.storage.disconnect_gmail(&account.email, now).await?;
+                let mut bundle = get_or_provision_org_config(&state, &account.email).await?;
+                bundle.mailbox.revoked_at = Some(now);
+                bundle.draft.schedule_report_policy.scheduler_enabled = false;
+                state.storage.upsert_org_config(&bundle).await?;
+                sync_schedule_config_from_policy(&state, &bundle).await?;
+            }
+        }
+        _ => {}
+    }
+
+    tracing::info!(operation = "workos_webhook", event_type = %event.event, "WorkOS webhook processed");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn workos_event_data_id(data: &serde_json::Value) -> Result<&str, ApiError> {
+    data.get("id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| ApiError::bad_request("evento WorkOS sin identificador"))
 }
 
 async fn gmail_connect_login(
@@ -429,7 +505,7 @@ async fn gmail_connect_callback(
     headers: HeaderMap,
     Query(query): Query<OAuthCallback>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let mut existing_session = require_session(&state, &headers).await?;
+    let existing_session = require_session(&state, &headers).await?;
     require_active_entitlement(&state, &existing_session).await?;
     let verifier_payload = headers
         .get(header::COOKIE)
@@ -470,18 +546,31 @@ async fn gmail_connect_callback(
         .await?;
 
     let now = Utc::now();
-    existing_session.gmail_account_email = Some(profile.email_address.clone());
-    existing_session.gmail_access_token_encrypted = Some(encrypt_token(
-        &token.access_token,
-        &state.config.encryption_key,
-    )?);
-    existing_session.gmail_refresh_token_encrypted = token
-        .refresh_token
-        .as_deref()
-        .map(|refresh| encrypt_token(refresh, &state.config.encryption_key))
-        .transpose()?;
-    existing_session.updated_at = now;
-    state.storage.upsert_user_session(&existing_session).await?;
+    let previous = state
+        .storage
+        .get_gmail_connection(&existing_session.google_account_email)
+        .await?;
+    let connection = GmailConnection {
+        owner_email: existing_session.google_account_email.clone(),
+        gmail_account_email: profile.email_address.clone(),
+        access_token_encrypted: encrypt_token(&token.access_token, &state.config.encryption_key)?,
+        refresh_token_encrypted: token
+            .refresh_token
+            .as_deref()
+            .map(|refresh| encrypt_token(refresh, &state.config.encryption_key))
+            .transpose()?
+            .or_else(|| {
+                previous
+                    .as_ref()
+                    .and_then(|connection| connection.refresh_token_encrypted.clone())
+            }),
+        connected_at: previous
+            .as_ref()
+            .map_or(now, |connection| connection.connected_at),
+        updated_at: now,
+        revoked_at: None,
+    };
+    state.storage.upsert_gmail_connection(&connection).await?;
     let mut bundle =
         get_or_provision_org_config(&state, &existing_session.google_account_email).await?;
     bundle.mailbox.google_account_email = profile.email_address.clone();
@@ -507,8 +596,15 @@ async fn gmail_connect_callback(
         let owner = existing_session.google_account_email.clone();
         tokio::spawn(async move {
             let metadata = gmail.fetch_mailbox_metadata(&access_token, now).await;
-            if let Err(error) = storage.upsert_mailbox_metadata(&owner, &metadata).await {
-                tracing::warn!(?error, "no se pudo guardar metadata de Gmail al conectar");
+            if storage
+                .upsert_mailbox_metadata(&owner, &metadata)
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    operation = "gmail_metadata_persist",
+                    "no se pudo guardar metadata de Gmail al conectar"
+                );
             }
         });
     }
@@ -535,31 +631,34 @@ async fn gmail_disconnect(
     headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
     let session = require_session(&state, &headers).await?;
-    let encrypted_token = session
-        .gmail_refresh_token_encrypted
-        .as_deref()
-        .or(session.gmail_access_token_encrypted.as_deref())
-        .or(session.refresh_token_encrypted.as_deref())
-        .or((!session.access_token_encrypted.trim().is_empty())
-            .then_some(session.access_token_encrypted.as_str()));
+    let connection = state
+        .storage
+        .get_gmail_connection(&session.google_account_email)
+        .await?;
+    let encrypted_token = connection.as_ref().and_then(|connection| {
+        connection
+            .refresh_token_encrypted
+            .as_deref()
+            .or((!connection.access_token_encrypted.trim().is_empty())
+                .then_some(connection.access_token_encrypted.as_str()))
+    });
 
     if let Some(encrypted_token) = encrypted_token {
-        let token =
-            decrypt_token(encrypted_token, &state.config.encryption_key).map_err(|error| {
-                tracing::error!(
-                    ?error,
-                    "no se pudo descifrar el token de Gmail para revocarlo"
-                );
-                ApiError::service_unavailable("No pudimos desconectar Gmail; inténtalo de nuevo")
-            })?;
+        let token = decrypt_token(encrypted_token, &state.config.encryption_key).map_err(|_| {
+            tracing::error!(
+                operation = "gmail_revoke",
+                "no se pudo descifrar el token de Gmail para revocarlo"
+            );
+            ApiError::service_unavailable("No pudimos desconectar Gmail; inténtalo de nuevo")
+        })?;
         let response = state
             .http
             .post("https://oauth2.googleapis.com/revoke")
             .form(&[("token", token.as_str())])
             .send()
             .await
-            .map_err(|error| {
-                tracing::warn!(?error, "falló la revocación de Gmail");
+            .map_err(|_| {
+                tracing::warn!(operation = "gmail_revoke", "falló la revocación de Gmail");
                 ApiError::service_unavailable("No pudimos desconectar Gmail; inténtalo de nuevo")
             })?;
         if !response.status().is_success() && response.status().as_u16() != 400 {
@@ -604,16 +703,44 @@ async fn auth_logout(
     Ok((StatusCode::NO_CONTENT, headers))
 }
 
+async fn auth_logout_all(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    let session = require_session(&state, &headers).await?;
+    state
+        .storage
+        .revoke_user_sessions(&session.google_account_email, Utc::now())
+        .await?;
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&clear_session_cookie(
+            &state.config.cookie_same_site,
+            state.config.cookie_secure,
+        ))
+        .unwrap(),
+    );
+    Ok((StatusCode::NO_CONTENT, headers))
+}
+
 async fn auth_me(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let session = require_session(&state, &headers).await?;
+    let connection = state
+        .storage
+        .get_gmail_connection(&session.google_account_email)
+        .await?;
     Ok(Json(json!({
         "email": session.google_account_email,
         "workos_user_id": session.workos_user_id,
-        "gmail_connected": gmail_connected(&session),
-        "gmail_account_email": session.gmail_account_email,
+        "gmail_connected": gmail_connection_is_active(connection.as_ref()),
+        "gmail_account_email": connection
+            .filter(|connection| gmail_connection_is_active(Some(connection)))
+            .map(|connection| connection.gmail_account_email),
     })))
 }
 
@@ -634,12 +761,18 @@ async fn get_account_status(
     let session = require_session(&state, &headers).await?;
     let bundle = get_or_provision_org_config(&state, &session.google_account_email).await?;
     let entitlement = entitlement_snapshot(&state, &bundle.org.id).await?;
+    let connection = state
+        .storage
+        .get_gmail_connection(&session.google_account_email)
+        .await?;
     Ok(Json(AccountStatusResponse {
         account_email: session.google_account_email.clone(),
         workos_user_id: session.workos_user_id.clone(),
         org_id: bundle.org.id,
-        gmail_connected: gmail_connected(&session),
-        gmail_account_email: session.gmail_account_email.clone(),
+        gmail_connected: gmail_connection_is_active(connection.as_ref()),
+        gmail_account_email: connection
+            .filter(|connection| gmail_connection_is_active(Some(connection)))
+            .map(|connection| connection.gmail_account_email),
         entitlement,
     }))
 }
@@ -1038,11 +1171,50 @@ async fn delete_analysis_data(
             "escribe BORRAR MIS ANALISIS para confirmar",
         ));
     }
-    state
+    let mut audit = AnalysisDataDeletionAudit {
+        id: worker_request_id().unwrap_or_else(|| Uuid::new_v4().to_string()),
+        owner_hash: hash_owner_email(&session.google_account_email),
+        status: AnalysisDataDeletionStatus::Requested,
+        requested_at: Utc::now(),
+        completed_at: None,
+    };
+    state.storage.record_analysis_data_deletion(&audit).await?;
+
+    match state
         .storage
         .delete_analysis_data(&session.google_account_email)
-        .await?;
-    Ok(StatusCode::NO_CONTENT)
+        .await
+    {
+        Ok(()) => {
+            audit.status = AnalysisDataDeletionStatus::Completed;
+            audit.completed_at = Some(Utc::now());
+            // ponytail: Firestore cannot atomically delete every nested document and update this audit.
+            // A pending record is safer than claiming deletion completed when this write fails.
+            state.storage.record_analysis_data_deletion(&audit).await?;
+            Ok(StatusCode::NO_CONTENT)
+        }
+        Err(error) => {
+            tracing::error!(
+                operation = "analysis_data_deletion",
+                error_code = "data_deletion_failed",
+                owner_hash = %audit.owner_hash,
+                "analysis data deletion failed"
+            );
+            audit.status = AnalysisDataDeletionStatus::Failed;
+            if state
+                .storage
+                .record_analysis_data_deletion(&audit)
+                .await
+                .is_err()
+            {
+                tracing::error!(
+                    operation = "record_analysis_data_deletion",
+                    "audit update failed"
+                );
+            }
+            Err(error.into())
+        }
+    }
 }
 
 async fn get_data_summary(
@@ -1101,7 +1273,7 @@ async fn get_data_summary(
         actions: DataActionAvailability {
             disconnect_gmail: DataActionStatus {
                 available: false,
-                reason: "pending_backend_contract",
+                reason: "available_in_account",
             },
             delete_analysis_data: DataActionStatus {
                 available: true,
@@ -1109,7 +1281,7 @@ async fn get_data_summary(
             },
             delete_account_data: DataActionStatus {
                 available: false,
-                reason: "pending_backend_contract",
+                reason: "account_deletion_policy_pending",
             },
         },
     }))
@@ -1609,11 +1781,20 @@ async fn sync_schedule_config_from_policy(
 ) -> Result<(), ApiError> {
     let analysis = &bundle.draft.analysis_policy;
     let schedule = &bundle.draft.schedule_report_policy;
+    let gmail_connection = state
+        .storage
+        .get_gmail_connection(&bundle.membership.user_email)
+        .await?;
+    // Una configuración leída antes de una desconexión o de `user.deleted` no
+    // puede volver a activar el scheduler. La preferencia se conserva y se
+    // aplicará al reconectar Gmail.
+    let enabled =
+        schedule.scheduler_enabled && gmail_connection_is_active(gmail_connection.as_ref());
     state
         .storage
         .upsert_schedule_config(&ScheduleConfig {
             user_email: bundle.membership.user_email.clone(),
-            enabled: schedule.scheduler_enabled,
+            enabled,
             recipients: schedule.report_recipients.clone(),
             internal_domains: analysis.internal_domains.clone(),
             ignored_senders: analysis.ignored_senders.clone(),
@@ -1891,7 +2072,13 @@ async fn create_analysis_run(
     let session = require_session(&state, &headers).await?;
     let bundle = require_active_entitlement(&state, &session).await?;
     enforce_usage_allows_run(&state, &bundle.org.id).await?;
-    require_gmail_connected(&session)?;
+    require_gmail_connected(
+        state
+            .storage
+            .get_gmail_connection(&session.google_account_email)
+            .await?
+            .as_ref(),
+    )?;
     enforce_rate_limit(
         &state,
         &session.google_account_email,
@@ -1912,6 +2099,11 @@ async fn create_analysis_run(
         build_policy_run(&state, &session.google_account_email, request, now).await?
     };
     state.storage.create_analysis_run(&run).await?;
+    tracing::info!(
+        operation = "analysis_run_created",
+        run_id = %run.id,
+        "analysis run created"
+    );
     increment_runs_usage(&state, run.org_id.as_deref()).await?;
     Ok(Json(run))
 }
@@ -2066,7 +2258,11 @@ async fn start_analysis_run(
 ) -> Result<Json<AnalysisRun>, ApiError> {
     let session = require_session(&state, &headers).await?;
     require_active_entitlement(&state, &session).await?;
-    require_gmail_connected(&session)?;
+    let connection = state
+        .storage
+        .get_gmail_connection(&session.google_account_email)
+        .await?;
+    require_gmail_connected(connection.as_ref())?;
     let mut run = require_owned_run(&state, &id, &session).await?;
     if run.status != AnalysisStatus::Pending {
         return Err(ApiError::conflict(
@@ -2084,7 +2280,10 @@ async fn start_analysis_run(
     run.progress_message = "Iniciando lectura de Gmail".to_string();
     state.storage.update_analysis_run(&run).await?;
 
-    let access_token = decrypt_token(&gmail_access_token(&session)?, &state.config.encryption_key)?;
+    let access_token = decrypt_token(
+        &gmail_access_token(connection.as_ref())?,
+        &state.config.encryption_key,
+    )?;
     let worker_state = state.clone();
     let run_id = run.id.clone();
     tokio::spawn(async move {
@@ -2113,8 +2312,20 @@ async fn analysis_events(
             tokio::time::sleep(Duration::from_secs(2)).await;
             let payload = match state.storage.get_analysis_run(&id).await {
                 Ok(Some(run)) => serde_json::to_string(&run).unwrap_or_else(|_| "{}".to_string()),
-                Ok(None) => json!({"error": "not_found"}).to_string(),
-                Err(error) => json!({"error": error.to_string()}).to_string(),
+                Ok(None) => json!({
+                    "error": {
+                        "code": "NOT_FOUND",
+                        "message": "No se encontró el análisis solicitado."
+                    }
+                })
+                .to_string(),
+                Err(_) => json!({
+                    "error": {
+                        "code": "ANALYSIS_STATE_UNAVAILABLE",
+                        "message": "No se pudo consultar el estado del análisis."
+                    }
+                })
+                .to_string(),
             };
             Some((Ok(Event::default().data(payload)), ()))
         }
@@ -2393,11 +2604,11 @@ async fn apply_manual_review_request(
     Ok(Json(run))
 }
 
-pub(crate) async fn mark_run_failed(state: &AppState, run_id: &str, error: &anyhow::Error) {
-    tracing::error!(?error, run_id, "analysis failed");
+pub(crate) async fn mark_run_failed(state: &AppState, run_id: &str, _error: &anyhow::Error) {
+    tracing::error!(operation = "analysis_run", run_id, "analysis failed");
     if let Ok(Some(mut failed)) = state.storage.get_analysis_run(run_id).await {
         failed.status = AnalysisStatus::Failed;
-        failed.error_message = Some(error.to_string());
+        failed.error_message = Some("analysis_failed".to_string());
         failed.progress_message = "El análisis falló".to_string();
         let _ = state.storage.update_analysis_run(&failed).await;
     }
@@ -2532,8 +2743,11 @@ pub(crate) async fn execute_analysis(
                         funnel.dropped_samples.push(dropped);
                     }
                 }
-                Err(error) => {
-                    tracing::warn!(?error, "el procesamiento de un hilo falló; se omite");
+                Err(_) => {
+                    tracing::warn!(
+                        operation = "thread_processing",
+                        "el procesamiento de un hilo falló; se omite"
+                    );
                 }
             }
             if processed.is_multiple_of(PROGRESS_UPDATE_EVERY) {
@@ -2637,15 +2851,7 @@ pub(crate) async fn execute_analysis(
     // Los hilos que no necesitaban IA y los resultados ya resueltos se persisten al
     // final; los cuerpos se descartan como antes.
     for prepared in &prepared_threads {
-        let sanitized = prepared
-            .messages
-            .iter()
-            .cloned()
-            .map(|mut message| {
-                message.body_text = None;
-                message
-            })
-            .collect::<Vec<_>>();
+        let sanitized = messages_for_persistence(&prepared.messages);
         state
             .storage
             .upsert_thread(&prepared.thread, &sanitized)
@@ -2874,15 +3080,7 @@ async fn prepare_one_thread(
         && review.message_fingerprint == message_fingerprint(&data.messages)
     {
         apply_manual_review_override(&mut thread, &data.messages, &review);
-        let sanitized = data
-            .messages
-            .iter()
-            .cloned()
-            .map(|mut message| {
-                message.body_text = None;
-                message
-            })
-            .collect::<Vec<_>>();
+        let sanitized = messages_for_persistence(&data.messages);
         state.storage.upsert_thread(&thread, &sanitized).await?;
         return Ok(ThreadOutcome {
             disposition: ThreadDisposition::Stored,
@@ -3078,6 +3276,9 @@ async fn audit_batch_once(
             policy_context,
             threads,
         });
+    if let Some(request_id) = worker_request_id() {
+        request = request.header("x-request-id", request_id);
+    }
     if let Some(audience) = &state.config.ai.worker_audience {
         request = request.bearer_auth(fetch_cloud_run_identity_token(&state.http, audience).await?);
     }
@@ -3104,9 +3305,9 @@ async fn audit_batch_with_split(
             merge_batch_response(&mut execution, response, prepared, indexes);
             return execution;
         }
-        Err(error) => {
+        Err(_) => {
             tracing::warn!(
-                ?error,
+                operation = "ai_batch",
                 batch_size = indexes.len(),
                 "falló auditoría IA batch"
             );
@@ -3123,8 +3324,12 @@ async fn audit_batch_with_split(
         execution.calls += 1;
         match audit_batch_once(state, prepared, half, policy_snapshot).await {
             Ok(response) => merge_batch_response(&mut execution, response, prepared, half),
-            Err(error) => {
-                tracing::warn!(?error, batch_size = half.len(), "falló reintento IA batch");
+            Err(_) => {
+                tracing::warn!(
+                    operation = "ai_batch_retry",
+                    batch_size = half.len(),
+                    "falló reintento IA batch"
+                );
             }
         }
     }
@@ -3218,11 +3423,7 @@ async fn audit_prepared_thread(
     let mut audit = match result {
         Ok(audit) => audit,
         Err(error) => {
-            prepared.thread.manual_review_required = true;
-            prepared
-                .thread
-                .reasons
-                .push(format!("La auditoría IA detallada falló: {error}"));
+            mark_detailed_audit_failed(&mut prepared.thread, &error);
             return TokenUsage::default();
         }
     };
@@ -3238,12 +3439,16 @@ async fn audit_prepared_thread(
         input_tokens: audit.input_tokens,
         output_tokens: audit.output_tokens,
     };
-    if let Err(error) = state
+    if state
         .storage
         .add_ai_audit(run_id, &prepared.thread.id, &audit)
         .await
+        .is_err()
     {
-        tracing::warn!(?error, "no se pudo persistir auditoría IA detallada");
+        tracing::warn!(
+            operation = "ai_audit_persist",
+            "no se pudo persistir auditoría IA detallada"
+        );
     }
 
     let known_ids = prepared
@@ -3293,6 +3498,18 @@ async fn audit_prepared_thread(
             .push("La auditoría IA detallada requiere confirmación manual.".to_string());
     }
     usage
+}
+
+fn mark_detailed_audit_failed(thread: &mut EmailThread, _error: &anyhow::Error) {
+    tracing::warn!(
+        operation = "ai_detailed_audit",
+        error_code = "ai_detailed_audit_failed",
+        "la auditoría IA detallada falló"
+    );
+    thread.manual_review_required = true;
+    thread.reasons.push(
+        "La auditoría IA detallada no estuvo disponible; revisa este hilo manualmente.".to_string(),
+    );
 }
 
 fn audit_messages_for_thread(
@@ -3408,11 +3625,29 @@ async fn audit_thread(
             gmail_labels,
             policy_context,
         });
+    if let Some(request_id) = worker_request_id() {
+        request = request.header("x-request-id", request_id);
+    }
     if let Some(audience) = &state.config.ai.worker_audience {
         request = request.bearer_auth(fetch_cloud_run_identity_token(&state.http, audience).await?);
     }
     let response = request.send().await?.error_for_status()?.json().await?;
     Ok(response)
+}
+
+fn worker_request_id() -> Option<String> {
+    crate::REQUEST_ID.try_with(Clone::clone).ok()
+}
+
+fn messages_for_persistence(messages: &[EmailMessage]) -> Vec<EmailMessage> {
+    messages
+        .iter()
+        .cloned()
+        .map(|mut message| {
+            message.body_text = None;
+            message
+        })
+        .collect()
 }
 
 async fn fetch_cloud_run_identity_token(client: &Client, audience: &str) -> anyhow::Result<String> {
@@ -3467,25 +3702,15 @@ async fn enforce_rate_limit(
     }
 }
 
-fn gmail_connected(session: &UserSession) -> bool {
-    session.gmail_account_email.is_some()
-        && (session.gmail_access_token_encrypted.is_some()
-            || !session.access_token_encrypted.trim().is_empty())
-}
-
-fn gmail_access_token(session: &UserSession) -> Result<String, ApiError> {
-    session
-        .gmail_access_token_encrypted
-        .clone()
-        .or_else(|| {
-            (!session.access_token_encrypted.trim().is_empty())
-                .then(|| session.access_token_encrypted.clone())
-        })
+fn gmail_access_token(connection: Option<&GmailConnection>) -> Result<String, ApiError> {
+    connection
+        .filter(|connection| gmail_connection_is_active(Some(connection)))
+        .map(|connection| connection.access_token_encrypted.clone())
         .ok_or_else(|| ApiError::forbidden("conecta Gmail antes de analizar"))
 }
 
-fn require_gmail_connected(session: &UserSession) -> Result<(), ApiError> {
-    if gmail_connected(session) {
+fn require_gmail_connected(connection: Option<&GmailConnection>) -> Result<(), ApiError> {
+    if gmail_connection_is_active(connection) {
         Ok(())
     } else {
         Err(ApiError::forbidden("conecta Gmail antes de analizar"))
@@ -3849,8 +4074,8 @@ fn validate_mercadopago_signature(
     secret: &str,
 ) -> Result<(), ApiError> {
     let (timestamp, received_hash) =
-        parse_mercadopago_signature(x_signature).ok_or_else(ApiError::unauthorized)?;
-    validate_mercadopago_timestamp(timestamp, SystemTime::now())?;
+        parse_webhook_signature(x_signature).ok_or_else(ApiError::unauthorized)?;
+    validate_webhook_timestamp(timestamp, SystemTime::now())?;
     let mut parts = Vec::new();
     if let Some(data_id) = signed_data_id
         .map(str::trim)
@@ -3874,7 +4099,38 @@ fn validate_mercadopago_signature(
         .map_err(|_| ApiError::unauthorized())
 }
 
-fn validate_mercadopago_timestamp(timestamp: &str, now: SystemTime) -> Result<(), ApiError> {
+fn verify_workos_webhook(
+    state: &AppState,
+    headers: &HeaderMap,
+    body: &str,
+) -> Result<(), ApiError> {
+    let secret = state
+        .config
+        .workos
+        .webhook_secret
+        .as_deref()
+        .ok_or_else(ApiError::unauthorized)?;
+    let signature = headers
+        .get("workos-signature")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    validate_workos_signature(signature, body, secret)
+}
+
+fn validate_workos_signature(signature: &str, body: &str, secret: &str) -> Result<(), ApiError> {
+    let (timestamp, received_hash) =
+        parse_webhook_signature(signature).ok_or_else(ApiError::unauthorized)?;
+    validate_webhook_timestamp(timestamp, SystemTime::now())?;
+    type HmacSha256 = Hmac<Sha256>;
+    let mut mac =
+        HmacSha256::new_from_slice(secret.as_bytes()).map_err(|_| ApiError::unauthorized())?;
+    mac.update(format!("{timestamp}.{body}").as_bytes());
+    let received = hex_to_bytes(received_hash).ok_or_else(ApiError::unauthorized)?;
+    mac.verify_slice(&received)
+        .map_err(|_| ApiError::unauthorized())
+}
+
+fn validate_webhook_timestamp(timestamp: &str, now: SystemTime) -> Result<(), ApiError> {
     let signed_ms = timestamp
         .parse::<u128>()
         .map_err(|_| ApiError::unauthorized())?;
@@ -3889,13 +4145,13 @@ fn validate_mercadopago_timestamp(timestamp: &str, now: SystemTime) -> Result<()
     Ok(())
 }
 
-fn parse_mercadopago_signature(header_value: &str) -> Option<(&str, &str)> {
+fn parse_webhook_signature(header_value: &str) -> Option<(&str, &str)> {
     let mut timestamp = None;
     let mut v1 = None;
     for part in header_value.split(',') {
         let (key, value) = part.split_once('=')?;
         match key.trim().to_ascii_lowercase().as_str() {
-            "ts" if !value.trim().is_empty() => timestamp = Some(value.trim()),
+            "ts" | "t" if !value.trim().is_empty() => timestamp = Some(value.trim()),
             "v1" if !value.trim().is_empty() => v1 = Some(value.trim()),
             _ => {}
         }
@@ -4012,11 +4268,11 @@ async fn require_session(state: &AppState, headers: &HeaderMap) -> Result<UserSe
 
     let session = state.storage.get_user_session(&session_id).await?;
     if session.is_none() {
-        tracing::warn!(session_id, "auth rejected: session not found in storage");
+        tracing::warn!("auth rejected: session not found in storage");
     }
     let session = session.ok_or(ApiError::unauthorized())?;
     if !session_is_active(&session, Utc::now()) {
-        tracing::warn!(session_id, "auth rejected: session expired or revoked");
+        tracing::warn!("auth rejected: session expired or revoked");
         return Err(ApiError::unauthorized());
     }
     Ok(session)
@@ -4059,7 +4315,7 @@ impl ApiError {
         }
     }
 
-    fn forbidden(message: &str) -> Self {
+    pub(crate) fn forbidden(message: &str) -> Self {
         Self {
             status: StatusCode::FORBIDDEN,
             message: message.to_string(),
@@ -4135,11 +4391,31 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
-        let mut body = json!({ "error": self.message });
+        let request_id = crate::REQUEST_ID.try_with(Clone::clone).ok();
+        let mut error = json!({
+            "code": error_code(self.status),
+            "message": self.message,
+            "request_id": request_id,
+        });
         if let Some(details) = self.details {
-            body["details"] = details;
+            error["details"] = details;
         }
-        (self.status, Json(body)).into_response()
+        (self.status, Json(json!({ "error": error }))).into_response()
+    }
+}
+
+fn error_code(status: StatusCode) -> &'static str {
+    match status {
+        StatusCode::BAD_REQUEST => "BAD_REQUEST",
+        StatusCode::UNAUTHORIZED => "AUTHENTICATION_REQUIRED",
+        StatusCode::FORBIDDEN => "FORBIDDEN",
+        StatusCode::PAYMENT_REQUIRED => "SUBSCRIPTION_REQUIRED",
+        StatusCode::NOT_FOUND => "NOT_FOUND",
+        StatusCode::CONFLICT => "CONFLICT",
+        StatusCode::TOO_MANY_REQUESTS => "RATE_LIMITED",
+        StatusCode::BAD_GATEWAY => "EXTERNAL_SERVICE_UNAVAILABLE",
+        StatusCode::SERVICE_UNAVAILABLE => "SERVICE_UNAVAILABLE",
+        _ => "INTERNAL_ERROR",
     }
 }
 
@@ -4167,22 +4443,20 @@ impl GoogleResponseExt for reqwest::Response {
         let status = self.status();
         let text = self.text().await.unwrap_or_default();
         if !status.is_success() {
-            return Err(anyhow::anyhow!("{label} failed with {status}: {text}"));
+            return Err(anyhow::anyhow!("{label} failed with {status}"));
         }
-        serde_json::from_str(&text).map_err(|error| {
-            anyhow::anyhow!("{label} returned invalid JSON: {error}; body: {text}")
-        })
+        serde_json::from_str(&text)
+            .map_err(|error| anyhow::anyhow!("{label} returned invalid JSON: {error}"))
     }
 
     async fn json_or_external_error<T: DeserializeOwned>(self, label: &str) -> anyhow::Result<T> {
         let status = self.status();
         let text = self.text().await.unwrap_or_default();
         if !status.is_success() {
-            return Err(anyhow::anyhow!("{label} failed with {status}: {text}"));
+            return Err(anyhow::anyhow!("{label} failed with {status}"));
         }
-        serde_json::from_str(&text).map_err(|error| {
-            anyhow::anyhow!("{label} returned invalid JSON: {error}; body: {text}")
-        })
+        serde_json::from_str(&text)
+            .map_err(|error| anyhow::anyhow!("{label} returned invalid JSON: {error}"))
     }
 }
 
@@ -4243,10 +4517,211 @@ mod tests {
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let body: serde_json::Value = response_json(response).await;
         assert_eq!(
-            body["error"],
+            body["error"]["message"],
             "Ocurrió un error inesperado. Inténtalo nuevamente."
         );
+        assert_eq!(body["error"]["code"], "INTERNAL_ERROR");
         assert!(!body.to_string().contains("secret-token"));
+    }
+
+    #[tokio::test]
+    async fn public_errors_include_a_code_and_the_server_request_id() {
+        let test = seeded_app().await;
+        let response = test
+            .app
+            .oneshot(request(
+                Method::GET,
+                "/analysis-runs/does-not-exist",
+                Some(&test.alice_cookie),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let request_id = response
+            .headers()
+            .get("x-request-id")
+            .and_then(|value| value.to_str().ok())
+            .unwrap()
+            .to_string();
+        let body: serde_json::Value = response_json(response).await;
+        assert_eq!(body["error"]["code"], "NOT_FOUND");
+        assert_eq!(body["error"]["request_id"], request_id);
+    }
+
+    #[tokio::test]
+    async fn current_request_id_is_available_for_worker_requests() {
+        let expected = Uuid::new_v4().to_string();
+        let forwarded = crate::REQUEST_ID
+            .scope(expected.clone(), async { worker_request_id() })
+            .await;
+        assert_eq!(forwarded.as_deref(), Some(expected.as_str()));
+    }
+
+    #[tokio::test]
+    async fn protected_errors_keep_the_public_contract_and_hide_foreign_runs() {
+        let test = seeded_app().await;
+
+        let response = test
+            .app
+            .clone()
+            .oneshot(request(Method::GET, "/auth/me", None, None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body: serde_json::Value = response_json(response).await;
+        assert_eq!(body["error"]["code"], "AUTHENTICATION_REQUIRED");
+
+        let response = test
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/auth/logout")
+                    .header(header::COOKIE, &test.alice_cookie)
+                    .header(header::ORIGIN, "https://untrusted.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body: serde_json::Value = response_json(response).await;
+        assert_eq!(body["error"]["code"], "FORBIDDEN");
+
+        let response = test
+            .app
+            .clone()
+            .oneshot(request(
+                Method::GET,
+                "/analysis-runs/run-alice",
+                Some(&test.bob_cookie),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let foreign: serde_json::Value = response_json(response).await;
+
+        let response = test
+            .app
+            .oneshot(request(
+                Method::GET,
+                "/analysis-runs/does-not-exist",
+                Some(&test.bob_cookie),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let absent: serde_json::Value = response_json(response).await;
+
+        assert_eq!(foreign["error"]["code"], "NOT_FOUND");
+        assert_eq!(foreign["error"]["message"], absent["error"]["message"]);
+    }
+
+    #[tokio::test]
+    async fn failed_runs_persist_a_safe_error_code() {
+        let test = seeded_app().await;
+        let state = AppState::new(test_app_config(), Arc::new(test.storage.clone()));
+
+        mark_run_failed(
+            &state,
+            "run-alice",
+            &anyhow::anyhow!("provider body contains secret-token"),
+        )
+        .await;
+
+        let stored = test
+            .storage
+            .get_analysis_run("run-alice")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.error_message.as_deref(), Some("analysis_failed"));
+        assert!(
+            !stored
+                .error_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("secret-token")
+        );
+    }
+
+    #[tokio::test]
+    async fn responses_get_a_server_generated_request_id() {
+        let test = seeded_app().await;
+        let response = test
+            .app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .header("x-request-id", "untrusted-client-value")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let request_id = response
+            .headers()
+            .get("x-request-id")
+            .and_then(|value| value.to_str().ok())
+            .expect("every response includes a request id");
+
+        assert_ne!(request_id, "untrusted-client-value");
+        assert!(Uuid::parse_str(request_id).is_ok());
+    }
+
+    #[test]
+    fn persistence_discards_full_email_bodies() {
+        let mut message = message("message-1", "cliente@example.com");
+        message.body_text = Some("contenido completo que no debe persistirse".to_string());
+
+        let persisted = messages_for_persistence(&[message.clone()]);
+
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].body_text, None);
+        assert_eq!(persisted[0].id, message.id);
+        assert_eq!(persisted[0].snippet, message.snippet);
+    }
+
+    #[test]
+    fn detailed_ai_audit_limits_messages_and_body_length() {
+        let thread = thread("thread-1", "run-1");
+        let mut first = message("msg-a", "cliente@example.com");
+        first.body_text = Some("abcdefgh".to_string());
+        let mut second = message("msg-b", "cliente@example.com");
+        second.body_text = Some("otro cuerpo completo".to_string());
+        second.date = first.date + chrono::Duration::seconds(1);
+
+        let selected = audit_messages_for_thread(&thread, &[first, second], 1, 5);
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].id, "msg-a");
+        assert_eq!(selected[0].body_text.as_deref(), Some("abcde\n[truncado]"));
+    }
+
+    #[test]
+    fn detailed_ai_failure_does_not_persist_provider_detail() {
+        let mut failed = thread("thread-1", "run-1");
+        let provider_error = anyhow::anyhow!("Bedrock response included secret-token");
+
+        mark_detailed_audit_failed(&mut failed, &provider_error);
+
+        assert!(failed.manual_review_required);
+        assert!(
+            failed
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("no estuvo disponible"))
+        );
+        assert!(
+            failed
+                .reasons
+                .iter()
+                .all(|reason| !reason.contains("secret-token"))
+        );
     }
 
     struct TestApp {
@@ -4326,11 +4801,37 @@ mod tests {
         )
     }
 
+    fn signed_workos_webhook(body: &str, secret: &str) -> String {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+            .to_string();
+        type HmacSha256 = Hmac<Sha256>;
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(format!("{timestamp}.{body}").as_bytes());
+        format!(
+            "t={timestamp},v1={}",
+            hex_lower(&mac.finalize().into_bytes())
+        )
+    }
+
+    fn workos_webhook_request(body: &str, signature: &str) -> Request<Body> {
+        Request::builder()
+            .method(Method::POST)
+            .uri("/auth/workos/webhook")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("workos-signature", signature)
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
     fn session(id: &str, email: &str) -> UserSession {
         let now = Utc::now();
         UserSession {
             id: id.to_string(),
             workos_user_id: Some(format!("workos-{id}")),
+            workos_session_id: None,
             google_account_email: email.to_string(),
             gmail_account_email: Some(email.to_string()),
             access_token_encrypted: "access".to_string(),
@@ -4342,6 +4843,18 @@ mod tests {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    #[test]
+    fn workos_access_token_extracts_the_session_id_for_local_mapping() {
+        let payload = URL_SAFE_NO_PAD.encode(json!({ "sid": "session_123" }).to_string());
+        let token = format!("header.{payload}.signature");
+
+        assert_eq!(
+            workos_session_id_from_access_token(Some(&token)),
+            Some("session_123".to_string())
+        );
+        assert_eq!(workos_session_id_from_access_token(Some("invalid")), None);
     }
 
     fn subscription(org_id: &str, email: &str) -> Subscription {
@@ -4591,7 +5104,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body: serde_json::Value = response_json(response).await;
         assert_eq!(
-            body["details"]["missing"],
+            body["error"]["details"]["missing"],
             json!(["internal_domains", "valid_request_criteria"])
         );
 
@@ -4732,22 +5245,133 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mutations_reject_an_untrusted_origin() {
+    async fn logout_all_revokes_every_session_for_the_owner_only() {
+        let fixture = seeded_app().await;
+        fixture
+            .storage
+            .upsert_user_session(&session("alice-other", "alice@example.com"))
+            .await
+            .unwrap();
+        let alice_other_cookie = signed_cookie("alice-other", &test_app_config().session_secret);
+
+        let response = fixture
+            .app
+            .clone()
+            .oneshot(request(
+                Method::POST,
+                "/auth/logout-all",
+                Some(&fixture.alice_cookie),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        for id in ["alice-session", "alice-other"] {
+            assert!(
+                fixture
+                    .storage
+                    .get_user_session(id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .revoked_at
+                    .is_some()
+            );
+        }
+        assert!(
+            fixture
+                .storage
+                .get_user_session("bob-session")
+                .await
+                .unwrap()
+                .unwrap()
+                .revoked_at
+                .is_none()
+        );
+
+        for cookie in [&fixture.alice_cookie, &alice_other_cookie] {
+            let response = fixture
+                .app
+                .clone()
+                .oneshot(request(Method::GET, "/auth/me", Some(cookie), None))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+        let response = fixture
+            .app
+            .oneshot(request(
+                Method::GET,
+                "/auth/me",
+                Some(&fixture.bob_cookie),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn workos_callback_hides_provider_error_description() {
         let fixture = seeded_app().await;
         let response = fixture
             .app
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/auth/logout")
-                    .header(header::COOKIE, &fixture.alice_cookie)
-                    .header(header::ORIGIN, "https://untrusted.example")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(request(
+                Method::GET,
+                "/auth/workos/callback?error=access_denied&error_description=provider-secret%40example.com",
+                None,
+                None,
+            ))
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let body: serde_json::Value = response_json(response).await;
+        assert_eq!(body["error"]["code"], "BAD_REQUEST");
+        assert_eq!(
+            body["error"]["message"],
+            "No se pudo completar el inicio de sesión. Inténtalo nuevamente."
+        );
+        assert!(!body.to_string().contains("provider-secret"));
+    }
+
+    #[tokio::test]
+    async fn mutations_reject_an_untrusted_origin() {
+        let fixture = seeded_app().await;
+        for (method, uri) in [
+            (Method::POST, "/auth/logout"),
+            (Method::POST, "/auth/logout-all"),
+            (Method::POST, "/gmail/disconnect"),
+            (Method::DELETE, "/me/analysis-data"),
+            (Method::PUT, "/me/org/config"),
+            (Method::POST, "/me/filter-presets"),
+            (Method::PUT, "/me/filter-presets/preset-1"),
+            (Method::DELETE, "/me/filter-presets/preset-1"),
+            (Method::POST, "/analysis-runs"),
+            (Method::POST, "/analysis-runs/run-alice/start"),
+            (
+                Method::PATCH,
+                "/analysis-runs/run-alice/threads/thread-alice/manual-review",
+            ),
+            (Method::PATCH, "/threads/thread-alice/manual-review"),
+        ] {
+            let response = fixture
+                .app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .header(header::COOKIE, &fixture.alice_cookie)
+                        .header(header::ORIGIN, "https://untrusted.example")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{uri}");
+        }
     }
 
     #[tokio::test]
@@ -4805,10 +5429,14 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
-        for id in ["alice-session", "alice-old"] {
-            let session = fixture.storage.get_user_session(id).await.unwrap().unwrap();
-            assert!(!gmail_connected(&session));
-        }
+        assert!(!gmail_connection_is_active(
+            fixture
+                .storage
+                .get_gmail_connection("alice@example.com")
+                .await
+                .unwrap()
+                .as_ref()
+        ));
         let bundle = fixture
             .storage
             .get_org_config_for_user("alice@example.com")
@@ -4901,11 +5529,175 @@ mod tests {
     }
 
     #[test]
-    fn mercadopago_signature_rejects_stale_timestamp() {
+    fn webhook_signature_rejects_stale_timestamp() {
         let old_ts = "1742505638683";
         let now = UNIX_EPOCH + Duration::from_millis(1742505638683 + 301_000);
 
-        assert!(validate_mercadopago_timestamp(old_ts, now).is_err());
+        assert!(validate_webhook_timestamp(old_ts, now).is_err());
+    }
+
+    #[tokio::test]
+    async fn workos_session_revoked_only_invalidates_the_matching_local_session() {
+        let fixture = seeded_app().await;
+        let mut alice = fixture
+            .storage
+            .get_user_session("alice-session")
+            .await
+            .unwrap()
+            .unwrap();
+        alice.workos_session_id = Some("session-alice".to_string());
+        fixture.storage.upsert_user_session(&alice).await.unwrap();
+        let body = r#"{"event":"session.revoked","data":{"id":"session-alice"}}"#;
+        let signature = signed_workos_webhook(body, "test-workos-webhook-secret");
+
+        let response = fixture
+            .app
+            .clone()
+            .oneshot(workos_webhook_request(body, &signature))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(
+            fixture
+                .storage
+                .get_user_session("alice-session")
+                .await
+                .unwrap()
+                .unwrap()
+                .revoked_at
+                .is_some()
+        );
+        assert!(
+            fixture
+                .storage
+                .get_user_session("bob-session")
+                .await
+                .unwrap()
+                .unwrap()
+                .revoked_at
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_workos_signature_cannot_revoke_a_local_session() {
+        let fixture = seeded_app().await;
+        let mut alice = fixture
+            .storage
+            .get_user_session("alice-session")
+            .await
+            .unwrap()
+            .unwrap();
+        alice.workos_session_id = Some("session-alice".to_string());
+        fixture.storage.upsert_user_session(&alice).await.unwrap();
+        let body = r#"{"event":"session.revoked","data":{"id":"session-alice"}}"#;
+
+        let response = fixture
+            .app
+            .oneshot(workos_webhook_request(body, "t=1,v1=deadbeef"))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(
+            fixture
+                .storage
+                .get_user_session("alice-session")
+                .await
+                .unwrap()
+                .unwrap()
+                .revoked_at
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn workos_user_deleted_revokes_access_gmail_and_scheduler() {
+        let fixture = seeded_app().await;
+        let connection = fixture
+            .storage
+            .get_gmail_connection("alice@example.com")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(gmail_connection_is_active(Some(&connection)));
+        let mut bundle = crate::policies::provision_default_config("alice@example.com", Utc::now());
+        bundle.draft.schedule_report_policy.scheduler_enabled = true;
+        fixture.storage.upsert_org_config(&bundle).await.unwrap();
+        let body = r#"{"event":"user.deleted","data":{"id":"workos-alice-session"}}"#;
+        let signature = signed_workos_webhook(body, "test-workos-webhook-secret");
+
+        let response = fixture
+            .app
+            .oneshot(workos_webhook_request(body, &signature))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(
+            fixture
+                .storage
+                .get_user_session("alice-session")
+                .await
+                .unwrap()
+                .unwrap()
+                .revoked_at
+                .is_some()
+        );
+        let connection = fixture
+            .storage
+            .get_gmail_connection("alice@example.com")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!gmail_connection_is_active(Some(&connection)));
+        let bundle = fixture
+            .storage
+            .get_org_config_for_user("alice@example.com")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(bundle.mailbox.revoked_at.is_some());
+        assert!(!bundle.draft.schedule_report_policy.scheduler_enabled);
+        assert!(
+            fixture
+                .storage
+                .list_schedule_configs()
+                .await
+                .unwrap()
+                .iter()
+                .any(|config| config.user_email == "alice@example.com" && !config.enabled)
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_policy_sync_cannot_reenable_scheduler_after_gmail_revocation() {
+        let fixture = seeded_app().await;
+        let mut stale_bundle =
+            crate::policies::provision_default_config("alice@example.com", Utc::now());
+        stale_bundle.draft.schedule_report_policy.scheduler_enabled = true;
+
+        fixture
+            .storage
+            .disconnect_gmail("alice@example.com", Utc::now())
+            .await
+            .unwrap();
+        let state = AppState::new(test_app_config(), Arc::new(fixture.storage.clone()));
+        sync_schedule_config_from_policy(&state, &stale_bundle)
+            .await
+            .unwrap();
+
+        assert!(
+            fixture
+                .storage
+                .list_schedule_configs()
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|config| config.user_email == "alice@example.com")
+                .is_some_and(|config| !config.enabled)
+        );
     }
 
     #[test]
@@ -5126,7 +5918,7 @@ mod tests {
         assert_eq!(body["actions"]["disconnect_gmail"]["available"], false);
         assert_eq!(
             body["actions"]["disconnect_gmail"]["reason"],
-            "pending_backend_contract"
+            "available_in_account"
         );
     }
 
@@ -5145,6 +5937,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            fixture
+                .storage
+                .analysis_data_deletion_audits()
+                .await
+                .is_empty()
+        );
 
         let response = fixture
             .app
@@ -5157,6 +5956,17 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let request_id = response
+            .headers()
+            .get("x-request-id")
+            .and_then(|value| value.to_str().ok())
+            .expect("deletion response includes a request id");
+        let audits = fixture.storage.analysis_data_deletion_audits().await;
+        assert_eq!(audits.len(), 1);
+        assert_eq!(audits[0].id, request_id);
+        assert_eq!(audits[0].owner_hash, hash_owner_email("alice@example.com"));
+        assert_eq!(audits[0].status, AnalysisDataDeletionStatus::Completed);
+        assert!(audits[0].completed_at.is_some());
         assert!(
             fixture
                 .storage

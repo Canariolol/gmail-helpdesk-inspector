@@ -81,6 +81,8 @@ struct GmailPayload {
     #[serde(rename = "mimeType")]
     mime_type: Option<String>,
     #[serde(default)]
+    filename: String,
+    #[serde(default)]
     headers: Vec<GmailHeader>,
     body: Option<GmailBody>,
     #[serde(default)]
@@ -96,6 +98,8 @@ struct GmailHeader {
 #[derive(Debug, Deserialize)]
 struct GmailBody {
     data: Option<String>,
+    #[serde(rename = "attachmentId")]
+    attachment_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -450,6 +454,7 @@ fn normalize_message(
     config: &AnalysisConfig,
 ) -> anyhow::Result<EmailMessage> {
     let headers = header_map(&message.payload.headers);
+    let persisted_headers = persisted_headers(&headers);
     let subject = header(&headers, "subject").unwrap_or_else(|| "(sin asunto)".to_string());
     let from = header(&headers, "from").unwrap_or_default();
     let (from_name, from_email) = parse_mailbox(&from);
@@ -457,7 +462,7 @@ fn normalize_message(
     let cc_emails = parse_address_list(header(&headers, "cc").unwrap_or_default().as_str());
     let date = parse_date(&headers, message.internal_date.as_deref())?;
     let is_internal = is_internal_email(&from_email, &config.internal_domains);
-    let is_automated = is_automated_sender(&from_email, &Value::Object(headers.clone()));
+    let is_automated = is_automated_sender(&from_email, &Value::Object(persisted_headers.clone()));
 
     Ok(EmailMessage {
         id: message.id.clone(),
@@ -469,7 +474,7 @@ fn normalize_message(
         date,
         subject,
         snippet: message.snippet,
-        headers: Value::Object(headers),
+        headers: Value::Object(persisted_headers),
         is_internal,
         is_external: !is_internal,
         is_automated,
@@ -482,6 +487,14 @@ fn header_map(headers: &[GmailHeader]) -> Map<String, Value> {
         .iter()
         .map(|header| (header.name.to_lowercase(), json!(header.value)))
         .collect()
+}
+
+fn persisted_headers(headers: &Map<String, Value>) -> Map<String, Value> {
+    headers
+        .get("auto-submitted")
+        .cloned()
+        .map(|value| Map::from_iter([("auto-submitted".to_string(), value)]))
+        .unwrap_or_default()
 }
 
 fn header(headers: &Map<String, Value>, name: &str) -> Option<String> {
@@ -533,6 +546,8 @@ fn extract_text(payload: &GmailPayload) -> String {
 fn collect_text(payload: &GmailPayload, chunks: &mut Vec<String>) {
     if let Some(body) = &payload.body
         && let Some(data) = &body.data
+        && payload.filename.is_empty()
+        && body.attachment_id.is_none()
         && payload
             .mime_type
             .as_deref()
@@ -629,6 +644,7 @@ mod tests {
             label_ids: labels.into_iter().map(str::to_string).collect(),
             payload: GmailPayload {
                 mime_type: None,
+                filename: String::new(),
                 headers: vec![
                     GmailHeader {
                         name: "From".to_string(),
@@ -686,6 +702,61 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].id, "keep");
+    }
+
+    #[test]
+    fn extract_text_excludes_parts_marked_as_attachments() {
+        let payload = GmailPayload {
+            mime_type: Some("multipart/mixed".to_string()),
+            filename: String::new(),
+            headers: vec![],
+            body: None,
+            parts: vec![
+                GmailPayload {
+                    mime_type: Some("text/plain".to_string()),
+                    filename: String::new(),
+                    headers: vec![],
+                    body: Some(GmailBody {
+                        data: Some(URL_SAFE_NO_PAD.encode("cuerpo del correo")),
+                        attachment_id: None,
+                    }),
+                    parts: vec![],
+                },
+                GmailPayload {
+                    mime_type: Some("text/plain".to_string()),
+                    filename: "secreto.txt".to_string(),
+                    headers: vec![],
+                    body: Some(GmailBody {
+                        data: Some(URL_SAFE_NO_PAD.encode("contenido adjunto")),
+                        attachment_id: Some("attachment-id".to_string()),
+                    }),
+                    parts: vec![],
+                },
+            ],
+        };
+
+        assert_eq!(extract_text(&payload), "cuerpo del correo");
+    }
+
+    #[test]
+    fn normalize_message_persists_only_the_automation_header() {
+        let mut message = gmail_message("keep", vec!["INBOX"]);
+        message.payload.headers.push(GmailHeader {
+            name: "Auto-Submitted".to_string(),
+            value: "auto-generated".to_string(),
+        });
+        message.payload.headers.push(GmailHeader {
+            name: "X-Internal-Trace".to_string(),
+            value: "private-value".to_string(),
+        });
+
+        let normalized = normalize_message(message, &config()).unwrap();
+
+        assert_eq!(
+            normalized.headers,
+            json!({ "auto-submitted": "auto-generated" })
+        );
+        assert!(normalized.is_automated);
     }
 
     #[test]

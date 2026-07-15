@@ -38,7 +38,7 @@ Principios de producción beta:
 | `WEB_BASE_URL` | URL pública del frontend para redirects/cookies. |
 | `API_BASE_URL` | URL pública de API. También influye en cookie secure. |
 | `APP_COOKIE_SECURE` | Override de cookie secure. |
-| `APP_COOKIE_SAMESITE` | Override SameSite. Default `None` si HTTPS, si no `Lax`. |
+| `APP_COOKIE_SAMESITE` | Override SameSite. Default `Lax`; mantenerlo con el proxy mismo-origen. `None` solo es necesario para una API llamada directamente desde otro sitio y exige revisar CSRF. |
 | `APP_STORAGE` | `firestore` por defecto; `memory` solo dev/local. |
 | `APP_ENCRYPTION_KEY` | Requerida en producción; no usar default dev. |
 | `APP_SESSION_SECRET` | Requerida en producción; no usar default dev. |

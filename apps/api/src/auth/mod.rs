@@ -20,6 +20,8 @@ pub struct UserSession {
     pub id: String,
     #[serde(default)]
     pub workos_user_id: Option<String>,
+    #[serde(default)]
+    pub workos_session_id: Option<String>,
     pub google_account_email: String,
     #[serde(default)]
     pub gmail_account_email: Option<String>,
@@ -132,4 +134,19 @@ fn cookie(name: &str, value: &str, max_age: i64, same_site: &str, secure: bool) 
     format!(
         "{name}={value}; Path=/; HttpOnly; SameSite={same_site}; Max-Age={max_age}{secure_attr}"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_and_oauth_cookies_keep_the_required_security_attributes() {
+        let session = session_cookie("signed", "Lax", true);
+        assert!(session.contains("Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000; Secure"));
+        assert!(!session.contains("Domain="));
+
+        let oauth = oauth_cookie("state", "Lax", true);
+        assert!(oauth.contains("Path=/; HttpOnly; SameSite=Lax; Max-Age=600; Secure"));
+    }
 }

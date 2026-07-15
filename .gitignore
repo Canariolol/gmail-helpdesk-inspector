@@ -19,6 +19,7 @@ __pycache__/
 *.pyc
 *.egg-info/
 apps/ai-worker/src/*.egg-info/
+apps/ai-worker/.venv/
 
 # Agent orchestration
 .agent-orchestration/runs/**/*.log

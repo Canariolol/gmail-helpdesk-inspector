@@ -6,6 +6,7 @@ use std::{
 use anyhow::anyhow;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use crate::{
@@ -16,9 +17,9 @@ use crate::{
     },
     auth::UserSession,
     billing::{Account, CheckoutSession, Subscription, UsageLedger},
-    mailbox::{FilterPreset, MailboxMetadata},
+    mailbox::{FilterPreset, GmailConnection, MailboxMetadata},
     policies::{OrgConfigBundle, PolicyVersion},
-    scheduler::model::{ScheduleConfig, ScheduleState},
+    scheduler::model::{ScheduleConfig, ScheduleRunStatus, ScheduleState},
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -38,6 +39,39 @@ pub struct ManualReviewInheritanceMigrationResult {
     pub updated_threads: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AnalysisDataDeletionStatus {
+    Requested,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AnalysisDataDeletionAudit {
+    pub id: String,
+    pub owner_hash: String,
+    pub status: AnalysisDataDeletionStatus,
+    pub requested_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+/// Resultado de intentar reservar una ventana del scheduler. La operación debe
+/// ser atómica en cada implementación de storage para que dos instancias no
+/// ejecuten el mismo análisis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScheduleWindowClaim {
+    Claimed,
+    AlreadyCompleted,
+    AlreadyRunning,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GmailConnectionRefresh {
+    Updated,
+    ConnectionChanged,
+}
+
 #[async_trait]
 pub trait StorageRepository: Send + Sync {
     async fn upsert_account(&self, account: &Account) -> anyhow::Result<()>;
@@ -48,17 +82,36 @@ pub trait StorageRepository: Send + Sync {
     async fn get_account_by_email(&self, email: &str) -> anyhow::Result<Option<Account>>;
     async fn upsert_user_session(&self, session: &UserSession) -> anyhow::Result<()>;
     async fn get_user_session(&self, id: &str) -> anyhow::Result<Option<UserSession>>;
-    async fn disconnect_gmail(&self, owner_email: &str, now: DateTime<Utc>) -> anyhow::Result<()>;
-    /// Sesión más reciente del usuario que tenga refresh token; la usa el
-    /// análisis programado para operar sin cookie de sesión.
-    async fn find_latest_session_with_refresh_token(
+    async fn upsert_gmail_connection(&self, connection: &GmailConnection) -> anyhow::Result<()>;
+    async fn get_gmail_connection(
         &self,
-        email: &str,
-    ) -> anyhow::Result<Option<UserSession>>;
+        owner_email: &str,
+    ) -> anyhow::Result<Option<GmailConnection>>;
+    async fn refresh_gmail_connection(
+        &self,
+        previous: &GmailConnection,
+        updated: &GmailConnection,
+    ) -> anyhow::Result<GmailConnectionRefresh>;
+    async fn revoke_user_sessions(
+        &self,
+        owner_email: &str,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<()>;
+    async fn revoke_user_session_by_workos_session_id(
+        &self,
+        workos_session_id: &str,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<()>;
+    async fn disconnect_gmail(&self, owner_email: &str, now: DateTime<Utc>) -> anyhow::Result<()>;
     async fn list_schedule_configs(&self) -> anyhow::Result<Vec<ScheduleConfig>>;
     async fn upsert_schedule_config(&self, config: &ScheduleConfig) -> anyhow::Result<()>;
     async fn get_schedule_state(&self, user_email: &str) -> anyhow::Result<Option<ScheduleState>>;
     async fn upsert_schedule_state(&self, state: &ScheduleState) -> anyhow::Result<()>;
+    async fn claim_schedule_window(
+        &self,
+        state: &ScheduleState,
+        stale_before: DateTime<Utc>,
+    ) -> anyhow::Result<ScheduleWindowClaim>;
     async fn get_org_config_for_user(
         &self,
         user_email: &str,
@@ -93,6 +146,10 @@ pub trait StorageRepository: Send + Sync {
     async fn get_analysis_run(&self, id: &str) -> anyhow::Result<Option<AnalysisRun>>;
     async fn list_analysis_runs(&self, user_email: &str) -> anyhow::Result<Vec<AnalysisRun>>;
     async fn delete_analysis_data(&self, owner_email: &str) -> anyhow::Result<()>;
+    async fn record_analysis_data_deletion(
+        &self,
+        audit: &AnalysisDataDeletionAudit,
+    ) -> anyhow::Result<()>;
     async fn upsert_thread(
         &self,
         thread: &EmailThread,
@@ -154,6 +211,7 @@ pub struct MemoryStorage {
 #[derive(Default)]
 struct MemoryInner {
     sessions: HashMap<String, UserSession>,
+    gmail_connections: HashMap<String, GmailConnection>,
     accounts: HashMap<String, Account>,
     runs: HashMap<String, AnalysisRun>,
     threads: HashMap<String, EmailThread>,
@@ -170,8 +228,25 @@ struct MemoryInner {
     mailbox_metadata: HashMap<String, MailboxMetadata>,
     filter_presets: HashMap<String, FilterPreset>,
     manual_review_overrides: HashMap<String, ManualReviewOverride>,
+    analysis_data_deletion_audits: HashMap<String, AnalysisDataDeletionAudit>,
     manual_review_metrics_v1_applied: bool,
     manual_review_inheritance_v2_applied: bool,
+}
+
+#[cfg(test)]
+impl MemoryStorage {
+    pub async fn analysis_data_deletion_audits(&self) -> Vec<AnalysisDataDeletionAudit> {
+        let mut audits: Vec<_> = self
+            .inner
+            .read()
+            .await
+            .analysis_data_deletion_audits
+            .values()
+            .cloned()
+            .collect();
+        audits.sort_by(|left, right| left.id.cmp(&right.id));
+        audits
+    }
 }
 
 fn thread_storage_key(run_id: &str, thread_id: &str) -> String {
@@ -192,6 +267,51 @@ pub fn clear_gmail_connection(session: &mut UserSession, now: DateTime<Utc>) {
     session.access_token_encrypted.clear();
     session.refresh_token_encrypted = None;
     session.updated_at = now;
+}
+
+fn owner_key(owner_email: &str) -> String {
+    owner_email.trim().to_ascii_lowercase()
+}
+
+pub(crate) fn existing_schedule_window_claim(
+    existing: &ScheduleState,
+    candidate: &ScheduleState,
+    stale_before: DateTime<Utc>,
+) -> Option<ScheduleWindowClaim> {
+    let same_window = existing.window_date_from == candidate.window_date_from
+        && existing.window_date_to == candidate.window_date_to;
+    if !same_window {
+        return None;
+    }
+
+    match existing.status {
+        ScheduleRunStatus::Completed => Some(ScheduleWindowClaim::AlreadyCompleted),
+        ScheduleRunStatus::Running if existing.started_at > stale_before => {
+            Some(ScheduleWindowClaim::AlreadyRunning)
+        }
+        ScheduleRunStatus::Running | ScheduleRunStatus::Failed => None,
+    }
+}
+
+/// Compatibilidad de una sola vez para credenciales creadas antes de que la
+/// conexión Gmail se separara de la sesión web.
+pub fn gmail_connection_from_legacy(session: &UserSession) -> Option<GmailConnection> {
+    let access_token_encrypted = session.gmail_access_token_encrypted.clone().or_else(|| {
+        (!session.access_token_encrypted.trim().is_empty())
+            .then(|| session.access_token_encrypted.clone())
+    })?;
+    Some(GmailConnection {
+        owner_email: session.google_account_email.clone(),
+        gmail_account_email: session.gmail_account_email.clone()?,
+        access_token_encrypted,
+        refresh_token_encrypted: session
+            .gmail_refresh_token_encrypted
+            .clone()
+            .or(session.refresh_token_encrypted.clone()),
+        connected_at: session.created_at,
+        updated_at: session.updated_at,
+        revoked_at: None,
+    })
 }
 
 #[async_trait]
@@ -243,8 +363,119 @@ impl StorageRepository for MemoryStorage {
         Ok(self.inner.read().await.sessions.get(id).cloned())
     }
 
-    async fn disconnect_gmail(&self, owner_email: &str, now: DateTime<Utc>) -> anyhow::Result<()> {
+    async fn upsert_gmail_connection(&self, connection: &GmailConnection) -> anyhow::Result<()> {
+        self.inner
+            .write()
+            .await
+            .gmail_connections
+            .insert(owner_key(&connection.owner_email), connection.clone());
+        Ok(())
+    }
+
+    async fn get_gmail_connection(
+        &self,
+        owner_email: &str,
+    ) -> anyhow::Result<Option<GmailConnection>> {
+        let key = owner_key(owner_email);
+        if let Some(connection) = self.inner.read().await.gmail_connections.get(&key).cloned() {
+            return Ok(Some(connection));
+        }
+        let legacy = self
+            .inner
+            .read()
+            .await
+            .sessions
+            .values()
+            .filter(|session| {
+                session
+                    .google_account_email
+                    .eq_ignore_ascii_case(owner_email)
+            })
+            .filter_map(gmail_connection_from_legacy)
+            .max_by_key(|connection| {
+                (
+                    connection.refresh_token_encrypted.is_some(),
+                    connection.updated_at,
+                )
+            });
+        let Some(connection) = legacy else {
+            return Ok(None);
+        };
+
+        let mut inner = self.inner.write().await;
+        inner.gmail_connections.insert(key, connection.clone());
+        for session in inner.sessions.values_mut() {
+            if session
+                .google_account_email
+                .eq_ignore_ascii_case(owner_email)
+            {
+                clear_gmail_connection(session, connection.updated_at);
+            }
+        }
+        Ok(Some(connection))
+    }
+
+    async fn refresh_gmail_connection(
+        &self,
+        previous: &GmailConnection,
+        updated: &GmailConnection,
+    ) -> anyhow::Result<GmailConnectionRefresh> {
+        let mut inner = self.inner.write().await;
+        let Some(current) = inner
+            .gmail_connections
+            .get(&owner_key(&previous.owner_email))
+        else {
+            return Ok(GmailConnectionRefresh::ConnectionChanged);
+        };
+        if current.updated_at != previous.updated_at || current.revoked_at.is_some() {
+            return Ok(GmailConnectionRefresh::ConnectionChanged);
+        }
+        inner
+            .gmail_connections
+            .insert(owner_key(&updated.owner_email), updated.clone());
+        Ok(GmailConnectionRefresh::Updated)
+    }
+
+    async fn revoke_user_sessions(
+        &self,
+        owner_email: &str,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<()> {
         for session in self.inner.write().await.sessions.values_mut() {
+            if session
+                .google_account_email
+                .eq_ignore_ascii_case(owner_email)
+            {
+                session.revoked_at = Some(now);
+                session.updated_at = now;
+            }
+        }
+        Ok(())
+    }
+
+    async fn revoke_user_session_by_workos_session_id(
+        &self,
+        workos_session_id: &str,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<()> {
+        for session in self.inner.write().await.sessions.values_mut() {
+            if session.workos_session_id.as_deref() == Some(workos_session_id) {
+                session.revoked_at = Some(now);
+                session.updated_at = now;
+            }
+        }
+        Ok(())
+    }
+
+    async fn disconnect_gmail(&self, owner_email: &str, now: DateTime<Utc>) -> anyhow::Result<()> {
+        let mut inner = self.inner.write().await;
+        if let Some(connection) = inner.gmail_connections.get_mut(&owner_key(owner_email)) {
+            connection.access_token_encrypted.clear();
+            connection.refresh_token_encrypted = None;
+            connection.revoked_at = Some(now);
+            connection.updated_at = now;
+        }
+        for session in inner.sessions.values_mut() {
             if session
                 .google_account_email
                 .eq_ignore_ascii_case(owner_email)
@@ -253,25 +484,6 @@ impl StorageRepository for MemoryStorage {
             }
         }
         Ok(())
-    }
-
-    async fn find_latest_session_with_refresh_token(
-        &self,
-        email: &str,
-    ) -> anyhow::Result<Option<UserSession>> {
-        Ok(self
-            .inner
-            .read()
-            .await
-            .sessions
-            .values()
-            .filter(|session| {
-                session.google_account_email == email
-                    && (session.gmail_refresh_token_encrypted.is_some()
-                        || session.refresh_token_encrypted.is_some())
-            })
-            .max_by_key(|session| session.updated_at)
-            .cloned())
     }
 
     async fn list_schedule_configs(&self) -> anyhow::Result<Vec<ScheduleConfig>> {
@@ -311,6 +523,23 @@ impl StorageRepository for MemoryStorage {
             .schedule_states
             .insert(state.user_email.clone(), state.clone());
         Ok(())
+    }
+
+    async fn claim_schedule_window(
+        &self,
+        state: &ScheduleState,
+        stale_before: DateTime<Utc>,
+    ) -> anyhow::Result<ScheduleWindowClaim> {
+        let mut inner = self.inner.write().await;
+        if let Some(existing) = inner.schedule_states.get(&state.user_email)
+            && let Some(result) = existing_schedule_window_claim(existing, state, stale_before)
+        {
+            return Ok(result);
+        }
+        inner
+            .schedule_states
+            .insert(state.user_email.clone(), state.clone());
+        Ok(ScheduleWindowClaim::Claimed)
     }
 
     async fn get_org_config_for_user(
@@ -508,6 +737,18 @@ impl StorageRepository for MemoryStorage {
         inner
             .manual_review_overrides
             .retain(|_, review| !review.owner_email.eq_ignore_ascii_case(owner));
+        Ok(())
+    }
+
+    async fn record_analysis_data_deletion(
+        &self,
+        audit: &AnalysisDataDeletionAudit,
+    ) -> anyhow::Result<()> {
+        self.inner
+            .write()
+            .await
+            .analysis_data_deletion_audits
+            .insert(audit.id.clone(), audit.clone());
         Ok(())
     }
 
@@ -964,6 +1205,7 @@ mod tests {
         UserSession {
             id: id.to_string(),
             workos_user_id: Some(format!("workos-{id}")),
+            workos_session_id: None,
             google_account_email: email.to_string(),
             gmail_account_email: Some(email.to_string()),
             access_token_encrypted: "access".to_string(),
@@ -978,7 +1220,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn finds_latest_session_with_refresh_token_for_email() {
+    async fn migrates_legacy_gmail_credentials_without_keeping_them_in_sessions() {
         let storage = MemoryStorage::default();
         storage
             .upsert_user_session(&session("old", "a@x.cl", Some("r1"), 120))
@@ -997,27 +1239,34 @@ mod tests {
             .await
             .unwrap();
 
-        let found = storage
-            .find_latest_session_with_refresh_token("a@x.cl")
+        let connection = storage
+            .get_gmail_connection("a@x.cl")
             .await
             .unwrap()
-            .expect("session expected");
-        assert_eq!(found.id, "newer");
+            .expect("connection expected");
+        assert_eq!(connection.refresh_token_encrypted.as_deref(), Some("r2"));
+        for id in ["old", "newest-no-refresh", "newer"] {
+            let session = storage.get_user_session(id).await.unwrap().unwrap();
+            assert!(session.gmail_account_email.is_none());
+            assert!(session.gmail_access_token_encrypted.is_none());
+            assert!(session.gmail_refresh_token_encrypted.is_none());
+        }
     }
 
     #[tokio::test]
-    async fn returns_none_when_no_session_has_refresh_token() {
+    async fn migrates_a_legacy_connection_even_without_a_refresh_token() {
         let storage = MemoryStorage::default();
         storage
             .upsert_user_session(&session("s1", "a@x.cl", None, 5))
             .await
             .unwrap();
 
-        let found = storage
-            .find_latest_session_with_refresh_token("a@x.cl")
+        let connection = storage
+            .get_gmail_connection("a@x.cl")
             .await
-            .unwrap();
-        assert!(found.is_none());
+            .unwrap()
+            .expect("connection expected");
+        assert!(connection.refresh_token_encrypted.is_none());
     }
 
     #[tokio::test]
@@ -1035,6 +1284,18 @@ mod tests {
             .upsert_user_session(&session("other", "other@example.com", Some("r3"), 0))
             .await
             .unwrap();
+        storage
+            .upsert_gmail_connection(&GmailConnection {
+                owner_email: "owner@example.com".to_string(),
+                gmail_account_email: "owner@example.com".to_string(),
+                access_token_encrypted: "access".to_string(),
+                refresh_token_encrypted: Some("r2".to_string()),
+                connected_at: Utc::now(),
+                updated_at: Utc::now(),
+                revoked_at: None,
+            })
+            .await
+            .unwrap();
 
         storage
             .disconnect_gmail("OWNER@example.com", Utc::now())
@@ -1049,6 +1310,14 @@ mod tests {
             assert!(session.access_token_encrypted.is_empty());
             assert!(session.refresh_token_encrypted.is_none());
         }
+        let connection = storage
+            .get_gmail_connection("owner@example.com")
+            .await
+            .unwrap()
+            .expect("revoked connection retained for state");
+        assert!(connection.revoked_at.is_some());
+        assert!(connection.access_token_encrypted.is_empty());
+        assert!(connection.refresh_token_encrypted.is_none());
         assert!(
             storage
                 .get_user_session("other")
@@ -1057,6 +1326,96 @@ mod tests {
                 .unwrap()
                 .gmail_account_email
                 .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_does_not_restore_a_gmail_connection_after_disconnect() {
+        let storage = MemoryStorage::default();
+        let previous = GmailConnection {
+            owner_email: "owner@example.com".to_string(),
+            gmail_account_email: "owner@example.com".to_string(),
+            access_token_encrypted: "old-access".to_string(),
+            refresh_token_encrypted: Some("old-refresh".to_string()),
+            connected_at: Utc::now(),
+            updated_at: Utc::now(),
+            revoked_at: None,
+        };
+        storage.upsert_gmail_connection(&previous).await.unwrap();
+        let mut refreshed = previous.clone();
+        refreshed.access_token_encrypted = "new-access".to_string();
+        refreshed.updated_at = Utc::now();
+
+        storage
+            .disconnect_gmail("owner@example.com", Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(
+            storage
+                .refresh_gmail_connection(&previous, &refreshed)
+                .await
+                .unwrap(),
+            GmailConnectionRefresh::ConnectionChanged
+        );
+        let stored = storage
+            .get_gmail_connection("owner@example.com")
+            .await
+            .unwrap()
+            .expect("revoked connection retained");
+        assert!(stored.revoked_at.is_some());
+        assert!(stored.access_token_encrypted.is_empty());
+        assert!(stored.refresh_token_encrypted.is_none());
+    }
+
+    #[tokio::test]
+    async fn revoke_user_sessions_only_revokes_the_owner_sessions() {
+        let storage = MemoryStorage::default();
+        storage
+            .upsert_user_session(&session("first", "owner@example.com", Some("r1"), 10))
+            .await
+            .unwrap();
+        storage
+            .upsert_user_session(&session("second", "owner@example.com", Some("r2"), 5))
+            .await
+            .unwrap();
+        storage
+            .upsert_user_session(&session("other", "other@example.com", Some("r3"), 0))
+            .await
+            .unwrap();
+
+        storage
+            .revoke_user_sessions("OWNER@example.com", Utc::now())
+            .await
+            .unwrap();
+
+        for id in ["first", "second"] {
+            assert!(
+                storage
+                    .get_user_session(id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .revoked_at
+                    .is_some()
+            );
+        }
+        assert!(
+            storage
+                .get_gmail_connection("owner@example.com")
+                .await
+                .unwrap()
+                .expect("scheduler credential remains available")
+                .refresh_token_encrypted
+                .is_some()
+        );
+        assert!(
+            storage
+                .get_user_session("other")
+                .await
+                .unwrap()
+                .unwrap()
+                .revoked_at
+                .is_none()
         );
     }
 

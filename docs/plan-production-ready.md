@@ -11,6 +11,12 @@
 
 Este archivo es el checklist maestro de preparación para producción.
 
+La bitácora cronológica está en
+[`production-readiness-log.md`](production-readiness-log.md). Al completar un
+paso se debe actualizar el checklist pertinente y añadir allí: qué se hizo,
+motivo, evidencia y qué sigue. Los estados locales no sustituyen una validación
+desplegada.
+
 ### Estados
 
 - `[ ]` Pendiente.
@@ -56,7 +62,7 @@ Ejemplos de evidencia:
 - [ ] Definir si todos los usuarios serán incorporados mediante onboarding acompañado.
 - [ ] Definir qué proveedores de correo estarán disponibles.
   - Para este lanzamiento: Gmail y Google Workspace.
-  - Microsoft e IMAP permanecen fuera de alcance.
+  - Microsoft e IMAP permanecen fuera de alcance (debatible, quiero hacer lo posible por incluir esto, porque es un diferenciador y funcionalidad muy potente).
 - [ ] Definir si los reportes automáticos estarán habilitados desde el primer día.
 - [ ] Definir un único canal de soporte para la versión inicial.
   - Correo recomendado: `soporte@<dominio>`.
@@ -106,7 +112,9 @@ No comenzar a cobrar a usuarios externos hasta completar todos los puntos siguie
 
 - [ ] Checkout embebido de Mercado Pago terminado.
 - [ ] Webhook de Mercado Pago autenticado y probado.
-- [ ] Billing enforcement activo.
+- [x] Billing enforcement activo.
+  - Evidencia 2026-07-15: revisión Cloud Run de `ghmi-api` expone
+    `BILLING_ENFORCEMENT_ENABLED=true`.
 - [ ] `APP_ENV=production` activo.
 - [ ] API limitada temporalmente a una instancia.
 - [ ] Flujo de pago probado de extremo a extremo.
@@ -122,11 +130,16 @@ No comenzar a cobrar a usuarios externos hasta completar todos los puntos siguie
 - [ ] Uptime checks activos.
 - [ ] Política de privacidad publicada.
 - [ ] Términos y condiciones publicados.
-- [ ] Copy sobre uso de IA consistente con el comportamiento real.
+- [x] Copy sobre uso de IA consistente con el comportamiento real.
+  - Configuración declara proveedor, campos, límites, adjuntos excluidos,
+    opt-out y aplicación al próximo análisis; la política legal sigue pendiente.
 - [x] Check de release local en verde.
-  - Evidencia: `scripts/check-all.sh` — Rust fmt, 135 tests, Clippy, 7 tests del worker y build web.
+  - Evidencia: `scripts/check-all.sh` — Rust fmt, 151 tests, Clippy, 10 tests del worker y build web (2026-07-15).
 - [ ] Smoke test final realizado en producción.
-- [ ] Procedimiento de rollback probado o documentado.
+- [x] Procedimiento de rollback documentado.
+  - Evidencia: `docs/operational-runbooks.md`, sección «Rollback de un
+    servicio Cloud Run». Requiere autorización operativa para ejecutar el
+    cambio de tráfico; no sustituye una prueba de restauración Firestore.
 
 ### Decisión final
 
@@ -305,11 +318,12 @@ Prioridad: **P0**
 ## 4.1 Variables y secretos
 
 - [ ] Configurar `APP_ENV=production`.
-- [ ] Configurar explícitamente `BILLING_ENFORCEMENT_ENABLED=true`.
+- [x] Configurar explícitamente `BILLING_ENFORCEMENT_ENABLED=true`.
 - [ ] Configurar `MERCADOPAGO_ACCESS_TOKEN` mediante Secret Manager.
 - [ ] Configurar `MERCADOPAGO_WEBHOOK_SECRET` mediante Secret Manager.
 - [ ] Confirmar `WORKOS_API_KEY` en Secret Manager.
 - [ ] Confirmar `WORKOS_COOKIE_SECRET` fuerte y no reutilizado.
+- [ ] Configurar `WORKOS_WEBHOOK_SECRET` mediante Secret Manager y registrar el endpoint WorkOS.
 - [ ] Confirmar `APP_ENCRYPTION_KEY` fuerte.
 - [ ] Confirmar `APP_SESSION_SECRET` fuerte.
 - [ ] Confirmar `GOOGLE_CLIENT_SECRET` en Secret Manager.
@@ -325,6 +339,7 @@ Prioridad: **P0**
 - [x] Hacer que producción rechace `APP_STORAGE=memory`.
 - [x] Hacer que producción rechace billing activo sin credenciales completas.
 - [x] Hacer que producción rechace webhook sin secreto.
+- [x] Hacer que producción rechace webhook WorkOS sin `WORKOS_WEBHOOK_SECRET`.
 - [x] Hacer que producción rechace URLs HTTP.
 - [x] Validar `APP_COOKIE_SECURE=true`.
 - [x] Validar valores permitidos de `APP_COOKIE_SAMESITE`.
@@ -332,6 +347,10 @@ Prioridad: **P0**
 - [x] Validar que `GOOGLE_REDIRECT_URL` corresponda al entorno.
 - [x] Validar que `WORKOS_REDIRECT_URI` corresponda al entorno.
 - [x] Validar que `AI_WORKER_AUDIENCE` exista cuando el worker es privado.
+
+Las callbacks OAuth/WorkOS pueden usar el origen HTTPS de API o el de web. En
+la arquitectura same-origin, se recomienda el de web: el proxy reenvía la ruta
+a API y la cookie se entrega bajo el origen con que navega la persona usuaria.
 
 ## 4.3 Escalado temporal
 
@@ -345,6 +364,25 @@ Prioridad: **P0**
   - Contadores read-modify-write.
   - Claims del scheduler sin transacción.
   - Posibles carreras de billing.
+
+### Inspección GCP — 2026-07-15
+
+- `ghmi-api`, `ghmi-web` y `ghmi-ai-worker` están actualmente en `maxScale=20`.
+- Firestore `(default)` en `southamerica-west1` tiene PITR y delete protection desactivados.
+- La revisión `ghmi-api-00028-7lj` no tiene `APP_ENV`; por tanto aún no activa
+  las validaciones de producción. Sí tiene Firestore, cookies seguras,
+  `SameSite=None` y billing enforcement configurados explícitamente.
+- Sus callbacks Google/WorkOS usan el origen web y `ghmi-web` proxya al origen
+  API, configuración compatible con la validación local desde 2026-07-15.
+- No se cambiaron recursos productivos durante esta inspección: reducir capacidad o habilitar protecciones de base puede afectar disponibilidad y coste, por lo que requiere aprobación explícita antes de aplicar.
+
+### Revalidación GCP — 2026-07-15
+
+Consulta de sólo lectura: `ghmi-api` permanece en `ghmi-api-00028-7lj` con
+`maxScale=20`; `APP_ENV` sigue ausente. Se confirmaron Firestore, cookies
+seguras, `SameSite=None` y billing enforcement. Firestore sigue en
+`southamerica-west1` sin PITR ni delete protection. No se consultaron valores
+de secretos ni se modificó infraestructura.
 
 ## 4.4 Revisión segura
 
@@ -397,51 +435,76 @@ Las sesiones antiguas sin `expires_at` requieren iniciar sesión otra vez al des
 - [x] Borrar la cookie del navegador.
 - [x] Probar reutilización de una cookie copiada después del logout.
 - [x] La cookie reutilizada debe responder 401.
-- [ ] Implementar “cerrar todas las sesiones” para soporte/admin o usuario.
-- [ ] Documentar qué ocurre al cambiar contraseña en WorkOS.
-- [ ] Evaluar invalidación cuando WorkOS suspende al usuario.
+- [x] Implementar “cerrar todas las sesiones” para soporte/admin o usuario.
+  - Disponible para la persona usuaria desde Cuenta, con confirmación explícita.
+  - Revoca todas sus sesiones web server-side y borra la cookie actual; no desconecta Gmail ni detiene el scheduler.
+  - Firestore pagina el barrido actual de sesiones; una consulta indexada por propietario evita recorrer toda la colección si el volumen lo exige.
+- [x] Documentar qué ocurre al cambiar contraseña en WorkOS.
+  - Mira extrae solo el `sid` del access token devuelto por AuthKit y no conserva access ni refresh token de WorkOS. Una sesión local nueva queda vinculada a ese `sid` para que `session.revoked` la invalide.
+  - Las sesiones locales creadas antes de este cambio no tienen `sid`; expiran a los 30 días o se revocan con «Cerrar todas las sesiones».
+  - «Cerrar todas las sesiones» sigue revocando sesiones de Mira, no la sesión hospedada de WorkOS ni el grant de Google.
+  - Referencia: [sesiones de AuthKit](https://workos.com/docs/authkit/sessions).
+- [x] Evaluar invalidación cuando WorkOS suspende al usuario.
+  - Implementado localmente: `POST /auth/workos/webhook` valida `workos-signature` (`t`, `v1`, HMAC-SHA256 de `t.body`) sobre el cuerpo crudo y rechaza más de cinco minutos de desfase.
+  - `session.revoked` invalida solo la sesión local asociada al `sid`. `user.deleted` revoca las sesiones locales del propietario, borra localmente la conexión Gmail y desactiva scheduler/mailbox; no llama a Google para revocar el grant remoto.
+  - Las escrituras son idempotentes por estado. El procesamiento es síncrono y no guarda el ID del evento: si el volumen exige cola, deduplicación o recuperación fuera de los reintentos de WorkOS, se deberá añadir antes de escalar.
+  - Pendiente: definir una transición segura para `user.updated` y eventos de membresía; no se interpretan como suspensión mientras el modelo de organización no tenga ese contrato.
+  - Referencias: [eventos WorkOS](https://workos.com/docs/events) y [provisionamiento de directorio](https://workos.com/docs/authkit/directory-provisioning).
 
 ## 5.3 Separar sesión y conexión de Gmail
 
-- [ ] Diseñar el refresh token de Gmail como credencial de la conexión de casilla.
-- [ ] Evitar que el scheduler dependa de una sesión web histórica.
-- [ ] Asociar credenciales Gmail a:
-  - Organización.
-  - Mailbox.
-  - Usuario autorizador.
-- [ ] Mantenerlas cifradas.
-- [ ] Registrar cuándo fueron actualizadas.
-- [ ] Registrar revocación.
-- [ ] Permitir rotación del refresh token.
-- [ ] Mantener sesiones web revocables sin romper el scheduler.
+- [x] Diseñar el refresh token de Gmail como credencial de la conexión de casilla.
+  - `gmailConnections/{hash_del_propietario}` almacena una conexión por casilla en esta primera versión, fuera de `users/{session_id}`.
+- [x] Evitar que el scheduler dependa de una sesión web histórica.
+  - El scheduler lee y actualiza la conexión Gmail; ya no consulta sesiones web.
+- [x] Asociar credenciales Gmail a:
+  - Organización y mailbox mediante el perfil de propietario existente (una casilla por organización en esta versión).
+  - Usuario autorizador mediante `owner_email`, coherente con `Mailbox.authorized_by_user_email`.
+- [x] Mantenerlas cifradas.
+  - Access y refresh token continúan usando `APP_ENCRYPTION_KEY` antes de persistirse.
+- [x] Registrar cuándo fueron actualizadas.
+  - La conexión conserva `connected_at` y `updated_at`.
+- [x] Registrar revocación.
+  - Desconectar Gmail vacía tokens y conserva `revoked_at`.
+- [x] Permitir rotación del refresh token.
+  - El refresh del scheduler reemplaza el token rotado en la conexión, no en la sesión.
+- [x] Mantener sesiones web revocables sin romper el scheduler.
+  - Se migra perezosamente la credencial legacy más reciente con refresh token y luego se limpia de las sesiones. Firestore pagina el barrido actual; se requiere consulta indexada por propietario si el escaneo de toda la colección deja de ser aceptable.
 
 ## 5.4 Cookies
 
-- [ ] Confirmar `HttpOnly`.
-- [ ] Confirmar `Secure`.
-- [ ] Confirmar `SameSite` acorde a la arquitectura final.
-- [ ] Preferir mismo origen mediante proxy para evitar cookies third-party.
-- [ ] Definir `Domain` solo si es estrictamente necesario.
-- [ ] Evaluar prefijo `__Host-` para cookie de sesión.
-- [ ] Evitar exponer tokens a JavaScript.
-- [ ] Revisar cookies de OAuth temporales.
-- [ ] Confirmar expiración breve de cookies OAuth.
+- [x] Confirmar `HttpOnly`.
+- [x] Confirmar `Secure`.
+- [x] Confirmar `SameSite` acorde a la arquitectura final.
+  - Decisión: `Lax` para sesión y estado OAuth bajo el proxy mismo-origen; los callbacks OAuth son redirects GET de nivel superior.
+  - La revisión desplegada aún conserva `APP_COOKIE_SAMESITE=None` y requiere ese cambio de configuración más un smoke test antes de darlo por aplicado en producción.
+- [x] Preferir mismo origen mediante proxy para evitar cookies third-party.
+- [x] Definir `Domain` solo si es estrictamente necesario.
+  - Decisión actual: no se emite atributo `Domain`; web entrega la cookie bajo
+    su propio origen al reenviar las callbacks a API.
+- [x] Evaluar prefijo `__Host-` para cookie de sesión.
+  - Decisión: no migrar en esta revisión. La cookie actual es host-only (sin `Domain`), usa `Path=/` y producción exige `Secure`; cambiar el nombre invalidaría todas las sesiones y no corrige un riesgo P0 adicional. Reconsiderar en una migración planificada de sesiones.
+- [x] Evitar exponer tokens a JavaScript.
+- [x] Revisar cookies de OAuth temporales.
+- [x] Confirmar expiración breve de cookies OAuth.
+  - `ghmi_oauth` expira en 600 segundos.
 
 ## 5.5 CSRF
 
-- [ ] Determinar si todas las llamadas autenticadas son same-origin.
+- [x] Determinar si las llamadas autenticadas del navegador son same-origin.
+  - `ghmi-web` proxya `/auth`, `/gmail`, `/me`, `/analysis-runs`, `/threads` y rutas afines a API bajo el mismo origen. Los webhooks directos no usan cookie de usuario y validan su propio secreto/firma.
 - [x] Validar `Origin` en requests mutables.
 - [x] Rechazar orígenes desconocidos.
 - [ ] Evaluar token CSRF si se conserva `SameSite=None`.
 - [x] Probar un POST desde un origen externo.
-- [ ] Asegurar especialmente:
-  - Cancelación de suscripción.
-  - Cambio de plan.
-  - Inicio de checkout.
+- [x] Asegurar las mutaciones no relacionadas con pagos:
+  - Logout individual y global.
   - Revisión manual.
-  - Cambios de configuración.
+  - Cambios de configuración y presets.
   - Borrado de datos.
   - Desconexión de Gmail.
+  - Creación e inicio de análisis.
+  - El middleware global rechaza el origen antes de entrar al handler; una prueba recorre esas rutas. Checkout, cancelación y cambio de plan conservan el mismo middleware, pero sus pruebas funcionales siguen diferidas con pagos.
 
 ---
 
@@ -451,7 +514,7 @@ Prioridad: **P0**
 
 ## 6.1 Contrato público de errores
 
-- [ ] Definir un formato único:
+- [x] Definir un formato único:
 
 ```json
 {
@@ -463,27 +526,39 @@ Prioridad: **P0**
 }
 ```
 
-- [ ] Definir catálogo de códigos públicos.
-- [ ] Separar mensaje técnico y mensaje al usuario.
+- [x] Definir catálogo de códigos públicos.
+- [x] Separar mensaje técnico y mensaje al usuario.
 - [x] No devolver `error.to_string()` directamente.
 - [x] No devolver bodies de proveedores.
 - [x] No devolver URLs internas, nombres de colecciones o stack traces mediante errores inesperados.
-- [ ] Mantener mensajes 401/403/404 consistentes.
-- [ ] Evitar confirmar existencia de recursos de otro usuario.
+- [x] Mantener mensajes 401/403/404 consistentes.
+- [x] Evitar confirmar existencia de recursos de otro usuario.
+  - Evidencia 2026-07-15: prueba de contrato cubre `401` sin sesión, `403`
+    por origen no confiable y el mismo `404` para un análisis ajeno o ausente.
+
+Catálogo inicial: `BAD_REQUEST`, `AUTHENTICATION_REQUIRED`, `FORBIDDEN`,
+`SUBSCRIPTION_REQUIRED`, `NOT_FOUND`, `CONFLICT`, `RATE_LIMITED`,
+`EXTERNAL_SERVICE_UNAVAILABLE`, `SERVICE_UNAVAILABLE` e `INTERNAL_ERROR`.
+El `request_id` siempre se genera en servidor y se devuelve además en header.
 
 ## 6.2 Proveedores externos
 
 Revisar y sanitizar errores de:
 
-- [ ] WorkOS.
-- [ ] Google OAuth.
-- [ ] Gmail API.
+- [x] WorkOS.
+- [x] Google OAuth.
+- [x] Gmail API.
 - [ ] Mercado Pago.
-- [ ] Resend.
-- [ ] Bedrock.
-- [ ] AI worker.
-- [ ] Firestore.
-- [ ] Metadata server de GCP.
+- [x] Resend.
+- [x] Bedrock.
+- [x] AI worker.
+- [x] Firestore.
+- [x] Metadata server de GCP.
+
+Evidencia 2026-07-15: auditoría estática de logs, cuerpos de respuesta y
+propagación de errores. Los proveedores no financieros conservan como máximo
+status/código seguro o un identificador permitido; no registran bodies ni
+excepciones completas. Mercado Pago queda diferido junto con su incidente.
 
 Para cada proveedor:
 
@@ -495,19 +570,40 @@ Para cada proveedor:
 
 ## 6.3 Identificadores de correlación
 
-- [ ] Generar `request_id` por request.
-- [ ] Aceptar un request ID entrante solo si se valida o regenerarlo.
-- [ ] Devolverlo en header y error público.
-- [ ] Incluirlo en logs.
-- [ ] Propagarlo al worker.
+- [x] Generar `request_id` por request.
+- [x] Aceptar un request ID entrante solo si se valida o regenerarlo.
+- [x] Devolverlo en header y error público.
+- [x] Incluirlo en logs.
+- [x] Propagarlo al worker.
+  - API reenvía el UUID a los endpoints de auditoría y el worker sólo acepta
+    valores UUID válidos; de otro modo genera uno propio.
+- [x] Asociarlo a `run_id`.
+  - `analysis_run_created` registra `run_id` dentro del span HTTP que ya contiene `request_id`; `scheduled_analysis_run_created` registra el mismo identificador para ejecuciones sin request HTTP.
 - [ ] Asociarlo a:
-  - `run_id`.
   - `checkout_id`.
   - `subscription_id`.
   - `org_id` pseudonimizado.
 - [ ] No usar email como identificador principal en logs.
 
 ## 6.4 Redacción de logs
+
+### Avance local — 2026-07-15
+
+- [x] Los errores persistidos de análisis y scheduler usan categorías seguras
+  (`analysis_failed`, `scheduled_analysis_failed`,
+  `report_delivery_failed`) en vez de propagar el texto original.
+- [x] Los helpers no relacionados con pagos para Google OAuth, WorkOS, Resend y
+  Firestore dejan de registrar o devolver cuerpos completos de proveedores.
+- [x] El callback de WorkOS no devuelve `error_description` del proveedor; usa
+  un mensaje fijo y registra `workos_login_rejected`.
+- [x] El scheduler registra solo totales por resultado, no su objeto completo
+  con correo de usuario.
+- [x] Un fallo de auditoría IA detallada se persiste como razón fija para
+  revisión manual y se registra con `ai_detailed_audit_failed`, sin incluir el
+  texto del proveedor.
+- [ ] Falta validar estos cambios en Cloud Logging y completar la revisión
+  extremo a extremo de Bedrock. Mercado Pago queda expresamente diferido por el
+  incidente de pagos actual.
 
 - [ ] No registrar access tokens.
 - [ ] No registrar refresh tokens.
@@ -520,14 +616,14 @@ Para cada proveedor:
 - [ ] No registrar headers completos.
 - [ ] No registrar respuestas completas de proveedores.
 - [ ] Pseudonimizar email y org cuando sea posible.
-- [ ] Revisar errores persistidos en runs y scheduler.
+- [x] Revisar errores persistidos en runs y scheduler.
 
 ## 6.5 Frontend y navegador
 
-- [ ] Buscar `console.log`.
-- [ ] Buscar `console.error`.
-- [ ] Eliminar logs innecesarios de producción.
-- [ ] No imprimir objetos de error completos.
+- [x] Buscar `console.log`.
+- [x] Buscar `console.error`.
+- [x] Eliminar logs innecesarios de producción.
+- [x] No imprimir objetos de error completos.
 - [ ] Revisar mensajes visibles en banners y modales.
 - [ ] Traducir estados técnicos a lenguaje de usuario.
 - [ ] Revisar Network:
@@ -538,14 +634,17 @@ Para cada proveedor:
   - Worker caído.
   - Firestore caído.
 - [ ] Confirmar que ninguna respuesta contiene secretos o detalles internos.
-- [ ] Revisar Source Maps.
-- [ ] Decidir si se publican source maps.
-- [ ] Si se publican a una herramienta, impedir acceso público.
+- [x] Revisar Source Maps.
+- [x] Decidir si se publican source maps.
+  - Decisión: no generar ni publicar source maps en el build inicial.
+- [-] Si se publican a una herramienta, impedir acceso público.
+  - No aplica mientras no se generen; reevaluar al incorporar una herramienta
+    de seguimiento de errores.
 
 ## 6.6 Pasada de copy
 
-- [ ] Unificar nombre “Mira Helpdesk”.
-- [ ] Eliminar nombres internos o históricos.
+- [x] Unificar nombre “Mira Helpdesk”.
+- [x] Eliminar nombres internos o históricos.
 - [ ] Eliminar referencias técnicas como:
   - `policy_snapshot`.
   - `pending_backend_contract`.
@@ -553,8 +652,10 @@ Para cada proveedor:
   - `invalid_grant`.
 - [ ] Corregir mensajes en español.
 - [ ] Corregir textos contradictorios.
-- [ ] Confirmar que no aparece “beta” en copy público, precios, términos ni onboarding.
-- [ ] Confirmar que no se promete funcionalidad futura.
+- [x] Confirmar que no aparece “beta” en copy público, precios, términos ni onboarding.
+- [x] Confirmar que no se promete funcionalidad futura.
+  - El nombre interno del runbook de despliegue sigue siendo técnico y no se
+    muestra al usuario.
 
 ---
 
@@ -564,13 +665,17 @@ Prioridad: **P0**
 
 ## 7.1 Posicionamiento coherente
 
-- [ ] Definir formalmente la IA como funcionalidad activa por defecto con opt-out.
-- [ ] Dejar de describirla como opt-in si no requiere activación.
-- [ ] Actualizar README.
-- [ ] Actualizar landing.
-- [ ] Actualizar onboarding.
-- [ ] Actualizar Configuración.
-- [ ] Actualizar Ayuda.
+Decisión implementada: la auditoría IA viene activa por defecto en organizaciones
+nuevas; la organización puede desactivarla desde Configuración. Reactivarla exige
+confirmación explícita y se aplica a análisis futuros.
+
+- [x] Definir formalmente la IA como funcionalidad activa por defecto con opt-out.
+- [x] Dejar de describirla como opt-in si no requiere activación.
+- [x] Actualizar README.
+- [x] Actualizar landing.
+- [x] Actualizar onboarding.
+- [x] Actualizar Configuración.
+- [x] Actualizar Ayuda.
 - [ ] Actualizar Política de Privacidad.
 - [ ] Actualizar Términos de Uso.
 
@@ -580,17 +685,30 @@ Copy sugerido:
 
 ## 7.2 Información que debe conocer el usuario
 
-- [ ] Qué proveedor procesa la IA.
-- [ ] Qué datos se envían.
-- [ ] Qué datos no se envían.
-- [ ] Límite de mensajes por hilo.
-- [ ] Límite de caracteres por mensaje.
-- [ ] Ausencia de adjuntos.
-- [ ] Posibilidad de texto sensible en excerpts.
-- [ ] Objetivo del procesamiento.
-- [ ] Consecuencia de desactivar IA.
-- [ ] Cómo desactivarla.
-- [ ] Cuándo aplica el cambio.
+- [x] Qué proveedor procesa la IA.
+  - Configuración identifica Amazon Bedrock.
+- [x] Qué datos se envían.
+  - Participantes, fecha, asunto y texto limitado por mensaje; Configuración
+    aclara que un mensaje corto puede caber completo dentro del límite.
+- [x] Qué datos no se envían.
+  - No se procesan adjuntos, imágenes ni headers completos.
+- [x] Límite de mensajes por hilo.
+  - Configuración muestra el valor vigente de la política.
+- [x] Límite de caracteres por mensaje.
+  - Configuración muestra el valor vigente de la política.
+- [x] Ausencia de adjuntos.
+  - La configuración informa la exclusión y el normalizador descarta partes con
+    `filename` o `attachmentId`, incluso si son `text/*`.
+- [x] Posibilidad de texto sensible en excerpts.
+  - Configuración lo advierte junto con el límite de contenido.
+- [x] Objetivo del procesamiento.
+  - Clasificar casos ambiguos para revisión manual.
+- [x] Consecuencia de desactivar IA.
+  - Los casos inciertos pasan a revisión manual.
+- [x] Cómo desactivarla.
+  - Disponible mediante el control de Auditoría IA en Configuración.
+- [x] Cuándo aplica el cambio.
+  - Configuración indica que se aplica al próximo análisis.
 - [ ] Política de retención del proveedor, si corresponde.
 - [ ] Región de procesamiento, si es relevante.
 
@@ -606,14 +724,30 @@ Copy sugerido:
 
 ## 7.4 Revisión de minimización
 
-- [ ] Confirmar que bodies completos no se persisten.
-- [ ] Confirmar que el worker solo recibe el contenido necesario.
-- [ ] Confirmar límites reales contra el copy mostrado.
-- [ ] Confirmar que no se envían adjuntos.
-- [ ] Confirmar que headers almacenados están limitados.
+- [x] Confirmar que bodies completos no se persisten.
+  - Evidencia 2026-07-15: la única función que prepara mensajes para
+    `StorageRepository` borra `body_text`; se usa tanto en el flujo normal como
+    en el de override manual y tiene prueba dedicada.
+- [x] Confirmar que el worker solo recibe el contenido necesario.
+  - Evidencia 2026-07-15: antes de la auditoría detallada, los mensajes se
+    limitan al máximo de mensajes y caracteres de la política; hay prueba del
+    recorte y del límite de cantidad.
+- [x] Confirmar límites reales contra el copy mostrado.
+  - Evidencia 2026-07-15: Configuración conserva y muestra los límites de la
+    política cargada, en vez de reescribir o anunciar constantes fijas.
+- [x] Confirmar que no se envían adjuntos.
+  - Evidencia 2026-07-15: prueba de payload mixto conserva el cuerpo del correo
+    y excluye un adjunto `text/plain` marcado por Gmail.
+- [x] Confirmar que headers almacenados están limitados.
+  - Evidencia 2026-07-15: sólo se conserva `auto-submitted`, necesario para
+    distinguir correo automático; los demás headers de Gmail se descartan antes
+    de persistir.
 - [ ] Revisar snippets y subjects como datos personales.
-- [ ] Revisar datos incluidos en reportes por correo.
-- [ ] Confirmar modo métricas-only por defecto.
+- [x] Revisar datos incluidos en reportes por correo.
+  - Los ítems de revisión ocultan asunto y remitente salvo habilitación expresa.
+- [x] Confirmar modo métricas-only por defecto.
+  - Evidencia 2026-07-15: la política inicial no incorpora ítems de revisión y
+    las pruebas cubren ambos modos.
 
 ---
 
@@ -652,10 +786,23 @@ Prioridad: **P0**
   - Recomendación: no devolver cuota consumida.
 - [x] Confirmación fuerte: frase escrita `BORRAR MIS ANALISIS`.
 - [x] Operación idempotente.
-- [ ] Registro de auditoría de la eliminación.
+- [x] Registro de auditoría de la eliminación: `auditLogs/{request_id}` guarda
+  hash de propietario, estado y marcas de tiempo, sin correo ni contenido de mensajes.
 - [x] Evitar dejar documentos huérfanos: Firestore borra primero subcolecciones conocidas.
 
 ## 8.3 Borrar cuenta y organización
+
+### Bloqueo de alcance — 2026-07-15
+
+No se implementa todavía la eliminación de cuenta. El propio plan deja sin
+definir quién puede solicitarla, el tratamiento de la cuenta WorkOS y los
+registros financieros/legalmente necesarios. Además, exige impedir cobros
+futuros, mientras el flujo de pagos está expresamente diferido por el incidente
+actual. Implementar sólo una parte podría borrar datos y dejar una suscripción
+activa o incumplir una obligación de retención.
+
+**Qué sigue:** acordar esas decisiones y resolver el incidente de pagos antes
+de diseñar un endpoint destructivo, su reautenticación y sus pruebas.
 
 - [ ] Definir quién puede solicitarlo.
 - [ ] Limitarlo al owner.
@@ -685,7 +832,9 @@ Prioridad: **P0**
 - [ ] Alertar por fallos.
 - [ ] Probar con datos de prueba.
 - [ ] Probar reejecución.
-- [ ] No prometer retención automática hasta que el job esté activo.
+- [x] No prometer retención automática hasta que el job esté activo.
+  - Evidencia 2026-07-15: la UI distingue el plazo configurado de la
+    eliminación efectiva y ofrece solamente el borrado manual existente.
 
 ## 8.5 Procedimiento manual temporal
 
@@ -723,6 +872,13 @@ Sugerencia inicial:
 - RPO: 24 horas o mejor.
 - RTO: 4 horas para la versión inicial.
 
+### Estado observado — 2026-07-15
+
+Firestore `(default)` confirma `POINT_IN_TIME_RECOVERY_DISABLED` y
+`DELETE_PROTECTION_DISABLED`; los dos controles siguen siendo P0 abiertos.
+La última auditoría de solo lectura también confirmó `maxScale=20` en
+`ghmi-api`, `ghmi-web` y `ghmi-ai-worker`; no hubo cambios de infraestructura.
+
 ## 9.2 Permisos
 
 - [ ] Revisar permisos de la service account.
@@ -737,23 +893,33 @@ Sugerencia inicial:
 
 ## 9.3 Integridad y concurrencia
 
-- [ ] Identificar operaciones read-modify-write.
+- [x] Identificar operaciones read-modify-write.
+  - Evidencia: `docs/firestore-concurrency-audit.md` inventaría scheduler, configuración, runs, Gmail, sesiones y lookup de cuentas sin mezclar el flujo de pagos diferido.
 - [ ] Proteger contadores de uso.
-- [ ] Proteger claims del scheduler.
+- [x] Proteger claims del scheduler.
+  - `scheduleStates/{email}` se crea con `currentDocument.exists=false` o se reemplaza con la precondición `currentDocument.updateTime`; tras tres conflictos se aborta sin ejecutar el análisis duplicado.
+  - Verificado localmente con 159 pruebas Rust, 10 del worker, Clippy y build web; falta el escenario de dos instancias desplegadas.
+- [x] Evitar que una configuración tardía reactive scheduler tras revocación Gmail/WorkOS.
+  - La sincronización de `scheduleConfigs` exige una `GmailConnection` activa; la preferencia queda guardada para una reconexión válida. La protección de conflictos generales de configuración sigue pendiente.
+- [x] Evitar que un refresh Gmail tardío restaure una conexión revocada.
+  - El refresh compara la conexión leída con la actual y, en Firestore, su `updateTime`; si cambia, cancela el tick sin reescribir tokens.
 - [ ] Proteger actualización de suscripciones.
 - [ ] Proteger creación de checkout.
 - [ ] Usar transacciones/precondiciones donde corresponda.
 - [ ] Confirmar comportamiento ante retries.
-- [ ] Confirmar comportamiento con dos requests concurrentes.
+- [ ] Confirmar comportamiento con dos requests concurrentes en Firestore desplegado.
+  - La prueba local demuestra un único claim en `MemoryStorage`; falta ejecutar el mismo escenario con dos instancias Cloud Run y Firestore real.
 
 ## 9.4 Rendimiento provisional
 
 - [ ] Eliminar búsquedas que listan colecciones completas en rutas frecuentes.
-- [ ] Evitar listar todas las cuentas para buscar por email.
+- [x] Evitar listar todas las cuentas para buscar por email.
+  - `accountEmailIndexes/{hash_del_email}` apunta a la cuenta WorkOS y evita el escaneo en lecturas nuevas. Las cuentas legacy se indexan perezosamente en la primera lectura encontrada.
 - [ ] Evitar listar todas las sesiones para buscar refresh token.
 - [ ] Evitar listar todas las suscripciones para buscar provider ID.
 - [ ] Evitar listar todos los checkouts para buscar provider ID.
-- [ ] Crear índices o documentos lookup.
+- [x] Crear documento lookup para cuentas por email.
+  - Otros lookups e índices siguen pendientes; no se alteraron los flujos de suscripción o checkout mientras pagos está diferido.
 - [ ] Definir limpieza de sesiones históricas.
 - [ ] Definir limpieza de checkouts abandonados.
 - [ ] Medir lecturas Firestore por flujo.
@@ -847,22 +1013,27 @@ Decisión inicial recomendada:
 
 ## 11.1 Logs estructurados
 
-- [ ] Emitir JSON estructurado desde API.
-- [ ] Emitir JSON estructurado desde worker.
+- [x] Emitir JSON estructurado desde API.
+- [x] Emitir JSON estructurado desde worker.
 - [ ] Mantener niveles:
   - `INFO`: operación normal relevante.
   - `WARN`: degradación recuperable.
   - `ERROR`: operación fallida.
 - [ ] Incluir:
-  - `service`.
-  - `environment`.
-  - `request_id`.
-  - `operation`.
-  - `status`.
-  - `duration_ms`.
-  - `run_id`, cuando aplique.
+  - [x] `service`.
+  - [x] `environment`.
+  - [x] `request_id`.
+  - [x] `operation`.
+  - [x] `status`.
+  - Evidencia 2026-07-15: inicio local y un `GET /auth/me` fallido emitieron JSON; el evento incluyó el span con `method`, `path` y `request_id` generado por servidor.
+  - [x] `duration_ms`.
+  - [x] `run_id`, cuando aplique.
   - `checkout_id`, cuando aplique.
   - `error_code`, cuando aplique.
+- Avance 2026-07-15: el worker emite eventos JSON por request con `service`,
+  `environment`, `request_id`, `operation`, `status` y `duration_ms`; sus
+  errores Bedrock incluyen un `error_code` seguro y el `run_id` cuando existe.
+  Falta comprobarlos en Cloud Logging tras despliegue.
 - [ ] No incluir datos sensibles.
 - [ ] Definir retención de logs.
 - [ ] Revisar coste estimado.
@@ -906,7 +1077,9 @@ Crear métricas basadas en logs para:
 - [ ] `resend_delivery_failed`.
 - [ ] `ai_worker_failed`.
 - [ ] `bedrock_failed`.
-- [ ] `data_deletion_failed`.
+- [x] `data_deletion_failed`.
+  - La API emite el código al fallar un borrado, con hash de propietario y el
+    `request_id` del span; falta conectar una alerta en Cloud Monitoring.
 - [ ] `retention_job_failed`.
 
 ## 11.5 Dashboard operativo en Cloud Monitoring
@@ -1039,36 +1212,42 @@ Prioridad: **P0**
 
 ## 14.1 Check local
 
-- [ ] `cargo fmt --check`.
-- [ ] `cargo test`.
-- [ ] `cargo clippy --all-targets -- -D warnings`.
-- [ ] `python3 -m pytest apps/ai-worker/tests`.
-- [ ] `npm --prefix apps/web run build`.
-- [ ] `npm audit --omit=dev`.
-- [ ] `cargo build --release`.
-- [ ] Resolver el warning actual de Clippy.
-- [ ] Mantener `./scripts/check-all.sh` completamente verde.
+- [x] `cargo fmt --check`.
+- [x] `cargo test`.
+- [x] `cargo clippy --all-targets -- -D warnings`.
+- [x] `python3 -m pytest apps/ai-worker/tests`.
+- [x] `npm --prefix apps/web run build`.
+- [x] `npm audit --omit=dev`.
+  - Se ejecuta desde `scripts/check-all.sh`; la última ejecución local informó 0 vulnerabilidades de runtime.
+- [x] `cargo build --release`.
+  - Se ejecuta desde `scripts/check-all.sh` junto a formato, tests y Clippy.
+- [x] Resolver el warning actual de Clippy.
+- [x] Mantener `./scripts/check-all.sh` completamente verde.
+  - Evidencia 2026-07-15: 147 tests Rust, 10 tests Python, build web y Clippy sin warnings.
 
 ## 14.2 CI
 
-- [ ] Crear workflow de CI.
+- [x] Crear workflow de CI.
 - [ ] Ejecutarlo en pull requests.
-- [ ] Ejecutarlo antes de deploy.
+- [x] Ejecutarlo antes de deploy.
+  - `scripts/redeploy-gcp.sh` ejecuta `scripts/check-all.sh` antes de autenticar Docker, construir o publicar imágenes.
 - [ ] Bloquear merge si falla.
-- [ ] Cachear dependencias.
-- [ ] No exponer secretos en PRs.
-- [ ] Añadir escaneo de secretos.
+- [x] Cachear dependencias.
+- [x] No exponer secretos en PRs.
+- [x] Añadir escaneo de secretos de archivos rastreados.
+  - `scripts/check-secrets.sh` usa `git grep` para rechazar formatos de clave privada, AWS, Google, Mercado Pago, GitHub y secretos `sk_live/prod`; se ejecuta desde `scripts/check-all.sh` y por tanto en CI. No es un scanner de entropía ni inspecciona archivos no versionados.
 - [ ] Añadir auditoría de dependencias Rust.
 - [ ] Añadir auditoría de dependencias Python.
-- [ ] Mantener `npm audit`.
+- [x] Mantener `npm audit`.
+  - El gate ejecuta `npm --prefix apps/web audit --omit=dev` antes del build; el último resultado fue 0 vulnerabilidades.
 
 ## 14.3 Tests críticos faltantes
 
 - [ ] Tests del nuevo checkout embebido.
 - [ ] Tests de webhook duplicado.
 - [ ] Tests de webhook fuera de orden.
-- [ ] Tests de expiración de sesión.
-- [ ] Tests de logout revocable.
+- [x] Tests de expiración de sesión.
+- [x] Tests de logout revocable.
 - [x] Tests CSRF/origen.
 - [x] Tests de desconexión Gmail.
 - [x] Tests de borrado de análisis.
@@ -1095,15 +1274,17 @@ Prioridad: **P0**
 
 ## 14.5 Artefactos reproducibles
 
-- [ ] Etiquetar imágenes con SHA del commit.
-- [ ] Evitar depender únicamente de `latest`.
-- [ ] Registrar qué commit corresponde a cada revisión.
+- [x] Etiquetar imágenes con SHA del commit.
+- [x] Evitar depender únicamente de `latest`.
+- [x] Registrar qué commit corresponde a cada revisión.
+  - Evidencia: `docs/gcp-deploy.md` usa `IMAGE_TAG` en la imagen y documenta
+    cómo asociarla a la revisión.
 - [ ] Mantener imagen anterior disponible.
-- [ ] Documentar rollback por servicio.
-- [ ] Eliminar el lockfile duplicado `apps/web/apps/web/package-lock.json` si no tiene propósito.
-- [ ] Fijar dependencias Python mediante lockfile.
-- [ ] Usar `npm ci` en builds.
-- [ ] No instalar dependencias de test en imagen final del worker.
+- [x] Documentar rollback por servicio.
+- [x] Eliminar el lockfile duplicado `apps/web/apps/web/package-lock.json`.
+- [x] Fijar dependencias Python mediante lockfile.
+- [x] Usar `npm ci` en builds.
+- [x] No instalar dependencias de test en imagen final del worker.
 
 ---
 
@@ -1113,11 +1294,11 @@ Prioridad: **P1**
 
 ## 15.1 Contenedores
 
-- [ ] Ejecutar API como usuario no root.
-- [ ] Ejecutar worker como usuario no root.
-- [ ] Ejecutar web como usuario no root.
+- [x] Ejecutar API como usuario no root.
+- [x] Ejecutar worker como usuario no root.
+- [x] Ejecutar web como usuario no root.
 - [ ] Reducir paquetes del runtime.
-- [ ] Separar dependencias build/test/runtime.
+- [x] Separar dependencias build/test/runtime.
 - [ ] Escanear imágenes.
 - [ ] Revisar vulnerabilidades base.
 - [ ] Definir frecuencia de rebuild.
@@ -1127,15 +1308,17 @@ Prioridad: **P1**
 
 ## 15.2 Headers HTTP
 
-- [ ] `Content-Security-Policy`.
-- [ ] `Strict-Transport-Security`.
-- [ ] `X-Content-Type-Options: nosniff`.
-- [ ] `Referrer-Policy`.
-- [ ] `Permissions-Policy`.
-- [ ] `frame-ancestors` o `X-Frame-Options`.
-- [ ] Política de caché para HTML.
-- [ ] Caché larga e immutable para assets con hash.
-- [ ] No cachear respuestas autenticadas sensibles.
+- [x] `Content-Security-Policy` mínimo.
+  - `base-uri 'self'; frame-ancestors 'none'; object-src 'none'` evita objetos, cambios de base y framing sin limitar aún scripts, conexiones o iframes de OAuth/Gmail/Mercado Pago.
+- [x] `Strict-Transport-Security`.
+- [x] `X-Content-Type-Options: nosniff`.
+- [x] `Referrer-Policy`.
+- [x] `Permissions-Policy`.
+- [x] `frame-ancestors` o `X-Frame-Options`.
+- [x] Política de caché para HTML.
+- [x] Caché larga e immutable para assets con hash.
+- [x] No cachear respuestas autenticadas sensibles.
+  - Evidencia 2026-07-15: respuesta local de `server.mjs` revisada con `curl`; HTML `no-cache`, assets `/assets/*` `immutable` y API proxied `no-store`.
 
 ## 15.3 CSP
 
@@ -1292,18 +1475,22 @@ Prioridad: **P0**
 - [ ] Pago no activado.
 - [ ] Webhook fallido.
 - [ ] Suscripción duplicada.
-- [ ] Gmail desconectado.
-- [ ] Refresh token revocado.
-- [ ] Análisis atascado.
-- [ ] Worker IA caído.
-- [ ] Bedrock caído.
-- [ ] Resend caído.
-- [ ] Scheduler omitido.
-- [ ] Firestore no disponible.
-- [ ] Borrado solicitado.
-- [ ] Incidente de seguridad.
-- [ ] Rollback.
+- [x] Gmail desconectado.
+- [x] Refresh token revocado.
+- [x] Evento WorkOS de revocación o deprovisioning.
+- [x] Análisis atascado.
+- [x] Worker IA caído.
+- [x] Bedrock caído.
+- [x] Resend caído.
+- [x] Scheduler omitido.
+- [x] Firestore no disponible.
+- [x] Borrado solicitado.
+- [x] Incidente de seguridad.
+- [x] Rollback.
 - [ ] Restauración de datos.
+
+Evidencia: `docs/operational-runbooks.md`. Los runbooks de pago permanecen
+diferidos junto con el incidente actual de Mercado Pago.
 
 Cada runbook debe incluir:
 
@@ -1450,24 +1637,24 @@ Prioridad: **P1**
 - [ ] Cerrar seguridad e idempotencia del webhook.
 - [ ] Configurar modo producción.
 - [ ] Limitar API a una instancia.
-- [ ] Sanitizar errores.
-- [ ] Corregir sesión/logout.
-- [ ] Implementar desconexión Gmail.
+- [x] Sanitizar errores.
+- [x] Corregir sesión/logout.
+- [x] Implementar desconexión Gmail.
 - [ ] Definir y habilitar borrado.
-- [ ] Alinear copy público: sin “beta”, sin prometer multiproveedor.
+- [x] Alinear copy público: sin “beta”, sin prometer multiproveedor.
 - [ ] Alinear copy y documentos sobre IA.
 - [ ] Retocar landing pública para reducir fondos vacíos y reforzar confianza.
 
 ## Fase B — Protección operativa
 
 - [ ] Activar PITR y delete protection.
-- [ ] Crear logs estructurados.
-- [ ] Crear request IDs.
+- [x] Crear logs estructurados.
+- [x] Crear request IDs.
 - [ ] Crear uptime checks.
 - [ ] Crear alertas técnicas y de negocio.
-- [ ] Crear runbooks.
-- [ ] Corregir check oficial.
-- [ ] Crear CI.
+- [x] Crear runbooks.
+- [x] Corregir check local; falta primera corrida oficial de CI.
+- [x] Crear CI.
 
 ## Fase C — Lanzamiento controlado
 
@@ -1498,20 +1685,22 @@ Usar esta tabla para mantener una visión ejecutiva:
 | Área | Prioridad | Estado | Responsable | Evidencia | Observaciones |
 |---|---:|---|---|---|---|
 | Checkout embebido | P0 | En progreso |  | `scripts/check-all.sh` — verde; build Docker sandbox con clave pública | Card Payment Brick → token → `/preapproval` `authorized`, sin redirect; la ejecución real espera login WorkOS. |
-| Webhook Mercado Pago | P0 | En progreso |  | `scripts/check-all.sh` — 135 Rust tests; callback sandbox configurado por MCP | Falta recibir la notificación real y cargar el secreto completo para validar su firma HMAC. |
+| Webhook Mercado Pago | P0 | Diferido |  | Incidente de pagos actual; sin cambios en este avance | Se retoma después de resolver el incidente y autorizar la prueba real. |
 | Configuración de entornos | P0 | En progreso |  | `docker compose --env-file .env.sandbox.example -f docker-compose.yml -f docker-compose.tunnel.yml config --services` | Sandbox con `mira-dev.ninfasolutions.com`; producción con `mira.ninfasolutions.com` y webhook directo a Cloud Run API. |
-| Configuración production | P0 | Listo local |  | `cargo test` — 135 Rust tests | Producción exige Firestore, URLs HTTPS coherentes, cookies seguras, billing y secretos de Mercado Pago/Audience. |
-| Sesiones y logout | P0 | Listo local |  | `scripts/check-all.sh` — 135 Rust tests | Expiración absoluta 30 días y logout revocable; falta prueba en despliegue. |
-| Sanitización de errores | P0 | Listo local |  | `scripts/check-all.sh` — 135 Rust tests | Errores inesperados y de proveedores no exponen detalles al navegador; falta catálogo/correlación. |
-| Desconexión Gmail | P0 | Listo local |  | `scripts/check-all.sh` — 135 Rust tests | Revocación Google, tokens borrados, scheduler desactivado y confirmación UI. |
-| Borrado de datos | P0 | En progreso |  | `scripts/check-all.sh` — 135 Rust tests | Borrado de todos los análisis disponible; falta borrado de cuenta y prueba Firestore real. |
-| Privacidad y términos | P0 | En progreso |  |  |  |
-| Landing/copy público | P1 | En progreso |  |  | Sin lenguaje de beta; retoque visual liviano. |
+| Configuración production | P0 | Listo local |  | `scripts/check-all.sh` — 161 Rust, 10 worker | La validación acepta callbacks HTTPS del origen API o web/proxy y exige secreto de webhook WorkOS; `APP_ENV=production` sigue pendiente de autorización, secretos y pagos. |
+| Sesiones y logout | P0 | Listo local |  | `scripts/check-all.sh` — 161 Rust, 10 worker | Expiración absoluta 30 días, logout individual/global revocable, atributos seguros de cookies y revocación WorkOS de nuevas sesiones; falta smoke test desplegado. |
+| Ciclo de vida WorkOS | P0 | Listo local |  | `scripts/check-all.sh` — 161 Rust, 10 worker | Webhook HMAC para `user.deleted` y `session.revoked`; falta secreto, endpoint y prueba de eventos en WorkOS/Cloud Run. |
+| Sanitización de errores | P0 | En progreso |  | `scripts/check-all.sh` — 161 Rust, 10 worker | API tiene catálogo público, no enumera análisis ajenos y propaga `request_id`; falta validar el flujo desplegado. |
+| Desconexión Gmail | P0 | Listo local |  | `scripts/check-all.sh` — 161 Rust, 10 worker | Revocación Google, tokens borrados, scheduler desactivado y confirmación UI; falta prueba desplegada. |
+| Borrado de datos | P0 | En progreso |  | `scripts/check-all.sh` — 161 Rust, 10 worker | Borrado de todos los análisis disponible, auditado sin PII y con señal de fallo; falta borrado de cuenta y prueba Firestore real. |
+| Privacidad y términos | P0 | En progreso |  | `docs/privacy.md`; Configuración y Ayuda | El copy técnico refleja el comportamiento actual; faltan política y términos aprobados/publicables. |
+| Landing/copy público | P1 | Listo local |  | `npm --prefix apps/web run build` | Sin lenguaje de beta; el copy de IA refleja el opt-out real. Onboarding, ayuda y documentos legales continúan aparte. |
 | PITR Firestore | P0 | Pendiente |  |  |  |
 | Uptime y alertas | P0 | Pendiente |  |  |  |
-| CI verde | P0 | En progreso |  | `scripts/check-all.sh` — verde | Falta confirmar la ejecución remota al abrir el PR. |
+| Logs API | P0 | Listo local |  | Inicio API/worker y `scripts/check-all.sh` — 161 Rust, 10 worker | API y worker emiten JSON con contexto mínimo y datos redactados; falta verificar Cloud Logging tras desplegar. |
+| CI verde | P0 | Configurado local |  | `.github/workflows/ci.yml`; `scripts/check-all.sh` — 161 Rust, 10 worker, build web y scan de secretos | Corre en PR y `main`, reutiliza el gate y el lockfile. Falta primera ejecución remota y protección de rama. |
 | Panel admin | P1 | Pendiente |  |  |  |
-| Hardening contenedores | P1 | Pendiente |  |  |  |
+| Hardening contenedores | P1 | En progreso |  | Builds Docker, salud y UID no-root de API/worker/web | Runtime separado, lockfile y usuarios no-root; faltan CSP, escaneo y límites operativos. |
 | Retención automática | P1 | Pendiente |  |  |  |
 | OpenTelemetry/Grafana | P2 | Pendiente |  |  |  |
 | Migración Supabase | P2 | Pendiente |  |  |  |
@@ -1531,8 +1720,8 @@ Este bloque es una fotografía inicial y debe actualizarse a medida que cambie e
 - [x] Tokens Gmail cifrados antes de persistirse.
 - [x] OAuth incluye protecciones de state/PKCE.
 - [x] Aislamiento de runs y threads probado.
-- [x] 122 tests Rust pasan.
-- [x] 7 tests Python pasan.
+- [x] 147 tests Rust pasan.
+- [x] 10 tests Python pasan.
 - [x] Frontend compila para producción.
 - [x] API compila en release.
 - [x] `npm audit --omit=dev` sin vulnerabilidades reportadas al 2026-06-25.
@@ -1542,23 +1731,26 @@ Este bloque es una fotografía inicial y debe actualizarse a medida que cambie e
 ## Pendiente o riesgoso
 
 - [ ] `APP_ENV=production` no está configurado en la API desplegada.
-- [ ] Billing enforcement no está configurado explícitamente.
+- [x] Billing enforcement está configurado explícitamente en la revisión auditada.
 - [ ] Mercado Pago no está configurado en la revisión auditada.
 - [ ] API permite hasta 20 instancias.
 - [ ] Firestore PITR desactivado.
 - [ ] Firestore delete protection desactivado.
 - [ ] No se observaron alertas operativas configuradas.
-- [ ] El check oficial falla por Clippy.
-- [ ] Checkout versionado todavía utiliza redirección.
+- [x] El check local ya no falla por Clippy; falta su primera corrida remota y
+  protección de rama.
+- [x] Checkout versionado no utiliza redirección.
 - [x] Desconexión Gmail y borrado de análisis disponibles con confirmación; falta borrado de cuenta.
 - [ ] Retención declarada no tiene job destructivo.
 - [x] Sesiones expiran a los 30 días y se revocan server-side.
 - [x] Logout revoca la sesión además de borrar la cookie.
+- [x] La persona usuaria puede cerrar todas sus sesiones web sin desconectar Gmail.
 - [x] Errores inesperados y de proveedores se sanitizan antes de llegar al navegador.
-- [ ] Copy de IA no es completamente consistente con el comportamiento real.
-- [ ] No hay CI visible en el repositorio.
+- [x] Copy de IA consistente con el comportamiento real; política y términos
+  continúan pendientes de revisión legal.
+- [x] CI visible en el repositorio; falta primera ejecución remota y protección de rama.
 - [ ] No hay tests frontend/E2E.
-- [ ] No hay headers de seguridad explícitos en el servidor web.
+- [x] El servidor web emite headers básicos, políticas de caché y un CSP mínimo no disruptivo; una política restrictiva de scripts, conexiones e iframes queda pendiente de inventario y pruebas de integraciones.
 
 ---
 

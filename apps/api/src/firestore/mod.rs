@@ -23,18 +23,20 @@ use crate::{
     auth::UserSession,
     billing::{Account, CheckoutSession, Subscription, UsageLedger},
     config::{FirestoreConfig, ServiceAccountKey},
-    mailbox::{FilterPreset, MailboxMetadata},
+    mailbox::{FilterPreset, GmailConnection, MailboxMetadata, gmail_connection_is_active},
     policies::{OrgConfigBundle, PolicyVersion, hash_owner_email},
     scheduler::model::{ScheduleConfig, ScheduleState},
     storage::{
-        ManualReviewInheritanceMigrationResult, ManualReviewMetricsMigrationResult,
-        StorageRepository, clear_gmail_connection,
+        AnalysisDataDeletionAudit, GmailConnectionRefresh, ManualReviewInheritanceMigrationResult,
+        ManualReviewMetricsMigrationResult, ScheduleWindowClaim, StorageRepository,
+        clear_gmail_connection, existing_schedule_window_claim, gmail_connection_from_legacy,
     },
 };
 
 const MANUAL_REVIEW_METRICS_MIGRATION_PATH: &str = "systemMigrations/manual-review-metrics-v1";
 const MANUAL_REVIEW_INHERITANCE_MIGRATION_PATH: &str =
     "systemMigrations/manual-review-inheritance-v2";
+const SCHEDULE_CLAIM_MAX_ATTEMPTS: usize = 3;
 
 pub struct FirestoreStorage {
     client: Client,
@@ -53,6 +55,8 @@ struct FirestoreDocument {
     name: String,
     #[serde(default)]
     fields: Map<String, Value>,
+    #[serde(default, rename = "updateTime")]
+    update_time: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -77,6 +81,15 @@ struct MigrationMarker {
     scanned_runs: u64,
     updated_runs: u64,
     updated_threads: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct AccountEmailIndex {
+    workos_user_id: String,
+}
+
+fn account_email_index_path(email: &str) -> String {
+    format!("accountEmailIndexes/{}", hash_owner_email(email))
 }
 
 impl FirestoreStorage {
@@ -194,7 +207,64 @@ impl FirestoreStorage {
         Ok(())
     }
 
+    /// Escribe sólo si el documento sigue en la versión recién leída, o si aún
+    /// no existe. El `false` es una carrera esperada: otro proceso ganó el
+    /// claim y hay que releerlo antes de decidir.
+    async fn put_if_current<T: Serialize + ?Sized>(
+        &self,
+        path: &str,
+        value: &T,
+        update_time: Option<&str>,
+    ) -> anyhow::Result<bool> {
+        let token = self.token().await?;
+        let data = serde_json::to_value(value)?;
+        let body = json!({ "fields": json_to_firestore_fields(&data)? });
+        let mut request = self
+            .client
+            .patch(format!("{}/{}", self.root(), path))
+            .bearer_auth(token)
+            .json(&body);
+        request = match update_time {
+            Some(update_time) => request.query(&[("currentDocument.updateTime", update_time)]),
+            None => request.query(&[("currentDocument.exists", "false")]),
+        };
+        let response = request.send().await?;
+        if response.status().is_success() {
+            return Ok(true);
+        }
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        if is_precondition_conflict(status, &body) {
+            return Ok(false);
+        }
+        Err(anyhow!(
+            "failed to conditionally write Firestore document {path} with {status}"
+        ))
+    }
+
     async fn get<T: DeserializeOwned>(&self, path: &str) -> anyhow::Result<Option<T>> {
+        let Some(doc) = self.get_document(path).await? else {
+            return Ok(None);
+        };
+        let value = firestore_fields_to_json(doc.fields)?;
+        Ok(Some(serde_json::from_value(value)?))
+    }
+
+    async fn get_with_update_time<T: DeserializeOwned>(
+        &self,
+        path: &str,
+    ) -> anyhow::Result<Option<(T, String)>> {
+        let Some(doc) = self.get_document(path).await? else {
+            return Ok(None);
+        };
+        let update_time = doc
+            .update_time
+            .ok_or_else(|| anyhow!("Firestore document {path} did not include updateTime"))?;
+        let value = firestore_fields_to_json(doc.fields)?;
+        Ok(Some((serde_json::from_value(value)?, update_time)))
+    }
+
+    async fn get_document(&self, path: &str) -> anyhow::Result<Option<FirestoreDocument>> {
         let token = self.token().await?;
         let response = self
             .client
@@ -205,9 +275,7 @@ impl FirestoreStorage {
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
         }
-        let doc: FirestoreDocument = response.error_for_status()?.json().await?;
-        let value = firestore_fields_to_json(doc.fields)?;
-        Ok(Some(serde_json::from_value(value)?))
+        Ok(Some(response.error_for_status()?.json().await?))
     }
 
     async fn list<T: DeserializeOwned>(
@@ -307,7 +375,14 @@ impl FirestoreStorage {
 impl StorageRepository for FirestoreStorage {
     async fn upsert_account(&self, account: &Account) -> anyhow::Result<()> {
         self.put(&format!("accounts/{}", account.workos_user_id), account)
-            .await
+            .await?;
+        self.put(
+            &account_email_index_path(&account.email),
+            &AccountEmailIndex {
+                workos_user_id: account.workos_user_id.clone(),
+            },
+        )
+        .await
     }
 
     async fn get_account_by_workos_user_id(
@@ -318,10 +393,28 @@ impl StorageRepository for FirestoreStorage {
     }
 
     async fn get_account_by_email(&self, email: &str) -> anyhow::Result<Option<Account>> {
+        let index_path = account_email_index_path(email);
+        if let Some(index) = self.get::<AccountEmailIndex>(&index_path).await? {
+            if let Some(account) = self
+                .get_account_by_workos_user_id(&index.workos_user_id)
+                .await?
+                .filter(|account| account.email.eq_ignore_ascii_case(email))
+            {
+                return Ok(Some(account));
+            }
+            // ponytail: un correo cambiado deja un índice viejo hasta que se
+            // consulte; se limpia entonces sin añadir una lectura a cada login.
+            self.delete(&index_path).await?;
+        }
+
         let accounts: Vec<Account> = self.list("", "accounts").await?;
-        Ok(accounts
+        let account = accounts
             .into_iter()
-            .find(|account| account.email.eq_ignore_ascii_case(email)))
+            .find(|account| account.email.eq_ignore_ascii_case(email));
+        if let Some(account) = &account {
+            self.upsert_account(account).await?;
+        }
+        Ok(account)
     }
 
     async fn upsert_user_session(&self, session: &UserSession) -> anyhow::Result<()> {
@@ -332,13 +425,142 @@ impl StorageRepository for FirestoreStorage {
         self.get(&format!("users/{id}")).await
     }
 
+    async fn upsert_gmail_connection(&self, connection: &GmailConnection) -> anyhow::Result<()> {
+        self.put(
+            &format!(
+                "gmailConnections/{}",
+                hash_owner_email(&connection.owner_email)
+            ),
+            connection,
+        )
+        .await
+    }
+
+    async fn get_gmail_connection(
+        &self,
+        owner_email: &str,
+    ) -> anyhow::Result<Option<GmailConnection>> {
+        let path = format!("gmailConnections/{}", hash_owner_email(owner_email));
+        if let Some(connection) = self.get(&path).await? {
+            return Ok(Some(connection));
+        }
+
+        // ponytail: escanea `users` durante la migración legacy; usar una consulta
+        // indexada por propietario si el volumen hace costoso este camino transitorio.
+        let legacy = self
+            .list::<UserSession>("", "users")
+            .await?
+            .into_iter()
+            .filter(|session| {
+                session
+                    .google_account_email
+                    .eq_ignore_ascii_case(owner_email)
+            })
+            .filter_map(|session| gmail_connection_from_legacy(&session))
+            .max_by_key(|connection| {
+                (
+                    connection.refresh_token_encrypted.is_some(),
+                    connection.updated_at,
+                )
+            });
+        let Some(connection) = legacy else {
+            return Ok(None);
+        };
+
+        self.put(&path, &connection).await?;
+        let sessions: Vec<UserSession> = self.list("", "users").await?;
+        for mut session in sessions {
+            if session
+                .google_account_email
+                .eq_ignore_ascii_case(owner_email)
+            {
+                clear_gmail_connection(&mut session, connection.updated_at);
+                self.put(&format!("users/{}", session.id), &session).await?;
+            }
+        }
+        Ok(Some(connection))
+    }
+
+    async fn refresh_gmail_connection(
+        &self,
+        previous: &GmailConnection,
+        updated: &GmailConnection,
+    ) -> anyhow::Result<GmailConnectionRefresh> {
+        let path = format!(
+            "gmailConnections/{}",
+            hash_owner_email(&previous.owner_email)
+        );
+        let Some((current, update_time)) =
+            self.get_with_update_time::<GmailConnection>(&path).await?
+        else {
+            return Ok(GmailConnectionRefresh::ConnectionChanged);
+        };
+        if current.updated_at != previous.updated_at || !gmail_connection_is_active(Some(&current))
+        {
+            return Ok(GmailConnectionRefresh::ConnectionChanged);
+        }
+        if self
+            .put_if_current(&path, updated, Some(&update_time))
+            .await?
+        {
+            Ok(GmailConnectionRefresh::Updated)
+        } else {
+            Ok(GmailConnectionRefresh::ConnectionChanged)
+        }
+    }
+
+    async fn revoke_user_sessions(
+        &self,
+        owner_email: &str,
+        now: chrono::DateTime<Utc>,
+    ) -> anyhow::Result<()> {
+        // `list` recorre páginas; una consulta indexada por propietario evita
+        // escanear toda la colección si el volumen crece.
+        let sessions: Vec<UserSession> = self.list("", "users").await?;
+        for mut session in sessions {
+            if session
+                .google_account_email
+                .eq_ignore_ascii_case(owner_email)
+            {
+                session.revoked_at = Some(now);
+                session.updated_at = now;
+                self.put(&format!("users/{}", session.id), &session).await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn revoke_user_session_by_workos_session_id(
+        &self,
+        workos_session_id: &str,
+        now: chrono::DateTime<Utc>,
+    ) -> anyhow::Result<()> {
+        let sessions: Vec<UserSession> = self.list("", "users").await?;
+        for mut session in sessions {
+            if session.workos_session_id.as_deref() == Some(workos_session_id) {
+                session.revoked_at = Some(now);
+                session.updated_at = now;
+                self.put(&format!("users/{}", session.id), &session).await?;
+            }
+        }
+        Ok(())
+    }
+
     async fn disconnect_gmail(
         &self,
         owner_email: &str,
         now: chrono::DateTime<Utc>,
     ) -> anyhow::Result<()> {
-        // `list` pagina hasta 300 sesiones. Para el despliegue actual basta;
-        // si creciera, este barrido debe usar una consulta paginada por correo.
+        let connection_path = format!("gmailConnections/{}", hash_owner_email(owner_email));
+        if let Some(mut connection) = self.get::<GmailConnection>(&connection_path).await? {
+            connection.access_token_encrypted.clear();
+            connection.refresh_token_encrypted = None;
+            connection.revoked_at = Some(now);
+            connection.updated_at = now;
+            self.put(&connection_path, &connection).await?;
+        }
+        // `list` recorre páginas; una consulta indexada por propietario evita
+        // escanear toda la colección si el volumen crece.
         let sessions: Vec<UserSession> = self.list("", "users").await?;
         for mut session in sessions {
             if session
@@ -350,25 +572,6 @@ impl StorageRepository for FirestoreStorage {
             }
         }
         Ok(())
-    }
-
-    async fn find_latest_session_with_refresh_token(
-        &self,
-        email: &str,
-    ) -> anyhow::Result<Option<UserSession>> {
-        // El helper `list` pagina a 300 documentos y cada login crea un doc
-        // nuevo en `users/`; con un despliegue mono-usuario alcanza de sobra.
-        // Si la colección creciera, el siguiente paso es limpiar sesiones
-        // antiguas o paginar con orderBy.
-        let sessions: Vec<UserSession> = self.list("", "users").await?;
-        Ok(sessions
-            .into_iter()
-            .filter(|session| {
-                session.google_account_email == email
-                    && (session.gmail_refresh_token_encrypted.is_some()
-                        || session.refresh_token_encrypted.is_some())
-            })
-            .max_by_key(|session| session.updated_at))
     }
 
     async fn list_schedule_configs(&self) -> anyhow::Result<Vec<ScheduleConfig>> {
@@ -387,6 +590,39 @@ impl StorageRepository for FirestoreStorage {
     async fn upsert_schedule_state(&self, state: &ScheduleState) -> anyhow::Result<()> {
         self.put(&format!("scheduleStates/{}", state.user_email), state)
             .await
+    }
+
+    async fn claim_schedule_window(
+        &self,
+        state: &ScheduleState,
+        stale_before: chrono::DateTime<Utc>,
+    ) -> anyhow::Result<ScheduleWindowClaim> {
+        let path = format!("scheduleStates/{}", state.user_email);
+        for _ in 0..SCHEDULE_CLAIM_MAX_ATTEMPTS {
+            match self.get_with_update_time::<ScheduleState>(&path).await? {
+                Some((existing, update_time)) => {
+                    if let Some(result) =
+                        existing_schedule_window_claim(&existing, state, stale_before)
+                    {
+                        return Ok(result);
+                    }
+                    if self
+                        .put_if_current(&path, state, Some(&update_time))
+                        .await?
+                    {
+                        return Ok(ScheduleWindowClaim::Claimed);
+                    }
+                }
+                None => {
+                    if self.put_if_current(&path, state, None).await? {
+                        return Ok(ScheduleWindowClaim::Claimed);
+                    }
+                }
+            }
+        }
+        Err(anyhow!(
+            "schedule claim changed concurrently after {SCHEDULE_CLAIM_MAX_ATTEMPTS} attempts"
+        ))
     }
 
     async fn get_org_config_for_user(
@@ -567,6 +803,13 @@ impl StorageRepository for FirestoreStorage {
                 .await?;
         }
         Ok(())
+    }
+
+    async fn record_analysis_data_deletion(
+        &self,
+        audit: &AnalysisDataDeletionAudit,
+    ) -> anyhow::Result<()> {
+        self.put(&format!("auditLogs/{}", audit.id), audit).await
     }
 
     async fn upsert_thread(
@@ -1093,6 +1336,12 @@ fn epoch() -> u64 {
         .as_secs()
 }
 
+fn is_precondition_conflict(status: reqwest::StatusCode, body: &str) -> bool {
+    status == reqwest::StatusCode::CONFLICT
+        || status == reqwest::StatusCode::PRECONDITION_FAILED
+        || (status == reqwest::StatusCode::BAD_REQUEST && body.contains("FAILED_PRECONDITION"))
+}
+
 async fn json_or_google_error<T: DeserializeOwned>(
     response: reqwest::Response,
     label: &str,
@@ -1100,8 +1349,36 @@ async fn json_or_google_error<T: DeserializeOwned>(
     let status = response.status();
     let text = response.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(anyhow!("{label} failed with {status}: {text}"));
+        return Err(anyhow!("{label} failed with {status}"));
     }
-    serde_json::from_str(&text)
-        .map_err(|error| anyhow!("{label} returned invalid JSON: {error}; body: {text}"))
+    serde_json::from_str(&text).map_err(|error| anyhow!("{label} returned invalid JSON: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{account_email_index_path, is_precondition_conflict};
+
+    #[test]
+    fn account_email_index_normalizes_and_does_not_expose_the_email() {
+        let path = account_email_index_path(" Owner@Example.com ");
+
+        assert_eq!(path, account_email_index_path("owner@example.com"));
+        assert!(!path.contains("owner@example.com"));
+    }
+
+    #[test]
+    fn recognizes_firestore_precondition_conflicts_without_exposing_error_bodies() {
+        assert!(is_precondition_conflict(
+            reqwest::StatusCode::CONFLICT,
+            "anything"
+        ));
+        assert!(is_precondition_conflict(
+            reqwest::StatusCode::BAD_REQUEST,
+            r#"{\"error\":{\"status\":\"FAILED_PRECONDITION\"}}"#
+        ));
+        assert!(!is_precondition_conflict(
+            reqwest::StatusCode::BAD_REQUEST,
+            r#"{\"error\":{\"status\":\"INVALID_ARGUMENT\"}}"#
+        ));
+    }
 }

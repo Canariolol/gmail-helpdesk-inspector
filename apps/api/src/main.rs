@@ -12,6 +12,7 @@ mod scheduler;
 mod storage;
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::Context;
 use axum::{
@@ -29,7 +30,13 @@ use tower_http::{
     cors::{AllowOrigin, CorsLayer},
     trace::TraceLayer,
 };
+use tracing::Instrument;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
+use uuid::Uuid;
+
+tokio::task_local! {
+    pub(crate) static REQUEST_ID: String;
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -38,7 +45,12 @@ async fn main() -> anyhow::Result<()> {
             EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "info,tower_http=info,html5ever::tree_builder=error".into()),
         )
-        .with(tracing_subscriber::fmt::layer())
+        .with(
+            tracing_subscriber::fmt::layer()
+                .json()
+                .with_current_span(true)
+                .with_span_list(true),
+        )
         .init();
 
     let config = AppConfig::from_env()?;
@@ -91,6 +103,7 @@ pub fn build_app(config: AppConfig, storage: Arc<dyn StorageRepository>) -> Rout
 }
 
 pub fn build_app_from_state(state: AppState) -> Router {
+    let request_state = state.clone();
     let cors = CorsLayer::new()
         .allow_origin(AllowOrigin::exact(
             HeaderValue::from_str(&state.config.web_base_url).expect("valid WEB_BASE_URL"),
@@ -118,6 +131,47 @@ pub fn build_app_from_state(state: AppState) -> Router {
             reject_cross_origin_mutation,
         ))
         .layer(TraceLayer::new_for_http())
+        .layer(axum::middleware::from_fn_with_state(
+            request_state,
+            attach_request_id,
+        ))
+}
+
+async fn attach_request_id(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let request_id = Uuid::new_v4().to_string();
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
+    let started_at = Instant::now();
+    let span = tracing::info_span!(
+        "http_request",
+        service = "api",
+        environment = %state.config.app_env,
+        %request_id,
+        %method,
+        %path
+    );
+    let mut response = REQUEST_ID
+        .scope(
+            request_id.clone(),
+            next.run(request).instrument(span.clone()),
+        )
+        .await;
+    tracing::info!(
+        parent: &span,
+        operation = "http_request",
+        status = %response.status(),
+        duration_ms = started_at.elapsed().as_millis(),
+        "request completed"
+    );
+    response.headers_mut().insert(
+        HeaderName::from_static("x-request-id"),
+        HeaderValue::from_str(&request_id).expect("UUID is a valid header value"),
+    );
+    response
 }
 
 async fn reject_cross_origin_mutation(
@@ -135,11 +189,7 @@ async fn reject_cross_origin_mutation(
         .and_then(|value| value.to_str().ok())
         .is_none_or(|origin| origin == state.config.web_base_url);
     if unsafe_method && !origin_is_trusted {
-        return (
-            axum::http::StatusCode::FORBIDDEN,
-            axum::Json(serde_json::json!({ "error": "Origen no permitido" })),
-        )
-            .into_response();
+        return http::ApiError::forbidden("Origen no permitido").into_response();
     }
     next.run(request).await
 }

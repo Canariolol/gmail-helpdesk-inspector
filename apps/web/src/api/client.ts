@@ -23,7 +23,10 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   });
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
-    throw new Error(body.error ?? statusMessages[response.status] ?? "No se pudo completar la solicitud.");
+    const error = typeof body.error === "object" && body.error !== null ? body.error : undefined;
+    const message = error?.message ?? body.error ?? statusMessages[response.status] ?? "No se pudo completar la solicitud.";
+    const requestId = error?.request_id ?? response.headers.get("x-request-id");
+    throw new Error(requestId ? `${message} (ID de soporte: ${requestId})` : message);
   }
   if (response.status === 204) {
     return undefined as T;

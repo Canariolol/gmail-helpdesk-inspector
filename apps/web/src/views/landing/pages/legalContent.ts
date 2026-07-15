@@ -20,7 +20,7 @@ export const PRIVACY: LegalDoc = {
     { heading: "Responsable del tratamiento", body: `${PLACEHOLDER} Identificación de la empresa responsable y datos de contacto.` },
     { heading: "Datos que recopilamos", body: `${PLACEHOLDER} Datos de cuenta, metadatos de correos y métricas derivadas; no se almacena el cuerpo completo de los correos.` },
     { heading: "Acceso a Gmail (solo lectura)", body: `${PLACEHOLDER} Alcance del permiso de solo lectura: no enviamos, no etiquetamos, no archivamos ni borramos correos.` },
-    { heading: "Finalidad del tratamiento", body: `${PLACEHOLDER} Para qué se usan los datos: generación de métricas, reportes y auditoría con IA opcional.` },
+    { heading: "Finalidad del tratamiento", body: `${PLACEHOLDER} Para qué se usan los datos: generación de métricas, reportes y auditoría con IA activada por defecto, que la organización puede desactivar desde Configuración.` },
     { heading: "Conservación y retención", body: `${PLACEHOLDER} Plazos de retención por plan y criterios de eliminación.` },
     { heading: "Encargados y terceros", body: `${PLACEHOLDER} Proveedores que tratan datos por encargo: MercadoPago (pagos), WorkOS (autenticación) y el proveedor de IA.` },
     { heading: "Derechos del titular", body: `${PLACEHOLDER} Derechos de acceso, rectificación, cancelación y oposición conforme a la Ley 19.628, y cómo ejercerlos.` },

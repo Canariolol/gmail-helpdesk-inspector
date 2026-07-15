@@ -13,8 +13,8 @@ Docker publishes local ports on loopback only.
 Open-source MVP for auditing a Gmail inbox used as a lightweight help desk.
 
 The app reads Gmail with the minimum readonly scope, classifies support-like
-threads, calculates auditable response metrics, and can use an opt-in AI auditor
-through Amazon Bedrock when enabled by the organization policy.
+threads, calculates auditable response metrics, and uses an AI auditor through
+Amazon Bedrock by default. Each organization can disable it from Configuration.
 
 ## Stack
 
@@ -118,7 +118,8 @@ Key defaults for the initial release:
   analysis when `BILLING_ENFORCEMENT_ENABLED=true`.
 - Plans charge in CLP through Mercado Pago. USD prices are reference copy only.
 - `Pro` is the only plan with a 30-day trial.
-- AI auditing is off by default and requires explicit consent.
+- AI auditing is on by default and can be disabled at any time from
+  Configuration. Re-enabling it requires explicit confirmation.
 - Retention defaults to 30 days and is stored per run as `retention_expires_at`.
 - Scheduled reports default to metrics-only content.
 - Gmail remains `gmail.readonly`; reports are sent via Resend, never via Gmail.
@@ -146,6 +147,7 @@ Useful public/provider endpoints:
 |----------|---------|
 | `GET /public/plans` | Public billing plan catalog for pricing UI |
 | `POST /billing/mercadopago/webhook` | Mercado Pago subscription notification receiver |
+| `POST /auth/workos/webhook` | Signed WorkOS user/session lifecycle receiver |
 
 Pagination note: `GET /analysis-runs` and `GET /analysis-runs/:id/threads` remain backward-compatible arrays without query params. With `limit`/`page_token`, they return `{ items, next_page_token, total_count }` for initial-release scale pagination.
 
@@ -196,6 +198,7 @@ combined safely. If `CRON_SECRET` is unset the endpoint answers 404.
 | `WORKOS_API_KEY` | WorkOS API key; never commit real values |
 | `WORKOS_REDIRECT_URI` | WorkOS callback URL, e.g. `/auth/workos/callback` |
 | `WORKOS_COOKIE_SECRET` | Secret used for WorkOS OAuth state cookie signing |
+| `WORKOS_WEBHOOK_SECRET` | WorkOS endpoint secret used to verify lifecycle events |
 | `BILLING_ENFORCEMENT_ENABLED` | Enables subscription/trial guards; defaults on in production |
 | `MERCADOPAGO_ACCESS_TOKEN` | Mercado Pago access token for CLP subscriptions |
 | `MERCADOPAGO_WEBHOOK_SECRET` | Shared webhook secret for receiver validation |
