@@ -48,13 +48,15 @@ type ManualReviewPayload = {
   notes: string | null;
 };
 
+type PlansModalMode = "checkout" | "change";
+
 export function App() {
   const queryClient = useQueryClient();
   const [view, setView] = useState<AppView>("resumen");
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
   const [threadFilter, setThreadFilter] = useState<string>("all");
-  const [showPlansModal, setShowPlansModal] = useState(false);
+  const [plansModalMode, setPlansModalMode] = useState<PlansModalMode | null>(null);
   // Plan elegido para el checkout embebido; muestra el formulario de tarjeta.
   const [checkoutPlan, setCheckoutPlan] = useState<BillingPlan | null>(null);
   // Marca de tiempo del último guardado de revisión exitoso; alimenta la
@@ -261,7 +263,7 @@ export function App() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["account"] });
       queryClient.invalidateQueries({ queryKey: ["usage"] });
-      setShowPlansModal(false);
+      setPlansModalMode(null);
     },
   });
 
@@ -328,6 +330,7 @@ export function App() {
     const plan = plans.data?.find((item) => item.id === planId);
     if (!plan) return;
     checkout.reset();
+    setPlansModalMode(null);
     setCheckoutPlan(plan);
   };
 
@@ -397,19 +400,24 @@ export function App() {
   const checkoutLoadingPlanId = null;
   const changePlanLoadingId = changePlan.isPending ? changePlan.variables ?? null : null;
   const planName = accountData.entitlement.plan?.name ?? null;
+  const canChangePlan =
+    accountData.entitlement.subscription_status === "active" ||
+    accountData.entitlement.subscription_status === "trialing";
+  const openPlans = () => setPlansModalMode(canChangePlan ? "change" : "checkout");
+
+  if (checkoutPlan) {
+    return (
+      <CheckoutView
+        plan={checkoutPlan}
+        onPay={handlePayCheckout}
+        onBack={handleBackFromCheckout}
+        isSubmitting={checkout.isPending}
+        error={checkoutError}
+      />
+    );
+  }
 
   if (accessState.kind === "pricing") {
-    if (checkoutPlan) {
-      return (
-        <CheckoutView
-          plan={checkoutPlan}
-          onPay={handlePayCheckout}
-          onBack={handleBackFromCheckout}
-          isSubmitting={checkout.isPending}
-          error={checkoutError}
-        />
-      );
-    }
     return (
       <PricingGate
         email={accountData.account_email}
@@ -463,7 +471,7 @@ export function App() {
             limit={analyzedLimit}
             unitLabel="hilos analizados"
             planName={planName}
-            onUpgrade={() => setShowPlansModal(true)}
+            onUpgrade={openPlans}
           />
         ) : (
           runsLimitReached &&
@@ -473,7 +481,7 @@ export function App() {
               limit={runsLimit}
               unitLabel="análisis"
               planName={planName}
-              onUpgrade={() => setShowPlansModal(true)}
+              onUpgrade={openPlans}
             />
           )
         )}
@@ -502,7 +510,7 @@ export function App() {
             onDeletePreset={(id) => deletePreset.mutate(id)}
             analysisError={createRun.error?.message ?? startRun.error?.message ?? null}
             planName={planName}
-            onUpgrade={() => setShowPlansModal(true)}
+            onUpgrade={openPlans}
           />
         )}
         {(effectiveView === "hilos" || effectiveView === "revision") && (
@@ -532,7 +540,7 @@ export function App() {
             plans={plans.data ?? []}
             onChoosePlan={handleChoosePlan}
             checkoutLoadingPlanId={checkoutLoadingPlanId}
-            onOpenChangePlan={() => setShowPlansModal(true)}
+            onOpenChangePlan={openPlans}
             onCancel={() => cancelSubscription.mutate()}
             cancelPending={cancelSubscription.isPending}
             onDisconnectGmail={() => disconnectGmail.mutate()}
@@ -556,18 +564,19 @@ export function App() {
         {effectiveView === "ayuda" && <AyudaView />}
       </main>
 
-      {showPlansModal && (
+      {plansModalMode && (
         <PlansModal
-          mode="change"
+          mode={plansModalMode}
           plans={plans.data ?? []}
           currentPlanId={accountData.entitlement.plan?.id ?? null}
           currentPlanName={planName}
-          onChoosePlan={handleChangePlan}
-          loadingPlanId={changePlanLoadingId}
-          error={changePlan.error?.message ?? null}
+          onChoosePlan={plansModalMode === "change" ? handleChangePlan : handleChoosePlan}
+          loadingPlanId={plansModalMode === "change" ? changePlanLoadingId : null}
+          error={plansModalMode === "change" ? changePlan.error?.message ?? null : checkoutError}
           onClose={() => {
-            setShowPlansModal(false);
-            changePlan.reset();
+            setPlansModalMode(null);
+            if (plansModalMode === "change") changePlan.reset();
+            else checkout.reset();
           }}
         />
       )}

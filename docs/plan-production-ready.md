@@ -277,6 +277,16 @@ de estados con Mercado Pago.
 - [ ] Estado esperado y estado observado.
 - [ ] Logs sanitizados asociados mediante `request_id` o `checkout_id`.
 
+### Ejecución sandbox — 2026-07-14
+
+- [x] Stack local levantado con credenciales sandbox aisladas del `.env` existente; API y callback público temporal responden `/health`.
+- [x] Webhook sandbox configurado para `subscription_preapproval` desde el MCP de Mercado Pago.
+- [x] Corregida la inyección de `VITE_MERCADOPAGO_PUBLIC_KEY` en el build Docker de la web.
+- [x] Corregido el flujo Mira Free: elegir un plan inicia checkout nuevo; cambiar o cancelar se reserva para suscripciones activas.
+- [x] Secreto completo de webhook cargado localmente y API recreada, sin exponerlo.
+- [ ] Crear la preapproval desde el Brick, recibir la notificación y validar la suscripción mediante una prueba manual sandbox.
+- [ ] Verificar firma HMAC en el evento real.
+
 ---
 
 # 4. Configuración real de producción en GCP
@@ -1478,8 +1488,8 @@ Usar esta tabla para mantener una visión ejecutiva:
 
 | Área | Prioridad | Estado | Responsable | Evidencia | Observaciones |
 |---|---:|---|---|---|---|
-| Checkout embebido | P0 | En progreso |  | `scripts/check-all.sh` — verde | Card Payment Brick → token → `/preapproval` `authorized`, sin redirect; falta sandbox real. |
-| Webhook Mercado Pago | P0 | En progreso |  | `scripts/check-all.sh` — 135 Rust tests | Firma HMAC, timestamp 5 min, idempotency key y secreto obligatorio implementados; falta sandbox real. |
+| Checkout embebido | P0 | En progreso |  | `scripts/check-all.sh` — verde; build Docker sandbox con clave pública | Card Payment Brick → token → `/preapproval` `authorized`, sin redirect; la ejecución real espera login WorkOS. |
+| Webhook Mercado Pago | P0 | En progreso |  | `scripts/check-all.sh` — 135 Rust tests; callback sandbox configurado por MCP | Falta recibir la notificación real y cargar el secreto completo para validar su firma HMAC. |
 | Configuración de entornos | P0 | En progreso |  | `docker compose --env-file .env.sandbox.example -f docker-compose.yml -f docker-compose.tunnel.yml config --services` | Sandbox con `mira-dev.ninfasolutions.com`; producción con `mira.ninfasolutions.com` y webhook directo a Cloud Run API. |
 | Configuración production | P0 | Listo local |  | `cargo test` — 135 Rust tests | Producción exige Firestore, URLs HTTPS coherentes, cookies seguras, billing y secretos de Mercado Pago/Audience. |
 | Sesiones y logout | P0 | Listo local |  | `scripts/check-all.sh` — 135 Rust tests | Expiración absoluta 30 días y logout revocable; falta prueba en despliegue. |

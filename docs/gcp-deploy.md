@@ -34,6 +34,7 @@ gcloud run deploy "$WORKER_SERVICE" \
 ## Web, solo si cambió apps/web
 docker build -f apps/web/Dockerfile \
   --build-arg "VITE_API_BASE_URL=" \
+  --build-arg "VITE_MERCADOPAGO_PUBLIC_KEY=${VITE_MERCADOPAGO_PUBLIC_KEY}" \
   -t "${IMAGE_BASE}/web:latest" .
 docker push "${IMAGE_BASE}/web:latest"
 gcloud run deploy "$WEB_SERVICE" \
@@ -226,6 +227,7 @@ gcloud run services update "$API_SERVICE" \
 ```bash
 docker build -f apps/web/Dockerfile \
   --build-arg "VITE_API_BASE_URL=" \
+  --build-arg "VITE_MERCADOPAGO_PUBLIC_KEY=${VITE_MERCADOPAGO_PUBLIC_KEY}" \
   -t "${IMAGE_BASE}/web:latest" .
 docker push "${IMAGE_BASE}/web:latest"
 ```
@@ -330,6 +332,7 @@ Reconstruye y redespliega la web. Para evitar cookies third-party entre dos domi
 ```bash
 docker build -f apps/web/Dockerfile \
   --build-arg "VITE_API_BASE_URL=" \
+  --build-arg "VITE_MERCADOPAGO_PUBLIC_KEY=${VITE_MERCADOPAGO_PUBLIC_KEY}" \
   -t "${IMAGE_BASE}/web:latest" .
 docker push "${IMAGE_BASE}/web:latest"
 

@@ -18,6 +18,7 @@ Environment overrides:
   WEB_SERVICE      Defaults to ghmi-web
   IMAGE_BASE       Defaults to ${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${ARTIFACT_REPO}
   API_URL          Optional; used by the web deploy for API_PROXY_TARGET
+  VITE_MERCADOPAGO_PUBLIC_KEY  Required to build embedded Mercado Pago checkout
 USAGE
 }
 
@@ -140,12 +141,14 @@ deploy_web() {
   fi
 
   ensure_service_exists "$WEB_SERVICE"
+  require_var VITE_MERCADOPAGO_PUBLIC_KEY
 
   local image="${IMAGE_BASE}/web:latest"
 
   echo "Building ${image}..."
   docker build -f apps/web/Dockerfile \
     --build-arg "VITE_API_BASE_URL=" \
+    --build-arg "VITE_MERCADOPAGO_PUBLIC_KEY=${VITE_MERCADOPAGO_PUBLIC_KEY}" \
     -t "$image" .
 
   echo "Pushing ${image}..."

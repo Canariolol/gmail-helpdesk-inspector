@@ -4,7 +4,9 @@ COPY apps/web/package*.json ./
 RUN npm install
 COPY apps/web .
 ARG VITE_API_BASE_URL=http://localhost:8080
+ARG VITE_MERCADOPAGO_PUBLIC_KEY
 ENV VITE_API_BASE_URL=$VITE_API_BASE_URL
+ENV VITE_MERCADOPAGO_PUBLIC_KEY=$VITE_MERCADOPAGO_PUBLIC_KEY
 RUN npm run build
 
 FROM node:20-bookworm-slim

@@ -72,6 +72,7 @@ export function CuentaView({
   const status = entitlement.subscription_status;
   const blocked = isBlockedStatus(status);
   const scheduledCancel = entitlement.cancel_at_period_end && entitlement.allowed;
+  const canManageSubscription = status === "active" || status === "trialing";
 
   const periodEnd = formatDate(entitlement.current_period_end);
   const trialEnd = formatDate(entitlement.trial_ends_at);
@@ -128,7 +129,7 @@ export function CuentaView({
                   <RefreshCw size={16} />
                   {planId && checkoutLoadingPlanId === planId ? "Reanudando…" : "Reanudar suscripción"}
                 </button>
-              ) : (
+              ) : canManageSubscription ? (
                 <>
                   <button type="button" className="btn-primary" onClick={onOpenChangePlan}>
                     Cambiar de plan <ArrowUpRight size={16} />
@@ -170,6 +171,10 @@ export function CuentaView({
                     </div>
                   )}
                 </>
+              ) : (
+                <button type="button" className="btn-primary" onClick={onOpenChangePlan}>
+                  Elegir un plan <ArrowUpRight size={16} />
+                </button>
               )}
             </div>
           </div>

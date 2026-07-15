@@ -51,6 +51,7 @@ API_BASE_URL=https://<ghmi-api-run-app-url>
 GOOGLE_REDIRECT_URL=https://mira.ninfasolutions.com/gmail/connect/callback
 WORKOS_REDIRECT_URI=https://mira.ninfasolutions.com/auth/workos/callback
 VITE_API_BASE_URL=
+VITE_MERCADOPAGO_PUBLIC_KEY=<public-key-de-mercado-pago>
 API_PROXY_TARGET=https://<ghmi-api-run-app-url>
 BILLING_ENFORCEMENT_ENABLED=true
 ```
@@ -66,6 +67,5 @@ que Mercado Pago llegue directo a Cloud Run API.
 
 Credenciales:
 
-- Sandbox: `TEST-*`.
-- Produccion: `APP_USR-*` / live.
-- No mezclar `VITE_MERCADOPAGO_PUBLIC_KEY` sandbox con `MERCADOPAGO_ACCESS_TOKEN` live.
+- Obtén las credenciales exactas para cada entorno desde la aplicación de Mercado Pago; el prefijo depende del producto.
+- No mezclar la `VITE_MERCADOPAGO_PUBLIC_KEY` y el `MERCADOPAGO_ACCESS_TOKEN` de entornos distintos.
