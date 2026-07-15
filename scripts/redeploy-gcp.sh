@@ -141,7 +141,6 @@ deploy_web() {
   fi
 
   ensure_service_exists "$WEB_SERVICE"
-  require_var VITE_MERCADOPAGO_PUBLIC_KEY
 
   local image="${IMAGE_BASE}/web:latest"
 
@@ -167,6 +166,12 @@ echo "Project:    $GCP_PROJECT_ID"
 echo "Region:     $GCP_REGION"
 echo "Images:     $IMAGE_BASE"
 echo "Target:     $target"
+
+if [[ "$target" == "web" || "$target" == "all" ]] && [[ -z "${VITE_MERCADOPAGO_PUBLIC_KEY:-}" ]]; then
+  echo "Missing VITE_MERCADOPAGO_PUBLIC_KEY." >&2
+  echo "For sandbox: set -a; source .env.sandbox.local; set +a; scripts/redeploy-gcp.sh $target" >&2
+  exit 1
+fi
 
 gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
 

@@ -3684,17 +3684,15 @@ async fn create_mercadopago_preapproval(
         &state.config.web_base_url,
         &state.config.api_base_url,
     );
-    state
+    let response = state
         .http
         .post("https://api.mercadopago.com/preapproval")
         .header("X-Idempotency-Key", &checkout.id)
         .bearer_auth(access_token)
         .json(&body)
         .send()
-        .await?
-        .json_or_external_error("Mercado Pago preapproval")
-        .await
-        .map_err(ApiError::from)
+        .await?;
+    mercadopago_json(response, "create_preapproval").await
 }
 
 fn mercadopago_preapproval_body(
@@ -3736,7 +3734,7 @@ async fn update_mercadopago_preapproval(
     provider_id: &str,
     body: serde_json::Value,
 ) -> Result<MercadoPagoPreapprovalResponse, ApiError> {
-    state
+    let response = state
         .http
         .put(format!(
             "https://api.mercadopago.com/preapproval/{provider_id}"
@@ -3744,10 +3742,8 @@ async fn update_mercadopago_preapproval(
         .bearer_auth(access_token)
         .json(&body)
         .send()
-        .await?
-        .json_or_external_error("Mercado Pago preapproval update")
-        .await
-        .map_err(ApiError::from)
+        .await?;
+    mercadopago_json(response, "update_preapproval").await
 }
 
 async fn get_mercadopago_preapproval(
@@ -3755,17 +3751,67 @@ async fn get_mercadopago_preapproval(
     access_token: &str,
     provider_id: &str,
 ) -> Result<MercadoPagoPreapprovalResponse, ApiError> {
-    state
+    let response = state
         .http
         .get(format!(
             "https://api.mercadopago.com/preapproval/{provider_id}"
         ))
         .bearer_auth(access_token)
         .send()
-        .await?
-        .json_or_external_error("Mercado Pago preapproval fetch")
-        .await
-        .map_err(ApiError::from)
+        .await?;
+    mercadopago_json(response, "get_preapproval").await
+}
+
+async fn mercadopago_json<T: DeserializeOwned>(
+    response: reqwest::Response,
+    operation: &str,
+) -> Result<T, ApiError> {
+    let status = response.status();
+    let request_id = response
+        .headers()
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("missing")
+        .to_string();
+    let text = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        let provider_message = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|body| body.get("message")?.as_str().map(str::to_string))
+            .unwrap_or_else(|| "unavailable".to_string());
+        tracing::warn!(
+            %operation,
+            provider_status = status.as_u16(),
+            %request_id,
+            %provider_message,
+            "Mercado Pago rechazó la operación"
+        );
+        return Err(mercadopago_api_error(status));
+    }
+    serde_json::from_str(&text).map_err(|error| {
+        tracing::warn!(
+            %operation,
+            %request_id,
+            %error,
+            "Mercado Pago devolvió una respuesta inválida"
+        );
+        ApiError::external_service_unavailable()
+    })
+}
+
+fn mercadopago_api_error(status: StatusCode) -> ApiError {
+    match status {
+        StatusCode::BAD_REQUEST => ApiError::bad_request(
+            "Mercado Pago rechazó la suscripción; revisa el correo del pagador y los datos de la tarjeta",
+        ),
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
+            ApiError::service_unavailable("Mercado Pago rechazó las credenciales configuradas")
+        }
+        StatusCode::TOO_MANY_REQUESTS => ApiError::service_unavailable(
+            "Mercado Pago limitó temporalmente las solicitudes; inténtalo nuevamente",
+        ),
+        _ => ApiError::external_service_unavailable(),
+    }
 }
 
 fn map_mercadopago_status(status: Option<&str>) -> SubscriptionStatus {
@@ -4818,6 +4864,17 @@ mod tests {
         );
         assert_eq!(body["back_url"], "https://mira.example");
         assert!(body.get("init_point").is_none());
+    }
+
+    #[test]
+    fn mercadopago_errors_preserve_provider_boundary() {
+        let bad_request = mercadopago_api_error(StatusCode::BAD_REQUEST);
+        assert_eq!(bad_request.status, StatusCode::BAD_REQUEST);
+        assert!(bad_request.message.contains("revisa el correo"));
+
+        let provider_failure = mercadopago_api_error(StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(provider_failure.status, StatusCode::BAD_GATEWAY);
+        assert!(!provider_failure.message.contains("Internal server error"));
     }
 
     #[test]

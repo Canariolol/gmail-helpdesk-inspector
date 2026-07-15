@@ -284,7 +284,16 @@ de estados con Mercado Pago.
 - [x] Corregida la inyección de `VITE_MERCADOPAGO_PUBLIC_KEY` en el build Docker de la web.
 - [x] Corregido el flujo Mira Free: elegir un plan inicia checkout nuevo; cambiar o cancelar se reserva para suscripciones activas.
 - [x] Secreto completo de webhook cargado localmente y API recreada, sin exponerlo.
+- [x] Cloud Run sandbox corregido: `ghmi-api-00022-gvm` sirve con enforcement activo y credenciales server-side desde Secret Manager; `/health` responde OK.
+- [x] Frontend corregido desplegado en `ghmi-web-00016-hpl` al 100%: Mira Free deriva a checkout nuevo en vez de `/me/subscription/change-plan`.
+- [x] Errores de Mercado Pago corregidos en `ghmi-api-00023-jk2`: los 4xx/5xx ya no se convierten en 500 internos ni exponen payloads; se registran operación, estado y `request_id`. Evidencia: 136 tests y Clippy OK.
+- [x] Callback sandbox configurado manualmente en Mercado Pago por el responsable de la cuenta; pendiente validar su primera entrega real.
+- [x] Credencial vendedora sandbox verificada sin exponer secretos: el proceso local carga `.env.sandbox.local` y `/users/me` identifica `TESTUSER2731260096360294218`.
+- [x] Diagnosticado el primer 400 real de `/preapproval`: la tarjeta se tokenizó (`201`), pero Mercado Pago rechazó `back_url=http://localhost:5173`. Sandbox local corregido para usar la URL HTTPS del frontend desplegado y stack reiniciado.
+- [x] Diagnosticado el segundo 400 en Cloud Run (`request_id=a3dc0162-9dac-4278-b823-a5389525e656`): `Card token was generated without cvv validation`. La public key desplegada coincide con `.env.sandbox.local`; una preapproval aislada con las mismas credenciales y datos fue autorizada y luego cancelada, confirmando que el fallo quedó en el token del navegador/autorrelleno del CVV.
+- [x] `scripts/redeploy-gcp.sh` ahora valida la public key antes de iniciar un despliegue `web/all` y muestra el comando sandbox, evitando desplegar worker/API y abortar recién al llegar a la web.
 - [ ] Crear la preapproval desde el Brick, recibir la notificación y validar la suscripción mediante una prueba manual sandbox.
+- [ ] Repetir el checkout usando el correo de una cuenta compradora de prueba distinta de la cuenta vendedora sandbox. Mercado Pago devolvió 500 y no creó ninguna preapproval con correos genéricos.
 - [ ] Verificar firma HMAC en el evento real.
 
 ---
