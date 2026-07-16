@@ -736,9 +736,15 @@ Para cada proveedor:
 - [x] Un fallo de auditoría IA detallada se persiste como razón fija para
   revisión manual y se registra con `ai_detailed_audit_failed`, sin incluir el
   texto del proveedor.
-- [ ] Falta validar estos cambios en Cloud Logging y completar la revisión
-  extremo a extremo de Bedrock. Mercado Pago queda expresamente diferido por el
-  incidente de pagos actual.
+- [x] Validar la estructura de logs HTTP de API en Cloud Logging.
+  - Evidencia 2026-07-16: una petición controlada a
+    `ghmi-api-00033-xut` devolvió 200 y un UUID generado por servidor. El
+    evento correlacionado contiene `service`, `environment`, método, ruta,
+    `request_id`, operación, estado y duración; no expone campos de token,
+    secreto, cookie, autorización, cuerpo ni email.
+- [ ] Completar revisión extremo a extremo de Bedrock y de errores reales de
+  proveedores. Mercado Pago queda expresamente diferido por el incidente de
+  pagos actual.
 
 - [ ] No registrar access tokens.
 - [ ] No registrar refresh tokens.
@@ -1899,7 +1905,7 @@ Usar esta tabla para mantener una visión ejecutiva:
 | Landing/copy público | P1 | Listo local |  | `npm --prefix apps/web run build` | Sin lenguaje de beta; el copy de IA refleja el opt-out real. Onboarding, ayuda y documentos legales continúan aparte. |
 | PITR Firestore | P0 | Habilitado |  | Firestore `(default)`: PITR y delete protection habilitados (2026-07-15) | Falta prueba de restauración controlada. |
 | Uptime y alertas | P0 | Pendiente |  |  |  |
-| Logs API | P0 | Listo local |  | Inicio API/worker y `scripts/check-all.sh` — 161 Rust, 10 worker | API y worker emiten JSON con contexto mínimo y datos redactados; falta verificar Cloud Logging tras desplegar. |
+| Logs API | P0 | En progreso |  | Evento HTTP correlacionado en Cloud Logging de `ghmi-api-00033-xut` | API ya validó campos estructurados y redacción en candidata; faltan Bedrock y errores reales de proveedores. |
 | CI verde | P0 | Configurado local |  | `.github/workflows/ci.yml`; `scripts/check-all.sh` — 161 Rust, 10 worker, build web y scan de secretos | Corre en PR y `main`, reutiliza el gate y el lockfile. Falta primera ejecución remota y protección de rama. |
 | Panel admin | P1 | Pendiente |  |  |  |
 | Hardening contenedores | P1 | En progreso |  | Builds Docker, salud y UID no-root de API/worker/web | Runtime separado, lockfile y usuarios no-root; faltan CSP, escaneo y límites operativos. |

@@ -2,6 +2,33 @@
 
 Este registro acompaña a `plan-production-ready.md`: solo se anota trabajo terminado con evidencia. Los pagos permanecen diferidos hasta resolver su problema actual.
 
+## 2026-07-16 — Log HTTP de API comprobado en Cloud Logging
+
+**Estado:** verificación desplegada terminada para el camino HTTP normal;
+errores reales de proveedores siguen pendientes.
+
+**Qué se hizo:**
+
+- Se envió una única petición de salud a la candidata API y se comprobó que
+  devolviera 200 junto a un `x-request-id` UUID generado por servidor.
+- Se localizó el evento correlacionado en Cloud Logging y se inspeccionó sólo
+  la estructura de sus campos, no sus valores.
+
+**Motivo:** los tests locales no prueban el formato que Cloud Run entrega a
+Cloud Logging. La correlación desplegada debe conservar señales operativas sin
+reflejar secretos o datos de correo.
+
+**Evidencia:**
+
+- El evento contiene servicio, entorno, método, ruta, request ID, operación,
+  estado y duración.
+- Sus rutas de campos no contienen token, secreto, cookie, autorización,
+  cuerpo ni email.
+
+**Qué sigue:** probar el mismo contrato ante un fallo real de Bedrock y de los
+proveedores no financieros. No se activó monitoreo recurrente ni se modificó
+Mercado Pago.
+
 ## 2026-07-16 — Candidatas de mínimo privilegio para web y worker
 
 **Estado:** candidatas terminadas y verificadas; promoción y una clave local
