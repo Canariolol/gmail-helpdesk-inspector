@@ -133,13 +133,14 @@ mapping.
 
    El certificado debe ser válido y la respuesta debe venir de `ghmi-web`.
 
-   **Estado 2026-07-15:** se creó el Domain Mapping de `mira.ninfasolutions.com`
-   hacia `ghmi-web` y el CNAME `mira -> ghs.googlehosted.com` ya resuelve por
-   DNS público. Cloud Run permanece en `Ready=Unknown` hasta que Google emita
-   su certificado HTTPS; no cambiar OAuth ni desplegar mientras esté pendiente.
+   **Estado 2026-07-16:** Cloud Run informa `Ready=True` y
+   `CertificateProvisioned=True` para `mira.ninfasolutions.com`; el CNAME
+   `mira -> ghs.googlehosted.com` resuelve por DNS público. El resolver local
+   aún puede conservar cache antiguo; no cambiar OAuth desde una respuesta DNS
+   local desactualizada.
 
-No cambiar las variables OAuth ni desplegar todavía. En el deploy candidato
-siguiente se actualizarán, como un único cambio verificable:
+En el deploy candidato siguiente se actualizarán, como un único cambio
+verificable:
 
 ```text
 WEB_BASE_URL=https://mira.ninfasolutions.com

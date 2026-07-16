@@ -345,6 +345,18 @@ Prioridad: **P0**
 - [ ] Documentar rotación de cada secreto.
 - [ ] Definir responsable de rotación.
 
+### Inventario de inyección — 2026-07-16
+
+- `APP_ENCRYPTION_KEY`, `APP_SESSION_SECRET`, `GOOGLE_CLIENT_SECRET`,
+  `CRON_SECRET`, `RESEND_API_KEY`, los secretos sandbox de Mercado Pago y
+  `WORKOS_WEBHOOK_SECRET` se inyectan desde Secret Manager.
+- Solo `WORKOS_API_KEY` y `WORKOS_COOKIE_SECRET` permanecen como valores
+  literales en la revisión activa. La migración debe incluir una API key nueva
+  emitida desde WorkOS y la rotación de la cookie cerrará las sesiones actuales.
+- `scripts/check-secrets.sh` no detectó patrones de credenciales en archivos
+  versionados; ese control es acotado y no sustituye la rotación ni una revisión
+  humana de secretos.
+
 ## 4.2 Validaciones de arranque
 
 - [x] Hacer que producción rechace `APP_STORAGE=memory`.
@@ -366,17 +378,31 @@ a API y la cookie se entrega bajo el origen con que navega la persona usuaria.
 ## 4.3 Escalado temporal
 
 - [x] Configurar `max-instances=1` para `ghmi-api`.
-  - Evidencia 2026-07-15: `autoscaling.knative.dev/maxScale=1` en
-    `ghmi-api-00030-vxc`.
-- [ ] Confirmar que el scheduler externo sigue operativo.
-- [ ] Mantener `SCHEDULER_ENABLED=false` si Cloud Scheduler es la fuente elegida.
-- [ ] No habilitar simultáneamente scheduler interno y externo sin una razón documentada.
+  - Evidencia 2026-07-16: `autoscaling.knative.dev/maxScale=1` se conserva en
+    la revisión activa `ghmi-api-00031-6lx`.
+- [x] Confirmar que el scheduler externo sigue operativo.
+  - Evidencia 2026-07-16: `ghmi-daily-report` está `ENABLED` y su última
+    ejecución observada el 2026-07-15 respondió `200` desde
+    `/internal/scheduled-analysis`.
+- [x] Mantener `SCHEDULER_ENABLED=false` si Cloud Scheduler es la fuente elegida.
+  - Evidencia 2026-07-16: la revisión activa de `ghmi-api` lo declara
+    explícitamente como `false`.
+- [x] No habilitar simultáneamente scheduler interno y externo sin una razón documentada.
+  - Evidencia 2026-07-16: Cloud Scheduler es la única fuente habilitada y la
+    API conserva el scheduler interno desactivado.
 - [ ] Confirmar que la concurrencia máxima no produce análisis simultáneos inesperados.
-- [ ] Documentar qué tareas impiden escalar horizontalmente:
-  - Rate limiter en memoria.
-  - Contadores read-modify-write.
-  - Claims del scheduler sin transacción.
-  - Posibles carreras de billing.
+- [x] Documentar qué tareas impiden escalar horizontalmente.
+  - El rate limiter está en memoria por instancia (`Mutex<HashMap<...>>`), por
+    lo que cada instancia tendría su propio cupo.
+  - Los contadores de uso hacen lectura, incremento y `upsert` sin una
+    precondición o transacción; dos instancias podrían perder incrementos.
+  - Checkout, suscripción y webhook de billing todavía encadenan lecturas y
+    escrituras independientes; sus carreras se resolverán al retomar pagos.
+  - El claim del scheduler **no** es ya un bloqueo: Firestore usa
+    `update_time` como precondición condicional y la prueba de claims
+    concurrentes está verde.
+  - Mantener `maxScale=1` hasta resolver los tres puntos anteriores y ejecutar
+    una prueba de concurrencia desplegada.
 
 ### Inspección GCP — 2026-07-15
 
@@ -418,16 +444,35 @@ consulta de solo lectura:
 
 ### Revalidación de dominio — 2026-07-16
 
-- El mapping `mira.ninfasolutions.com -> ghmi-web` sigue en
-  `Ready=Unknown`, esperando el certificado HTTPS de Google. No se cambian
-  aún callbacks OAuth, WorkOS ni imágenes.
+- El mapping `mira.ninfasolutions.com -> ghmi-web` informa `Ready=True` y
+  `CertificateProvisioned=True` desde 2026-07-16 04:47 UTC. El CNAME público
+  sigue apuntando a `ghs.googlehosted.com`; el resolver local puede demorar en
+  descartar su caché anterior.
 - `ghmi-web` ya proxya al URL actual de API (`ghmi-api-io54uhmrxa-uc.a.run.app`),
   pero `API_BASE_URL` de la API conserva un URL `run.app` anterior. El deploy
   candidato debe alinear `API_BASE_URL` con el URL actual de API junto con
   `WEB_BASE_URL`, `GOOGLE_REDIRECT_URL` y `WORKOS_REDIRECT_URI`.
 
+### Scheduler externo — 2026-07-16
+
+- `ghmi-daily-report` está habilitado, corre de lunes a viernes a las 08:00
+  `America/Santiago` y llama directamente a
+  `/internal/scheduled-analysis` de `ghmi-api`.
+- La revisión activa declara `SCHEDULER_ENABLED=false`; no hay scheduler
+  interno compitiendo con Cloud Scheduler.
+- Cloud Logging muestra una ejecución `200` el 2026-07-15 (6,2 s). También
+  se observó un `504` el 2026-07-14 al alcanzar los 300 s de timeout de Cloud
+  Run. Se corrigió en `ghmi-api-00031-6lx`: API y Cloud Scheduler usan ahora
+  un límite explícito de 1.800 s. `/health` de la revisión respondió `200`.
+
 ## 4.4 Revisión segura
 
+- [x] Preparar el despliegue de una revisión sin tráfico.
+  - `scripts/redeploy-gcp.sh --no-traffic <servicio>` usa el tag `candidate`,
+    conserva el tráfico existente e imprime la URL directa para el smoke test.
+    Con `all`, la web candidata usa la API candidata.
+    Fue validado con una ejecución simulada; aún no existe una revisión
+    candidata real de las imágenes actuales.
 - [ ] Desplegar una revisión sin tráfico.
 - [ ] Probar `/health`.
 - [ ] Probar login WorkOS.
@@ -899,10 +944,19 @@ Prioridad: **P0**
 
 ## 9.1 Recuperación
 
-- [ ] Habilitar Point-in-Time Recovery.
-- [ ] Habilitar protección contra eliminación de la base.
-- [ ] Confirmar periodo de recuperación.
-- [ ] Documentar restauración.
+- [x] Habilitar Point-in-Time Recovery.
+  - Evidencia 2026-07-16: `(default)` informa
+    `POINT_IN_TIME_RECOVERY_ENABLED`.
+- [x] Habilitar protección contra eliminación de la base.
+  - Evidencia 2026-07-16: `(default)` informa
+    `DELETE_PROTECTION_ENABLED`.
+- [x] Confirmar periodo de recuperación.
+  - Evidencia 2026-07-16: `versionRetentionPeriod=604800s` (7 días) y
+    `earliestVersionTime=2026-07-15T19:07:00Z`. La ventana crecerá hasta los
+    siete días desde la habilitación.
+- [x] Documentar restauración.
+  - `docs/operational-runbooks.md` define un clone a una base nueva para el
+    drill; no se restaura `(default)` in-place.
 - [ ] Crear un entorno o proyecto para probar restore.
 - [ ] Ejecutar una prueba real de restauración.
 - [ ] Medir tiempo de recuperación.
@@ -914,12 +968,19 @@ Sugerencia inicial:
 - RPO: 24 horas o mejor.
 - RTO: 4 horas para la versión inicial.
 
-### Estado observado — 2026-07-15
+### Estado histórico antes de aplicar controles — 2026-07-15
 
 Firestore `(default)` confirma `POINT_IN_TIME_RECOVERY_DISABLED` y
 `DELETE_PROTECTION_DISABLED`; los dos controles siguen siendo P0 abiertos.
 La última auditoría de solo lectura también confirmó `maxScale=20` en
 `ghmi-api`, `ghmi-web` y `ghmi-ai-worker`; no hubo cambios de infraestructura.
+
+### Estado actual — 2026-07-16
+
+El estado anterior fue reemplazado por los controles aplicados: Firestore
+`(default)` tiene PITR y delete protection habilitados. El runbook usa un clone
+a una base nueva para una recuperación o drill; la prueba real, RPO y RTO
+siguen pendientes.
 
 ## 9.2 Permisos
 
@@ -932,6 +993,23 @@ La última auditoría de solo lectura también confirmó `maxScale=20` en
 - [ ] Activar MFA para cuentas administrativas.
 - [ ] Revisar claves de service account.
 - [ ] Evitar claves persistentes en producción.
+
+### Auditoría de identidades — 2026-07-16
+
+- `ghmi-api` y `ghmi-ai-worker` usan hoy
+  `ghmi-runtime@...`; esa identidad tiene `roles/datastore.user` y
+  `roles/secretmanager.secretAccessor`. El worker no contiene cliente
+  Firestore, pero conserva el permiso por compartir identidad con API.
+- `ghmi-web` usa la identidad Compute Engine por defecto y no se observó un
+  rol Firestore para ella. Su código sólo menciona Firestore en copy de ayuda y
+  privacidad.
+- Existe `ghmi-firestore@...` con `roles/datastore.user`, pero no está asignada
+  a un servicio Cloud Run. Tiene una clave `USER_MANAGED` activa creada el
+  2026-06-12; la API desplegada no selecciona
+  `GOOGLE_APPLICATION_CREDENTIALS`, por lo que usa metadata server.
+- Antes del deploy candidato: asignar `ghmi-firestore` a API, concederle sólo
+  los secretos que requiera, retirar `datastore.user` de `ghmi-runtime` y
+  migrar/revocar su clave persistente tras confirmar el uso local.
 
 ## 9.3 Integridad y concurrencia
 
@@ -1317,6 +1395,9 @@ Prioridad: **P0**
 ## 14.5 Artefactos reproducibles
 
 - [x] Etiquetar imágenes con SHA del commit.
+  - Evidencia 2026-07-16: `scripts/redeploy-gcp.sh` usa por defecto los 12
+    caracteres del commit actual como `IMAGE_TAG`, admite override explícito y
+    rechaza un árbol Git con cambios.
 - [x] Evitar depender únicamente de `latest`.
 - [x] Registrar qué commit corresponde a cada revisión.
   - Evidencia: `docs/gcp-deploy.md` usa `IMAGE_TAG` en la imagen y documenta
@@ -1730,7 +1811,7 @@ Usar esta tabla para mantener una visión ejecutiva:
 |---|---:|---|---|---|---|
 | Checkout embebido | P0 | En progreso |  | `scripts/check-all.sh` — verde; build Docker sandbox con clave pública | Card Payment Brick → token → `/preapproval` `authorized`, sin redirect; la ejecución real espera login WorkOS. |
 | Webhook Mercado Pago | P0 | Diferido |  | Incidente de pagos actual; sin cambios en este avance | Se retoma después de resolver el incidente y autorizar la prueba real. |
-| Configuración de entornos | P0 | En progreso |  | Cloudflare: DNS delegado; mapping Cloud Run creado (2026-07-15) | `mira CNAME ghs.googlehosted.com` ya resuelve; queda esperar el certificado HTTPS antes de cambiar OAuth o desplegar. |
+| Configuración de entornos | P0 | En progreso |  | Cloudflare: DNS delegado; mapping Cloud Run listo (2026-07-16) | Certificado HTTPS provisionado; faltan callbacks OAuth/WorkOS, rotación WorkOS y deploy candidato. |
 | Configuración production | P0 | Listo local |  | `scripts/check-all.sh` — 161 Rust, 10 worker | La validación acepta callbacks HTTPS del origen API o web/proxy y exige secreto de webhook WorkOS; `APP_ENV=production` sigue pendiente de autorización, secretos y pagos. |
 | Sesiones y logout | P0 | Listo local |  | `scripts/check-all.sh` — 161 Rust, 10 worker | Expiración absoluta 30 días, logout individual/global revocable, atributos seguros de cookies y revocación WorkOS de nuevas sesiones; falta smoke test desplegado. |
 | Ciclo de vida WorkOS | P0 | En progreso |  | `WORKOS_WEBHOOK_SECRET` enlazado en `ghmi-api-00030-vxc` | Endpoint y secreto configurados; falta desplegar el handler actual, probar eventos firmados y migrar/rotar las otras credenciales WorkOS que siguen en texto plano. |

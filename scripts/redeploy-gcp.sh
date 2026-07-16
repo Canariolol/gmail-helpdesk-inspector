@@ -7,7 +7,7 @@ cd "$ROOT_DIR"
 usage() {
   cat >&2 <<'USAGE'
 Usage:
-  scripts/redeploy-gcp.sh [api|worker|web|all]
+  scripts/redeploy-gcp.sh [--no-traffic] [api|worker|web|all]
 
 Environment overrides:
   GCP_PROJECT_ID   Defaults to the active gcloud project
@@ -17,23 +17,44 @@ Environment overrides:
   WORKER_SERVICE   Defaults to ghmi-ai-worker
   WEB_SERVICE      Defaults to ghmi-web
   IMAGE_BASE       Defaults to ${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${ARTIFACT_REPO}
+  IMAGE_TAG        Defaults to the current Git commit (12 characters)
   API_URL          Optional; used by the web deploy for API_PROXY_TARGET
   VITE_MERCADOPAGO_PUBLIC_KEY  Required to build embedded Mercado Pago checkout
+
+Options:
+  --no-traffic     Creates a revision tagged candidate without moving user traffic
 USAGE
 }
 
-target="${1:-all}"
-case "$target" in
-  api|worker|web|all) ;;
-  -h|--help)
-    usage
-    exit 0
-    ;;
-  *)
-    usage
-    exit 1
-    ;;
-esac
+target="all"
+target_set=false
+no_traffic=false
+for arg in "$@"; do
+  case "$arg" in
+    --no-traffic) no_traffic=true ;;
+    api|worker|web|all)
+      if [[ "$target_set" == true ]]; then
+        usage
+        exit 1
+      fi
+      target="$arg"
+      target_set=true
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+deploy_traffic_args=()
+if [[ "$no_traffic" == true ]]; then
+  deploy_traffic_args=(--no-traffic --tag=candidate)
+fi
 
 if ! command -v docker >/dev/null 2>&1; then
   echo "Docker is required but was not found in PATH." >&2
@@ -57,6 +78,7 @@ API_SERVICE="${API_SERVICE:-ghmi-api}"
 WORKER_SERVICE="${WORKER_SERVICE:-ghmi-ai-worker}"
 WEB_SERVICE="${WEB_SERVICE:-ghmi-web}"
 IMAGE_BASE="${IMAGE_BASE:-${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${ARTIFACT_REPO}}"
+IMAGE_TAG="${IMAGE_TAG:-$(git rev-parse --short=12 HEAD)}"
 
 require_var() {
   local name="$1"
@@ -74,6 +96,12 @@ require_var API_SERVICE
 require_var WORKER_SERVICE
 require_var WEB_SERVICE
 require_var IMAGE_BASE
+require_var IMAGE_TAG
+
+if ! git diff --quiet || ! git diff --cached --quiet || [[ -n "$(git ls-files --others --exclude-standard)" ]]; then
+  echo "Refusing to deploy a dirty Git worktree. Commit or remove changes first." >&2
+  exit 1
+fi
 
 ensure_service_exists() {
   local service="$1"
@@ -86,13 +114,25 @@ ensure_service_exists() {
   fi
 }
 
+print_candidate_url() {
+  local service="$1"
+  local service_url
+  service_url="$(gcloud run services describe "$service" \
+    --project "$GCP_PROJECT_ID" \
+    --region "$GCP_REGION" \
+    --format='value(status.url)')"
+  if [[ -n "$service_url" ]]; then
+    echo "Candidate URL: https://candidate---${service_url#https://}"
+  fi
+}
+
 build_push_deploy() {
   local name="$1"
   local dockerfile="$2"
   local service="$3"
   shift 3
 
-  local image="${IMAGE_BASE}/${name}:latest"
+  local image="${IMAGE_BASE}/${name}:${IMAGE_TAG}"
 
   ensure_service_exists "$service"
 
@@ -108,7 +148,12 @@ build_push_deploy() {
     --image "$image" \
     --region "$GCP_REGION" \
     --quiet \
+    "${deploy_traffic_args[@]}" \
     "$@"
+
+  if [[ "$no_traffic" == true ]]; then
+    print_candidate_url "$service"
+  fi
 }
 
 resolve_api_url() {
@@ -139,10 +184,13 @@ deploy_web() {
     echo "Export API_URL manually or deploy the API service first." >&2
     exit 1
   fi
+  if [[ "$no_traffic" == true && "$target" == "all" ]]; then
+    api_url="https://candidate---${api_url#https://}"
+  fi
 
   ensure_service_exists "$WEB_SERVICE"
 
-  local image="${IMAGE_BASE}/web:latest"
+  local image="${IMAGE_BASE}/web:${IMAGE_TAG}"
 
   echo "Building ${image}..."
   docker build -f apps/web/Dockerfile \
@@ -159,13 +207,22 @@ deploy_web() {
     --image "$image" \
     --region "$GCP_REGION" \
     --set-env-vars "API_PROXY_TARGET=${api_url}" \
-    --quiet
+    --quiet \
+    "${deploy_traffic_args[@]}"
+
+  if [[ "$no_traffic" == true ]]; then
+    print_candidate_url "$WEB_SERVICE"
+  fi
 }
 
 echo "Project:    $GCP_PROJECT_ID"
 echo "Region:     $GCP_REGION"
 echo "Images:     $IMAGE_BASE"
+echo "Image tag:  $IMAGE_TAG"
 echo "Target:     $target"
+if [[ "$no_traffic" == true ]]; then
+  echo "Traffic:    candidate tag only (no user traffic)"
+fi
 
 if [[ "$target" == "web" || "$target" == "all" ]] && [[ -z "${VITE_MERCADOPAGO_PUBLIC_KEY:-}" ]]; then
   echo "Missing VITE_MERCADOPAGO_PUBLIC_KEY." >&2
@@ -194,5 +251,9 @@ case "$target" in
     deploy_web
     ;;
 esac
+
+if [[ "$no_traffic" == true ]]; then
+  echo "Candidate revision tagged 'candidate' without untagged user traffic."
+fi
 
 echo "Redeploy finished."

@@ -1,5 +1,30 @@
 # TLDR Redeploy:
 
+## Revisión candidata sin tráfico
+
+Antes de promocionar una imagen, crea una revisión aislada y etiquetada:
+
+```bash
+scripts/redeploy-gcp.sh --no-traffic api
+```
+
+El script conserva el tráfico existente, etiqueta la nueva revisión como
+`candidate` e imprime su URL directa. Con `all`, la web candidata proxya a la
+API candidata, no a la API que sigue recibiendo tráfico. Para API, prueba al
+menos:
+
+```bash
+curl -fsS "https://candidate---<api-service-identifier>.run.app/health"
+```
+
+No promociones tráfico hasta completar los smoke tests. Cloud Run permite usar
+un tag para probar una revisión que no recibe tráfico de usuarios.
+
+`redeploy-gcp.sh` etiqueta las imágenes con los primeros 12 caracteres del
+commit actual y exige un árbol Git limpio, para que ese tag corresponda al
+artefacto construido. Para reconstruir desde un tag explícito, exporta
+`IMAGE_TAG` antes de ejecutarlo.
+
 ## Prep Variables (puede ser todo junto)
 
 export GCP_PROJECT_ID="$(gcloud config get-value project 2>/dev/null)"

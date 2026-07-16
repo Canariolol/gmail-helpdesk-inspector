@@ -138,12 +138,52 @@ análisis queda sin poder persistir estado.
    certifica disponibilidad de Firestore.
 2. Revisar el estado de Firestore y cuotas en la consola con acceso autorizado.
 3. No borrar ni restaurar datos durante el incidente. PITR y delete protection
-   siguen pendientes de habilitación y de una prueba de restore.
+   están habilitados; la prueba de recuperación sigue pendiente. No ejecutar
+   una restauración in-place de `(default)` durante el diagnóstico.
 4. Escalar antes de reiniciar o desplegar: los análisis en curso pueden requerir
    revisión de su estado persistido.
 
 **Verificación:** nuevas lecturas/escrituras autorizadas funcionan y no quedan
 runs en estado `running` sin diagnóstico.
+
+## Drill o recuperación Firestore con PITR
+
+PITR y delete protection están habilitados en `(default)`. Para recuperar una
+base completa o realizar un drill, no borres ni restaures `(default)` in-place:
+ese procedimiento implica downtime. Con autorización operativa y presupuesto
+para una base temporal, clona el punto de recuperación a una base nueva.
+
+1. Consultar el primer instante disponible y elegir un `SNAPSHOT_TIME` de un
+   minuto completo, posterior a `earliestVersionTime`:
+
+   ```bash
+   gcloud firestore databases describe --project "$GCP_PROJECT_ID" \
+     --database='(default)' \
+     --format='yaml(earliestVersionTime,versionRetentionPeriod)'
+   ```
+
+2. Crear un clone con un ID nuevo; no apuntar `ghmi-api` a esta base ni ejecutar
+   análisis sobre ella:
+
+   ```bash
+   export SOURCE_DATABASE="projects/${GCP_PROJECT_ID}/databases/(default)"
+   export SNAPSHOT_TIME="<RFC3339-al-minuto-dentro-de-la-ventana-PITR>"
+   export DRILL_DATABASE="restore-drill-<fecha>"
+
+   gcloud firestore databases clone \
+     --project "$GCP_PROJECT_ID" \
+     --source-database="$SOURCE_DATABASE" \
+     --snapshot-time="$SNAPSHOT_TIME" \
+     --destination-database="$DRILL_DATABASE"
+   ```
+
+3. Esperar la operación y verificar la base nueva con
+   `gcloud firestore databases describe --database="$DRILL_DATABASE"`. Registrar
+   sólo hora, snapshot, duración y resultado; no exportar correos, documentos o
+   secretos al registro operativo.
+4. Eliminar la base de drill únicamente con autorización posterior y registrar
+   el coste observado. Una restauración in-place de `(default)` requiere un
+   procedimiento de incidente separado y aprobación explícita.
 
 ## Solicitud de borrar análisis
 
@@ -209,5 +249,5 @@ procedimiento no restaura datos de Firestore.
 **Verificación:** confirmar la revisión que recibe 100% del tráfico con
 `gcloud run services describe`, probar `/health` para API/web y la ruta
 autenticada indicada en `docs/gcp-deploy.md` para el worker; observar 5xx antes
-de comunicar recuperación. Si hay datos afectados, escalar: restauración sigue
-pendiente de PITR y de una prueba real.
+de comunicar recuperación. Si hay datos afectados, escalar: PITR y delete
+protection están activos, pero la prueba real de recuperación sigue pendiente.

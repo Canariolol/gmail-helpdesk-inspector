@@ -1542,7 +1542,7 @@ el sufijo duplicado.
 `mira.ninfasolutions.com`; luego agregar solo los registros DNS que Google
 entregue y verificar HTTPS, correo y web antes de cambiar OAuth o desplegar.
 
-## 2026-07-15 — Mapping Cloud Run para Mira creado
+## 2026-07-16 — Mapping Cloud Run para Mira creado
 
 **Estado:** CNAME público creado; certificado HTTPS pendiente.
 
@@ -1575,3 +1575,297 @@ evitar declarar producción con URLs API inconsistentes.
 **Qué sigue:** cuando Cloud Run informe `Ready=True`, desplegar una revisión
 candidata que actualice juntas las URLs de web/OAuth/WorkOS y `API_BASE_URL`.
 El webhook WorkOS y los pagos no forman parte de este cambio.
+
+## 2026-07-16 — Scheduler externo confirmado sin duplicación interna
+
+**Estado:** terminado y verificado en GCP, con un timeout histórico pendiente
+de revisión.
+
+**Qué se hizo:**
+
+- Se confirmó que `ghmi-daily-report` está `ENABLED`, agenda de lunes a viernes
+  a las 08:00 `America/Santiago` y apunta al endpoint directo de
+  `ghmi-api`.
+- Se confirmó que la revisión activa declara `SCHEDULER_ENABLED=false`; Cloud
+  Scheduler es la única fuente de ejecuciones programadas.
+- Se revisaron ejecuciones recientes: la del 2026-07-15 llegó a la API con
+  `200` en 6,2 segundos.
+
+**Motivo:** con la API limitada a una instancia, ejecutar el scheduler interno
+y Cloud Scheduler a la vez podría duplicar análisis y consumo. La evidencia
+actual prueba que el job externo opera y que no existe esa duplicación.
+
+**Evidencia:**
+
+- `gcloud scheduler jobs describe ghmi-daily-report` — `state=ENABLED`,
+  agenda y URI esperados.
+- Configuración efectiva de Cloud Run — `SCHEDULER_ENABLED=false` y timeout
+  de request de 300 segundos.
+- Cloud Logging — `POST /internal/scheduled-analysis` con `200` el
+  2026-07-15.
+
+**Qué sigue:** investigar el `504` observado el 2026-07-14 tras 300 segundos
+antes de depender del job para usuarios externos. No se modificaron timeout,
+tráfico, dominio ni pagos en esta verificación.
+
+## 2026-07-16 — Timeout del scheduler ampliado y verificado
+
+**Estado:** terminado y verificado en GCP.
+
+**Qué se hizo:**
+
+- Se actualizó el timeout de request de `ghmi-api` de 300 a 1.800 segundos.
+  Cloud Run creó la revisión de configuración `ghmi-api-00031-6lx` y la dejó
+  lista con 100% del tráfico; no se cambió imagen, dominio, variables ni
+  secretos.
+- Se configuró `attemptDeadline=1800s` en `ghmi-daily-report` para que Cloud
+  Scheduler no abandone antes que la API.
+- Se comprobó `GET /health` contra la URL directa de API tras la revisión.
+
+**Motivo:** el `504` del 2026-07-14 coincidió exactamente con el límite de 300
+segundos de Cloud Run. Los análisis programados ya tienen un job dedicado y
+pueden superar ese límite; ambos timeouts deben permitir la misma ventana.
+
+**Evidencia:**
+
+- `ghmi-api-00031-6lx` informa `Ready=True`, tráfico 100% y
+  `spec.template.spec.timeoutSeconds=1800`.
+- `ghmi-daily-report` informa `state=ENABLED` y `attemptDeadline=1800s`.
+- `curl https://ghmi-api-io54uhmrxa-uc.a.run.app/health` devolvió
+  `{"ok":true}`.
+
+**Qué sigue:** observar la próxima ejecución programada y revisar su duración
+en Cloud Logging. El mapping de `mira.ninfasolutions.com` sigue esperando el
+certificado HTTPS; callbacks, URLs, WorkOS y pagos permanecen sin cambios.
+
+## 2026-07-16 — Límites reales para el escalado horizontal documentados
+
+**Estado:** terminado y verificado estáticamente; no habilita todavía más de
+una instancia.
+
+**Qué se hizo:**
+
+- Se revisaron los caminos que dependen de estado compartido. El rate limiter
+  es un `Mutex<HashMap<...>>` en memoria; los contadores de uso hacen
+  lectura-incremento-upsert sin precondición; y checkout/suscripción/webhook
+  encadenan operaciones independientes.
+- Se corrigió una afirmación desactualizada del plan: el scheduler no hace un
+  claim ingenuo. Firestore escribe el claim con la precondición `update_time`
+  y reintenta ante una carrera.
+- Se ejecutó la prueba
+  `scheduler::tests::concurrent_claims_only_allow_one_scheduled_run` con éxito.
+
+**Motivo:** saber qué limita realmente el escalado evita tanto mantener una
+restricción innecesaria como ampliar instancias y perder límites de uso o
+duplicar efectos de billing.
+
+**Evidencia:**
+
+- `apps/api/src/http/mod.rs` contiene el rate limiter por proceso y los
+  incrementos read-modify-write de `UsageLedger`.
+- `apps/api/src/firestore/mod.rs` usa `put_if_current(..., update_time)` para
+  `claim_schedule_window`.
+- `cargo test --manifest-path apps/api/Cargo.toml
+  concurrent_claims_only_allow_one_scheduled_run` — 1 prueba aprobada.
+
+**Qué sigue:** conservar `maxScale=1`. Cuando se retomen pagos, reemplazar los
+contadores y las mutaciones de billing por operaciones condicionales o
+transaccionales y probar concurrencia en una revisión sin tráfico.
+
+## 2026-07-16 — Inventario de secretos de la API confirmado
+
+**Estado:** terminado y verificado en GCP; dos secretos WorkOS siguen
+pendientes de migración y rotación.
+
+**Qué se hizo:** se inventariaron los nombres de variables de `ghmi-api` y su
+modo de inyección, sin consultar ni imprimir valores. Cifrado, sesión, Google,
+cron, Resend, Mercado Pago sandbox y webhook WorkOS provienen de Secret
+Manager. `WORKOS_API_KEY` y `WORKOS_COOKIE_SECRET` son los únicos secretos
+restantes como valores literales.
+
+**Motivo:** el próximo deploy candidato no debe perpetuar secretos de texto
+plano. Separar el hallazgo de sus valores permite preparar la migración sin
+exponer credenciales.
+
+**Evidencia:**
+
+- Configuración de `ghmi-api-00031-6lx`: inventario de nombres y referencias
+  de Secret Manager.
+- `gcloud secrets list`: secretos esperados disponibles.
+- `./scripts/check-secrets.sh` — sin patrones de credenciales en archivos
+  versionados; su cobertura es deliberadamente parcial.
+
+**Qué sigue:** generar una nueva API key en WorkOS y una nueva cookie secret,
+guardarlas como versiones nuevas de Secret Manager y actualizar la API en una
+ventana que advierta el cierre de sesiones. Pagos, callbacks y dominio no se
+modificaron.
+
+## 2026-07-16 — Deploy candidato sin tráfico preparado
+
+**Estado:** terminado y verificado localmente; ninguna imagen nueva fue
+publicada.
+
+**Qué se hizo:** `scripts/redeploy-gcp.sh` acepta ahora `--no-traffic`. Al
+usarlo, Cloud Run crea una revisión etiquetada `candidate`, conserva el tráfico
+de usuarios en la revisión anterior e imprime la URL directa de la candidata.
+Con `all`, la web candidata proxya a la API candidata. El flujo conserva el
+gate `scripts/check-all.sh` antes de Docker y Cloud Run.
+
+**Motivo:** el plan exige probar una revisión antes de promoverla. El script
+anterior enviaba inmediatamente el tráfico a la nueva revisión, por lo que no
+permitía hacer ese smoke test de forma segura.
+
+**Evidencia:**
+
+- `bash -n scripts/redeploy-gcp.sh` — aprobado.
+- Ejecución simulada de `scripts/redeploy-gcp.sh --no-traffic api` — ejecutó
+  el gate completo (161 pruebas Rust, 10 de worker, auditoría npm y build web)
+  y confirmó que `gcloud run deploy` recibiría `--no-traffic --tag=candidate`.
+- Ejecución simulada de `scripts/redeploy-gcp.sh --no-traffic all` — confirmó
+  que `ghmi-web` recibe `API_PROXY_TARGET` de la API etiquetada `candidate`.
+- Se verificó la semántica contra la documentación oficial actual de Cloud Run:
+  un tag permite probar una revisión sin enviarle tráfico de usuarios.
+
+**Qué sigue:** cuando el certificado de `mira.ninfasolutions.com` esté listo y
+las credenciales WorkOS estén rotadas, publicar la candidata real, probar su
+URL etiquetada y recién entonces promover tráfico. Pagos siguen diferidos.
+
+## 2026-07-16 — Recuperación Firestore alineada con el estado real
+
+**Estado:** controles verificados y runbook actualizado; drill real pendiente.
+
+**Qué se hizo:** se confirmó en GCP que Firestore `(default)` tiene PITR,
+delete protection y una retención configurada de 7 días. Se corrigieron las
+referencias operativas que aún indicaban que los controles estaban pendientes.
+El runbook ahora prescribe un clone PITR a una base nueva para recuperación o
+drill, en vez de borrar o restaurar `(default)` in-place.
+
+**Motivo:** el estado operativo debe reflejar los controles realmente activos.
+Un restore in-place requiere downtime y puede sobrescribir cambios; un clone
+permite validar la recuperación sin tocar los datos que usa Mira.
+
+**Evidencia:**
+
+- `gcloud firestore databases describe --database='(default)'` —
+  `POINT_IN_TIME_RECOVERY_ENABLED`, `DELETE_PROTECTION_ENABLED`,
+  `versionRetentionPeriod=604800s` y
+  `earliestVersionTime=2026-07-15T19:07:00Z`.
+- Se contrastó el procedimiento con la documentación oficial de Firestore para
+  PITR y clones.
+
+**Qué sigue:** con autorización y presupuesto acotado, crear una base de drill
+desde un minuto válido de PITR, medir duración y coste, y recién entonces
+definir RPO/RTO. No se clonaron ni restauraron datos durante este avance.
+
+## 2026-07-16 — Imágenes de redeploy trazables por commit
+
+**Estado:** terminado y verificado localmente; no se publicaron imágenes.
+
+**Qué se hizo:** `scripts/redeploy-gcp.sh` dejó de construir y desplegar con
+`:latest`. Ahora obtiene `IMAGE_TAG` desde los primeros 12 caracteres del
+commit actual, o respeta un tag explícito entregado por el operador. Rechaza
+un árbol Git con cambios rastreados o archivos sin trackear para no etiquetar
+código distinto como si fuera un commit conocido.
+
+**Motivo:** `latest` es mutable y no identifica con qué código se creó una
+revisión de Cloud Run. Un tag por commit permite asociar build, candidata,
+promoción y rollback al mismo artefacto.
+
+**Evidencia:**
+
+- El registro de Artifact Registry actual sólo mostraba `latest` para los tres
+  servicios, lo que confirmaba la discrepancia con el runbook.
+- Simulación con `IMAGE_TAG=release-test` confirmó que Docker y Cloud Run usan
+  `:release-test`.
+- Simulación sin override confirmó el tag `cb5b80436e3d`, obtenido desde Git,
+  junto con `--no-traffic --tag=candidate`.
+- Con el árbol de trabajo modificado actual, el script abortó antes del gate
+  con `Refusing to deploy a dirty Git worktree`.
+
+**Qué sigue:** el próximo deploy candidato publicará imágenes etiquetadas por
+commit y dejará la revisión exacta como evidencia. Las imágenes históricas
+`latest` no se modificaron; pagos, dominio y WorkOS permanecen fuera de este
+cambio.
+
+## 2026-07-16 — Auditoría de privilegios Firestore y claves de servicio
+
+**Estado:** auditoría terminada; separación de identidades y rotación de clave
+pendientes.
+
+**Qué se hizo:** se revisaron las identidades de los tres servicios Cloud Run,
+los roles de las service accounts `ghmi-*`, las referencias de código y los
+selectores de credenciales del runtime. API y worker comparten
+`ghmi-runtime`, que posee Firestore y Secret Manager; la web usa la identidad
+Compute Engine por defecto. El worker no contiene código Firestore, pero su
+identidad actual sí podría acceder a la base. Se encontró una cuenta
+`ghmi-firestore` no asignada a Cloud Run con una clave `USER_MANAGED` activa.
+
+**Motivo:** el worker no necesita Firestore. Compartir la identidad amplía el
+impacto de una vulneración del worker, y una clave persistente requiere un
+propietario, rotación y propósito verificable.
+
+**Evidencia:**
+
+- `ghmi-api` y `ghmi-ai-worker` declaran la misma service account; `ghmi-web`
+  declara otra.
+- IAM asigna `roles/datastore.user` a `ghmi-runtime` y a `ghmi-firestore`.
+- `apps/ai-worker` no contiene referencias Firestore; `apps/api` construye
+  `FirestoreStorage`.
+- `ghmi-firestore` tiene una clave `USER_MANAGED` sin vencimiento; la API
+  desplegada no define `GOOGLE_APPLICATION_CREDENTIALS` ni un selector de
+  credenciales Firestore.
+
+**Qué sigue:** en una candidata autorizada, mover API a `ghmi-firestore`,
+concederle sólo los secretos necesarios y retirar Firestore de `ghmi-runtime`.
+Antes de revocar la clave, confirmar y migrar cualquier uso local que dependa
+de ella. No se cambiaron roles, identidades ni claves durante esta auditoría.
+
+## 2026-07-16 — Certificado de `mira.ninfasolutions.com` provisionado
+
+**Estado:** terminado y verificado en Cloud Run; callbacks y deploy candidato
+pendientes.
+
+**Qué se hizo:** se reconsultó el Domain Mapping de `mira.ninfasolutions.com`.
+Cloud Run informa `Ready=True`, `CertificateProvisioned=True` y
+`DomainRoutable=True`. El CNAME requerido sigue respondiendo públicamente como
+`ghs.googlehosted.com`.
+
+**Motivo:** el dominio no debía incorporarse a OAuth, WorkOS ni a una imagen
+antes de tener TLS provisionado. Este estado confirma que Google ya reconoce y
+certifica el host.
+
+**Evidencia:**
+
+- Domain Mapping: transición a `Ready=True` y `CertificateProvisioned=True` a
+  las 04:47 UTC.
+- `dig @1.1.1.1 CNAME mira.ninfasolutions.com` devuelve
+  `ghs.googlehosted.com`.
+
+**Qué sigue:** registrar las callbacks de Mira en Google OAuth y WorkOS,
+rotar las credenciales WorkOS pendientes y publicar la revisión candidata con
+las URLs alineadas. El resolver local aún puede responder desde caché anterior;
+pagos no se modificaron.
+
+## 2026-07-16 — Preparación de release versionada localmente
+
+**Estado:** terminado y verificado localmente; sin push ni despliegue.
+
+**Qué se hizo:** se versionaron las actualizaciones de dominio, runbooks,
+recuperación Firestore, trazabilidad de imágenes y despliegue candidato. El
+árbol de trabajo quedó limpio, condición exigida por `redeploy-gcp.sh` antes de
+construir una imagen etiquetada por commit.
+
+**Motivo:** una revisión candidata debe ser reproducible desde un commit
+conocido. Mantener cambios locales sin versionar impediría el deploy a propósito
+y haría imposible asociar la imagen al código revisado.
+
+**Evidencia:**
+
+- `./scripts/check-all.sh` — 161 pruebas Rust, 10 del worker, formato, Clippy,
+  build release, scan de secretos, auditoría npm y build web aprobados.
+- `bash -n scripts/redeploy-gcp.sh` y `git diff --check` — aprobados antes de
+  versionar.
+
+**Qué sigue:** completar las callbacks Google/WorkOS y la rotación WorkOS;
+después se podrá construir la candidata sin tráfico desde este commit. Pagos no
+se modificaron.
