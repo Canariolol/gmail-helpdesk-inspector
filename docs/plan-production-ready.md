@@ -1224,6 +1224,9 @@ habilitará acceso directo del frontend a tablas de negocio ni Supabase Auth.
     Cloud Logging no registró errores.
 - [ ] Verificar en la candidata login, Gmail, análisis,
   scheduler, borrado y auditoría.
+  - Avance 2026-07-16: `GET /auth/workos/login` de la candidata devolvió 307
+    con callback público `https://mira.ninfasolutions.com/auth/workos/callback`.
+    Falta completar una sesión real y los flujos que escriben datos.
 - [ ] Retirar Firestore del runtime sólo después de un periodo de observación y
   respaldo exportado.
 

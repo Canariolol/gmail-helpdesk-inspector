@@ -2422,3 +2422,24 @@ rollback a que no haya escrituras nuevas sin reconciliar.
 candidata PostgreSQL y, antes de un lanzamiento con usuarios, añadir una
 ventana de escritura congelada. La revisión activa continúa en Firestore al
 100%; pagos, checkout y webhooks siguen diferidos.
+
+## 2026-07-16 — Callback WorkOS de la candidata PostgreSQL
+
+**Estado:** verificación parcial terminada; no se creó sesión ni se movió
+tráfico.
+
+**Qué se hizo:** se solicitó el inicio de sesión de
+`postgres---ghmi-api-io54uhmrxa-uc.a.run.app`. Respondió HTTP 307 y la URL de
+autorización de WorkOS contiene el callback público exacto de Mira:
+`https://mira.ninfasolutions.com/auth/workos/callback`.
+
+**Motivo:** la candidata cambia el backend de datos, no la identidad. Verificar
+el redirect evita probar una sesión real contra un callback de staging o contra
+el hostname técnico de Cloud Run.
+
+**Evidencia:** status 307 y comprobación del parámetro `redirect_uri` sin
+registrar ni exponer tokens, códigos ni cookies.
+
+**Qué sigue:** completar login y Gmail con una cuenta de prueba autorizada,
+crear un análisis y validar scheduler/borrado contra PostgreSQL. La candidata
+continúa en 0% y la activa Firestore continúa en 100%.
