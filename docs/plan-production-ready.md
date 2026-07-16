@@ -1156,8 +1156,9 @@ habilitará acceso directo del frontend a tablas de negocio ni Supabase Auth.
 - [x] Guardar la URL de conexión de PostgreSQL exclusivamente en Secret
   Manager.
   - Evidencia 2026-07-16: se rotó la contraseña de base y se creó
-    `mira-postgres-url` (versión 1) sin escribir la URL en Git ni mostrarla.
-  - Pendiente de la candidata: concederla únicamente a su identidad de API.
+    `mira-postgres-url` (versión 2 vigente) sin escribir la URL en Git ni
+    mostrarla.
+  - La revisión candidata PostgreSQL es la única revisión que la referencia.
 - [x] Seleccionar un pooler y límite de conexiones compatible con Cloud Run.
   - La API usa el pooler TLS **de sesión** de Supabase (IPv4, puerto 5432) y
     un pool local máximo de cinco conexiones. Con `maxScale=1` evita abrir una
@@ -1213,7 +1214,12 @@ habilitará acceso directo del frontend a tablas de negocio ni Supabase Auth.
 - [ ] Definir una ventana breve de escritura congelada para el cutover; no se
   aplicará dual-write, para no introducir dos fuentes de verdad.
 - [ ] Documentar rollback a Firestore antes de mover tráfico.
-- [ ] Mover primero la candidata de API y verificar login, Gmail, análisis,
+- [x] Mover primero una candidata de API a PostgreSQL sin tráfico.
+  - Evidencia 2026-07-16: `ghmi-api-00036-yad`, tag `postgres`, arrancó con
+    `APP_STORAGE=postgres`, la identidad dedicada y
+    `POSTGRES_DATABASE_URL=mira-postgres-url:2`; `/health` respondió 200 y
+    Cloud Logging no registró errores.
+- [ ] Verificar en la candidata login, Gmail, análisis,
   scheduler, borrado y auditoría.
 - [ ] Retirar Firestore del runtime sólo después de un periodo de observación y
   respaldo exportado.

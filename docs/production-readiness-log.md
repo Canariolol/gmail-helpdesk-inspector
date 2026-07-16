@@ -2366,3 +2366,36 @@ Cloud Run candidata con `APP_STORAGE=postgres` sin tráfico. Antes de promoverla
 se probarán login, Gmail, análisis, scheduler, borrado y rollback a Firestore.
 No se modificaron Mercado Pago, checkout, suscripciones de pago ni sus
 webhooks.
+
+## 2026-07-16 — Candidata Cloud Run con PostgreSQL y mínima identidad
+
+**Estado:** terminado y verificado; revisión candidata en 0% de tráfico.
+
+**Qué se hizo:** se creó la service account
+`ghmi-api-postgres-runtime` sin roles a nivel de proyecto. Recibió permisos de
+lector sólo sobre los seis secretos requeridos por la API candidata (incluido
+`mira-postgres-url`) y permiso `run.invoker` sobre el worker. Se publicó la
+imagen del commit `589a94787fef` y se creó `ghmi-api-00036-yad`, tag
+`postgres`, con `APP_STORAGE=postgres`, el secreto de PostgreSQL versión 2 y
+sin secretos de Mercado Pago, cron ni reportes.
+
+**Motivo:** una candidata aislada valida que Cloud Run puede obtener la
+conexión PostgreSQL sin mantener capacidad Firestore ni heredar secretos de
+pagos que no participan en esta fase. Mantener 0% de tráfico permite fallar o
+eliminar la candidata sin afectar usuarios.
+
+**Evidencia:**
+
+- Revisión `ghmi-api-00036-yad`: `Ready=True`, imagen
+  `api@sha256:b405ab8…`, `APP_STORAGE=postgres` y service account dedicada.
+- `GET https://postgres---ghmi-api-io54uhmrxa-uc.a.run.app/health` — HTTP 200;
+  el arranque de `PostgresStorage` ejecuta su consulta de conexión antes de
+  exponer el puerto.
+- Cloud Logging: cero eventos `ERROR` para esa revisión después del smoke test.
+- Tráfico sin cambios: `ghmi-api-00031-6lx` permanece con 100%; la candidata
+  `postgres` permanece con 0%.
+
+**Qué sigue:** ejecutar las pruebas funcionales autenticadas de WorkOS/Gmail,
+crear análisis, scheduler y borrado contra la candidata PostgreSQL, además de
+documentar el rollback exacto a Firestore. No se promoverá tráfico ni se
+activará `APP_ENV=production` mientras pagos siga diferido.
