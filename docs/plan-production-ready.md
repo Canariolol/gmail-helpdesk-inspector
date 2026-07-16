@@ -1199,13 +1199,17 @@ habilitará acceso directo del frontend a tablas de negocio ni Supabase Auth.
 ## 10.3 Migración y cutover
 
 - [ ] Inventariar conteos y entidades de Firestore antes de copiar datos.
-- [x] Crear exportador Firestore e importador PostgreSQL idempotentes.
+- [x] Crear exportador Firestore e importador PostgreSQL de instantánea.
   - `MIGRATE_FIRESTORE_TO_POSTGRES=true` sólo se permite fuera de
-    `APP_ENV=production`, conserva IDs de origen y nunca escribe en Firestore.
-- [x] Validar el primer copy por conteos y una segunda ejecución.
-  - Evidencia 2026-07-16: PostgreSQL contiene 4 cuentas, 49 sesiones, 2 runs,
-    31 threads, 125 mensajes y 28 auditorías; una segunda copia no incrementó
-    ningún conteo.
+    `APP_ENV=production`, nunca escribe en Firestore y reemplaza el destino
+    candidato completo. Conserva las claves de origen y aborta si el total
+    PostgreSQL no coincide con el total importado.
+- [ ] Validar una instantánea completa por conteos, segunda ejecución y datos
+  de muestra.
+  - Corrección 2026-07-16: los conteos antes anotados (2 runs, 31 threads,
+    125 mensajes y 28 auditorías) eran una copia parcial y no constituyen la
+    aceptación de la migración. La ejecución completa en candidata está en
+    curso; se anotarán sus conteos reales al finalizar.
 - [x] Verificar que las migraciones de revisión manual v1/v2 estén aplicadas
   en Firestore antes de importar.
   - El importador aborta antes de escribir si falta cualquiera de los dos

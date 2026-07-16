@@ -7,6 +7,7 @@ use std::{
 use anyhow::{Context, anyhow};
 use async_trait::async_trait;
 use chrono::Utc;
+use futures_util::{StreamExt, stream};
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use reqwest::Client;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -423,6 +424,9 @@ pub(crate) struct FirestoreCopyCounts {
     pub accounts: u64,
     pub sessions: u64,
     pub gmail_connections: u64,
+    pub mailbox_metadata: u64,
+    pub schedule_configs: u64,
+    pub schedule_states: u64,
     pub org_configs: u64,
     pub subscriptions: u64,
     pub checkouts: u64,
@@ -434,11 +438,44 @@ pub(crate) struct FirestoreCopyCounts {
     pub manual_reviews: u64,
     pub manual_overrides: u64,
     pub filter_presets: u64,
+    pub analysis_deletion_audits: u64,
+    pub records: u64,
+}
+
+impl FirestoreCopyCounts {
+    fn expected_records(&self) -> u64 {
+        self.accounts
+            + self.sessions
+            + self.gmail_connections
+            + self.mailbox_metadata
+            + self.schedule_configs
+            + self.schedule_states
+            + self.org_configs
+            + self.subscriptions
+            + self.checkouts
+            + self.usage_ledgers
+            + self.runs
+            + self.threads
+            + self.messages
+            + self.ai_audits
+            + self.manual_reviews
+            + self.manual_overrides
+            + self.filter_presets
+            + self.analysis_deletion_audits
+    }
+
+    fn add_run_copy(&mut self, copy: Self) {
+        self.runs += copy.runs;
+        self.threads += copy.threads;
+        self.messages += copy.messages;
+        self.ai_audits += copy.ai_audits;
+        self.manual_reviews += copy.manual_reviews;
+    }
 }
 
 impl FirestoreStorage {
-    /// Copia los datos que consume la aplicación sin tocar Firestore. Los IDs
-    /// de documentos se conservan para que una segunda ejecución sea idempotente.
+    /// Copia una instantánea de Firestore sin modificar el origen. El destino
+    /// se reemplaza completo y se verifica contra el conteo esperado.
     pub(crate) async fn copy_to_postgres(
         &self,
         target: &PostgresStorage,
@@ -457,6 +494,7 @@ impl FirestoreStorage {
             ));
         }
 
+        target.clear_for_firestore_import().await?;
         let mut counts = FirestoreCopyCounts::default();
         for account in self.list::<Account>("", "accounts").await? {
             target.upsert_account(&account).await?;
@@ -472,14 +510,17 @@ impl FirestoreStorage {
                 target
                     .upsert_mailbox_metadata(&connection.owner_email, &metadata)
                     .await?;
+                counts.mailbox_metadata += 1;
             }
             counts.gmail_connections += 1;
         }
         for config in self.list::<ScheduleConfig>("", "scheduleConfigs").await? {
             target.upsert_schedule_config(&config).await?;
+            counts.schedule_configs += 1;
         }
         for state in self.list::<ScheduleState>("", "scheduleStates").await? {
             target.upsert_schedule_state(&state).await?;
+            counts.schedule_states += 1;
         }
         for owner_profile in self.list_document_ids("", "ownerProfiles").await? {
             if let Some(bundle) = self
@@ -527,35 +568,60 @@ impl FirestoreStorage {
             .await?
         {
             target.record_analysis_data_deletion(&audit).await?;
+            counts.analysis_deletion_audits += 1;
         }
-        for run in self.list::<AnalysisRun>("", "analysisRuns").await? {
-            target.create_analysis_run(&run).await?;
-            counts.runs += 1;
-            for thread in self.list_threads(&run.id).await? {
-                let messages = self.list_messages(&run.id, &thread.id).await?;
-                target.upsert_thread(&thread, &messages).await?;
-                counts.threads += 1;
-                counts.messages += messages.len() as u64;
-                for (id, audit) in self
-                    .list_with_ids::<AiAuditResult>(
-                        &format!("analysisRuns/{}/threads/{}", run.id, thread.id),
-                        "aiAudits",
-                    )
-                    .await?
-                {
-                    target
-                        .import_ai_audit(&id, &run.id, &thread.id, &audit)
-                        .await?;
-                    counts.ai_audits += 1;
-                }
-            }
-            for (_, review) in self
-                .list_with_ids::<ManualReview>(&format!("analysisRuns/{}", run.id), "manualReviews")
+        let runs = self.list::<AnalysisRun>("", "analysisRuns").await?;
+        let mut copies = stream::iter(
+            runs.into_iter()
+                .map(|run| async move { self.copy_analysis_run_to_postgres(target, run).await }),
+        )
+        .buffer_unordered(5);
+        while let Some(copy) = copies.next().await {
+            counts.add_run_copy(copy?);
+        }
+        counts.records = target.record_count().await?;
+        let expected_records = counts.expected_records();
+        if counts.records != expected_records {
+            return Err(anyhow!(
+                "PostgreSQL snapshot count mismatch: expected {expected_records}, got {}",
+                counts.records
+            ));
+        }
+        Ok(counts)
+    }
+
+    async fn copy_analysis_run_to_postgres(
+        &self,
+        target: &PostgresStorage,
+        run: AnalysisRun,
+    ) -> anyhow::Result<FirestoreCopyCounts> {
+        let mut counts = FirestoreCopyCounts::default();
+        target.create_analysis_run(&run).await?;
+        counts.runs += 1;
+        for thread in self.list_threads(&run.id).await? {
+            let messages = self.list_messages(&run.id, &thread.id).await?;
+            target.upsert_thread(&thread, &messages).await?;
+            counts.threads += 1;
+            counts.messages += messages.len() as u64;
+            for (id, audit) in self
+                .list_with_ids::<AiAuditResult>(
+                    &format!("analysisRuns/{}/threads/{}", run.id, thread.id),
+                    "aiAudits",
+                )
                 .await?
             {
-                target.add_manual_review(&run.id, &review).await?;
-                counts.manual_reviews += 1;
+                target
+                    .import_ai_audit(&id, &run.id, &thread.id, &audit)
+                    .await?;
+                counts.ai_audits += 1;
             }
+        }
+        for (_, review) in self
+            .list_with_ids::<ManualReview>(&format!("analysisRuns/{}", run.id), "manualReviews")
+            .await?
+        {
+            target.add_manual_review(&run.id, &review).await?;
+            counts.manual_reviews += 1;
         }
         Ok(counts)
     }

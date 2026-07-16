@@ -1029,6 +1029,24 @@ impl PostgresStorage {
         )
         .await
     }
+
+    pub(crate) async fn clear_for_firestore_import(&self) -> anyhow::Result<()> {
+        sqlx::query("DELETE FROM mira.records")
+            .execute(&self.pool)
+            .await
+            .context("failed to clear PostgreSQL snapshot destination")?;
+        Ok(())
+    }
+
+    pub(crate) async fn record_count(&self) -> anyhow::Result<u64> {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mira.records")
+            .fetch_one(&self.pool)
+            .await
+            .context("failed to count PostgreSQL snapshot records")?;
+        count
+            .try_into()
+            .context("PostgreSQL snapshot record count is negative")
+    }
 }
 
 async fn find_provider_record<T: DeserializeOwned>(

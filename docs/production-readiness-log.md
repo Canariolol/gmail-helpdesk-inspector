@@ -2443,3 +2443,31 @@ registrar ni exponer tokens, códigos ni cookies.
 **Qué sigue:** completar login y Gmail con una cuenta de prueba autorizada,
 crear un análisis y validar scheduler/borrado contra PostgreSQL. La candidata
 continúa en 0% y la activa Firestore continúa en 100%.
+
+## 2026-07-16 — Importador Firestore → PostgreSQL convertido en instantánea verificable
+
+**Estado:** implementación terminada y validada localmente; la primera
+ejecución completa sobre el destino candidato está en curso.
+
+**Qué se hizo:** el importador ya no conserva registros antiguos mediante
+UPSERT. Al activarse explícitamente fuera de producción, vacía sólo
+`mira.records` del destino PostgreSQL, repuebla todas las entidades de
+Firestore y compara el número final de filas con los registros importados.
+También procesa hasta cinco runs en paralelo, el mismo máximo del pool
+PostgreSQL, para no prolongar innecesariamente la copia histórica.
+
+**Motivo:** la evidencia anterior de 2 runs no representaba el histórico
+completo. Una instantánea reemplazable evita arrastrar datos obsoletos y el
+conteo de cierre detecta claves duplicadas u omisiones antes de un cutover.
+
+**Evidencia:**
+
+- `cargo fmt --manifest-path apps/api/Cargo.toml -- --check` — aprobado.
+- `cargo test --manifest-path apps/api/Cargo.toml` — 163 pruebas aprobadas.
+- `cargo clippy --manifest-path apps/api/Cargo.toml -- -D warnings` — aprobado.
+- La ejecución candidata confirmó que el `DELETE` sólo afectó la tabla privada
+  de destino; Firestore y el tráfico de Cloud Run no fueron modificados.
+
+**Qué sigue:** esperar el conteo automático de cierre, contrastarlo con
+Firestore y repetir la instantánea una vez. Sólo entonces se corregirán los
+conteos históricos de esta bitácora y se marcará la validación de datos.
