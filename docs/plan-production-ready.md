@@ -3,7 +3,7 @@
 > Fecha de creación: 2026-06-25  
 > Objetivo: lanzar una versión inicial pagada y controlada en pocos días, manteniendo el producto simple y evitando infraestructura prematura.  
 > Alcance: pagos, configuración de producción, seguridad, privacidad, control de datos, observabilidad, operación y release.  
-> Fuera de alcance inmediato: conexión multiproveedor completa, migración completa a Supabase, plataforma de observabilidad autohospedada y escalado horizontal.
+> Fuera de alcance inmediato: conexión multiproveedor completa, plataforma de observabilidad autohospedada y escalado horizontal. La migración de persistencia a PostgreSQL/Supabase pasa a ser un prerrequisito del lanzamiento y no incluye migrar la autenticación.
 
 ---
 
@@ -90,7 +90,13 @@ Ejemplos de evidencia:
 Ejemplos razonables de deuda aceptada:
 
 - `[-]` Rate limiter distribuido, mientras la API esté limitada a una instancia.
-- `[-]` Migración a Supabase, mientras Firestore tenga respaldo y recuperación habilitados.
+- [x] Migración de persistencia a PostgreSQL/Supabase antes de habilitar cobros.
+  - Motivo: el usuario decidió no consolidar datos de clientes sobre Firestore;
+    se mantiene WorkOS para identidad y sesión.
+  - Mitigación hasta el cutover: Firestore permanece como fuente actual,
+    protegida con PITR y protección contra borrado.
+  - Condición de cierre: importación validada, candidata PostgreSQL verificada y
+    rollback documentado. No se habilitan pagos antes de ello.
 - `[-]` Panel administrativo completo, mientras exista un procedimiento operativo manual.
 - `[-]` Tests E2E exhaustivos, mientras los flujos críticos tengan pruebas manuales repetibles.
 
@@ -1130,48 +1136,66 @@ siguen pendientes.
 
 # 10. Decisión sobre Supabase/Postgres
 
-Prioridad: **P2**
+Prioridad: **P0**
 
-No realizar esta migración como requisito del lanzamiento.
+La migración de persistencia a PostgreSQL/Supabase es un requisito antes de
+habilitar cobros. WorkOS sigue siendo el único proveedor de autenticación y la
+API Rust seguirá siendo el único acceso de la aplicación a la base: no se
+habilitará acceso directo del frontend a tablas de negocio ni Supabase Auth.
 
-## 10.1 Condiciones para iniciar la migración
+## 10.1 Decisión y base disponible
 
-- [ ] Mercado Pago estable en producción.
-- [ ] Primeros usuarios reales activos.
-- [ ] Modelo de datos suficientemente estable.
-- [ ] Flujos de borrado definidos.
-- [ ] Métricas reales de uso de Firestore.
-- [ ] Dolor concreto que justifique la migración.
+- [x] Decidir la migración antes de producción pagada.
+  - Decisión 2026-07-16: mover la persistencia desde Firestore a PostgreSQL
+    administrado por Supabase, conservando WorkOS para autenticación y
+    sesiones.
+- [x] Identificar proyecto Supabase existente y saludable para Mira.
+  - Evidencia 2026-07-16: Management API autenticada informa el proyecto
+    `Mira`, organización `Ninfa`, región `us-east-2`, estado
+    `ACTIVE_HEALTHY`.
+- [ ] Guardar la URL de conexión de PostgreSQL exclusivamente en Secret
+  Manager y asignarla sólo a la API candidata.
+- [ ] Seleccionar el pooler y límite de conexiones compatible con Cloud Run.
+- [ ] Confirmar presupuesto/plan de Supabase apto para producción antes del
+  cutover. El plan gratuito no será la única medida de continuidad de datos.
 
-## 10.2 Alcance recomendado
+## 10.2 Implementación del backend PostgreSQL
 
-- [ ] Mantener WorkOS como autenticación.
-- [ ] Usar Supabase principalmente como Postgres administrado.
-- [ ] No migrar autenticación y persistencia simultáneamente.
-- [ ] Crear implementación Postgres de `StorageRepository`.
-- [ ] Diseñar claves e índices.
-- [ ] Usar transacciones para:
-  - Billing.
-  - Usage ledger.
-  - Claims.
-  - Eliminaciones.
-- [ ] Definir Row Level Security aunque la API sea el acceso principal.
-- [ ] Separar credenciales de backend y cliente.
-- [ ] Evitar exponer tablas directamente al frontend sin necesidad.
+- [ ] Añadir implementación `PostgresStorage` de `StorageRepository` sin
+  cambiar contratos HTTP ni WorkOS.
+- [x] Crear migraciones SQL versionadas y reproducibles.
+  - Evidencia 2026-07-16: `0001_mira_records` se aplicó a Supabase y quedó
+    registrada con checksum en `mira.schema_migrations`; el aplicador rechaza
+    archivos modificados tras ser aplicados.
+- [x] Crear la base privada con claves e índices para las búsquedas actuales.
+  - `mira.records` conserva el payload JSON compatible con el contrato actual
+    y separa las claves de consulta (cuenta/email, sesiones WorkOS,
+    organización, proveedor, propietario, run y thread) en columnas indexadas.
+    Es una primera capa segura de persistencia; la normalización adicional se
+    hará sólo cuando una consulta real la requiera.
+- [ ] Usar transacciones para usage ledger, claims de scheduler/análisis,
+  borrado de datos y futuras operaciones de pagos.
+- [x] Mantener tablas de negocio inaccesibles desde el frontend.
+  - `mira` no es un schema público y se revocaron privilegios a `anon`,
+    `authenticated`, `service_role` y `PUBLIC`.
+- [x] Activar RLS como defensa adicional, sin depender de ella para el flujo de
+  backend.
+  - Evidencia 2026-07-16: `pg_class.relrowsecurity=true` para
+    `mira.records` y los roles de frontend no tienen `SELECT`.
 
-## 10.3 Estrategia de migración
+## 10.3 Migración y cutover
 
-- [ ] Diseñar esquema relacional.
-- [ ] Crear migraciones versionadas.
-- [ ] Crear exportador Firestore.
-- [ ] Crear importador Postgres.
-- [ ] Crear validación de conteos.
-- [ ] Crear validación por checksums o muestras.
-- [ ] Definir dual-write o ventana de mantenimiento.
-- [ ] Definir rollback.
-- [ ] Probar con copia de datos.
-- [ ] Migrar primero entorno no productivo.
-- [ ] Ejecutar prueba de carga básica.
+- [ ] Inventariar conteos y entidades de Firestore antes de copiar datos.
+- [ ] Crear exportador Firestore e importador PostgreSQL idempotentes.
+- [ ] Validar conteos, relaciones y muestra de datos antes del cambio.
+- [ ] Probar en candidata con una copia de datos, sin tráfico de usuarios.
+- [ ] Definir una ventana breve de escritura congelada para el cutover; no se
+  aplicará dual-write, para no introducir dos fuentes de verdad.
+- [ ] Documentar rollback a Firestore antes de mover tráfico.
+- [ ] Mover primero la candidata de API y verificar login, Gmail, análisis,
+  scheduler, borrado y auditoría.
+- [ ] Retirar Firestore del runtime sólo después de un periodo de observación y
+  respaldo exportado.
 
 ## 10.4 Modelo relacional inicial esperado
 

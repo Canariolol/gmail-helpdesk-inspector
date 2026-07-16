@@ -2232,3 +2232,66 @@ análisis para la misma solicitud.
 candidata y conservar `maxScale=1` hasta medirlo. Las actualizaciones de
 progreso/estado terminal aún requieren revisión antes de escalar. No se
 modificaron checkout, suscripciones ni webhooks de Mercado Pago.
+
+## 2026-07-16 — PostgreSQL/Supabase pasa a ser requisito previo al lanzamiento
+
+**Estado:** en curso; proyecto de destino confirmado, sin tráfico ni datos
+migrados.
+
+**Qué se hizo:** por decisión explícita se cambió la prioridad de la migración
+de persistencia desde P2 a P0. Se verificó mediante la Management API que ya
+existe el proyecto Supabase `Mira` de la organización `Ninfa`, en `us-east-2`,
+con estado `ACTIVE_HEALTHY`. Se confirmó que la API cuenta con
+`StorageRepository`, por lo que se añadirá `PostgresStorage` sin reemplazar
+WorkOS, contratos HTTP ni el frontend.
+
+**Motivo:** Firestore tiene PITR y protección contra borrado, pero el modelo
+actual aún incluye recorridos de colecciones y actualizaciones que se
+benefician de índices y transacciones relacionales. Hacer el cambio antes de
+usuarios de pago evita mantener dos fuentes de verdad o una migración de
+clientes activos.
+
+**Evidencia:**
+
+- `GET https://api.supabase.com/v1/organizations` y `/v1/projects`, usando el
+  token local sin imprimirlo, devolvieron la organización y el proyecto
+  indicados.
+- `apps/api/src/storage/mod.rs` define `StorageRepository`; `main.rs` elige
+  actualmente `MemoryStorage` o `FirestoreStorage`, que es el punto de cambio
+  acotado.
+
+**Qué sigue:** obtener y almacenar de forma segura la conexión PostgreSQL,
+crear las migraciones versionadas y la implementación `PostgresStorage`.
+Luego se copiarán y validarán los datos de Firestore en una candidata sin
+tráfico. Mercado Pago, suscripciones y sus webhooks permanecen explícitamente
+fuera de este avance.
+
+## 2026-07-16 — Esquema PostgreSQL privado inicial aplicado en Supabase
+
+**Estado:** terminado y verificado; aún no recibe tráfico ni datos de Mira.
+
+**Qué se hizo:** se añadió y ejecutó la migración
+`apps/api/migrations/0001_mira_records.sql`. Crea el schema privado `mira`, la
+tabla `mira.records` y sus columnas indexadas de búsqueda, manteniendo el
+payload JSON para preservar los contratos actuales durante el cambio de
+backend. También se añadió `scripts/apply-supabase-migrations.sh`, que registra
+cada archivo con checksum y se niega a reaplicar un archivo alterado.
+
+**Motivo:** comenzar con claves de consulta explícitas e índices elimina los
+escaneos de colecciones del backend actual sin introducir simultáneamente una
+reescritura riesgosa de todos los modelos. El schema privado evita que la API
+REST de Supabase exponga datos de negocio por accidente.
+
+**Evidencia:**
+
+- Ejecución autenticada del aplicador: `applied: 0001_mira_records`.
+- `mira.schema_migrations` registra `0001_mira_records`.
+- La consulta a `pg_class` confirmó RLS activa y `SELECT=false` para los roles
+  `anon` y `authenticated`.
+- Se verificaron los índices de cuenta/email, sesión WorkOS, organización,
+  proveedor, propietario, run y thread.
+
+**Qué sigue:** almacenar la conexión TLS del pooler en Secret Manager y añadir
+`PostgresStorage` detrás de `StorageRepository`. Después se implementará la
+copia validada desde Firestore; no se han leído, exportado ni modificado datos
+de Firestore y los pagos permanecen diferidos.
