@@ -1,6 +1,6 @@
 import { BarChart3, CheckCircle2, CircleAlert, Hourglass, Play } from "lucide-react";
 import type { AnalysisRun } from "../../api/types";
-import { formatDateTime, formatNumber } from "../../lib/format";
+import { formatDateTime } from "../../lib/format";
 
 type Props = {
   run: AnalysisRun;
@@ -38,7 +38,7 @@ export function StatusBanner({ run, onStart, starting, onViewDetails }: Props) {
         </span>
         {subtitle && <span className="banner-subtitle">{subtitle}</span>}
         <span className="banner-meta">
-          {run.processed_threads}/{run.total_candidate_threads} hilos · Entrada {formatNumber(run.metrics.ai_input_tokens)} · Salida {formatNumber(run.metrics.ai_output_tokens)} tokens
+          {run.processed_threads}/{run.total_candidate_threads} hilos analizados
         </span>
         {run.status === "running" && (
           <div className="progress-bar" role="progressbar" aria-valuenow={progress} aria-valuemin={0} aria-valuemax={100}>

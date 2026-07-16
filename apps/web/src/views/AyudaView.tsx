@@ -70,9 +70,9 @@ export function AyudaView() {
         <h2>Privacidad y permisos</h2>
         <PrivacyCallout />
         <ul className="help-list plain">
-          <li>El permiso de Gmail usado por la aplicación es exclusivamente <code>gmail.readonly</code>.</li>
+          <li>El permiso de Gmail es exclusivamente de solo lectura.</li>
           <li>Mira no envía, etiqueta, archiva, edita ni elimina correos.</li>
-          <li>Los cuerpos completos se usan solo durante el análisis/auditoría y no se persisten en Firestore.</li>
+          <li>Los cuerpos completos se usan solo durante el análisis/auditoría y no se conservan como datos de producto.</li>
           <li>
             La auditoría IA viene activa para mejorar la clasificación. Puedes desactivarla desde
             <em> Configuración</em>; los casos inciertos pasarán a revisión manual y el cambio se aplicará al próximo análisis.

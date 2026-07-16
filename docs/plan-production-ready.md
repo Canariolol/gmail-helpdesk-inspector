@@ -732,12 +732,18 @@ Para cada proveedor:
 
 - [x] Unificar nombre “Mira Helpdesk”.
 - [x] Eliminar nombres internos o históricos.
-- [ ] Eliminar referencias técnicas como:
+- [x] Eliminar referencias técnicas como:
   - `policy_snapshot`.
   - `pending_backend_contract`.
   - `provider_subscription_id`.
   - `invalid_grant`.
-- [ ] Corregir mensajes en español.
+  - Evidencia 2026-07-16: búsqueda en `apps/web/src` sin coincidencias; la
+    UI autenticada además deja de mostrar proveedores, scopes, IDs de
+    ejecución, estados crudos ni categorías internas de error.
+- [x] Corregir mensajes en español de la UI autenticada.
+  - Evidencia 2026-07-16: Configuración, Resumen, Ayuda, Cuenta, Privacidad y
+    estados de análisis usan lenguaje de usuario. Los borradores legales se
+    mantienen pendientes de datos del responsable y revisión legal.
 - [ ] Corregir textos contradictorios.
 - [x] Confirmar que no aparece “beta” en copy público, precios, términos ni onboarding.
 - [x] Confirmar que no se promete funcionalidad futura.

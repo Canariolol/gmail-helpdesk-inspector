@@ -13,17 +13,18 @@ export function PrivacyCallout({ compact = false }: Props) {
       <div>
         <h2>Acceso Gmail de solo lectura</h2>
         <p>
-          Usamos el scope <code>gmail.readonly</code>: la app no puede enviar, editar, etiquetar ni borrar correos.
+          La app solo puede leer los correos necesarios para el análisis: no puede enviar, editar, etiquetar ni borrar
+          mensajes.
         </p>
         <ul>
           <li>
-            <LockKeyhole size={15} /> Tokens almacenados cifrados.
+            <LockKeyhole size={15} /> Tu acceso se almacena cifrado.
           </li>
           <li>
             <CheckCircle2 size={15} /> Métricas auditables hasta los hilos que las originan.
           </li>
           <li>
-            <CheckCircle2 size={15} /> Sin persistencia de cuerpos completos en Firestore.
+            <CheckCircle2 size={15} /> No conservamos cuerpos completos de correos.
           </li>
         </ul>
       </div>

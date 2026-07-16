@@ -36,6 +36,19 @@ function humanizeReason(reason: string): string {
   return reason.split("_").join(" ");
 }
 
+function formatMissingSetupItem(item: string): string {
+  if (item === "internal_domains") return "dominios de tu equipo";
+  if (item === "valid_request_criteria") return "qué correos deben contar como solicitudes";
+  if (item === "report_recipients") return "destinatarios de reportes";
+  return "un dato de configuración";
+}
+
+function formatRole(role: string): string {
+  if (role === "owner") return "Propietario";
+  if (role === "member") return "Miembro";
+  return "Miembro de la organización";
+}
+
 function DataRow({ label, value }: { label: string; value: ReactNode }) {
   return (
     <div className="privacy-data-row">
@@ -158,30 +171,30 @@ export function PrivacidadDatosView() {
             requieren confirmaciones explícitas antes de ejecutarse.
           </p>
         </div>
-        <BoolBadge value={readonlyScope} trueLabel="Gmail readonly" falseLabel="Scope no confirmado" />
+        <BoolBadge value={readonlyScope} trueLabel="Solo lectura" falseLabel="Permiso pendiente de confirmar" />
       </section>
 
       <div className="privacy-grid two">
         <section className="card privacy-panel">
           <h3><Mail size={18} /> Cuenta conectada</h3>
           <DataRow label="Cuenta Google" value={data.account.google_account_email} />
-          <DataRow label="Mailbox" value={<BoolBadge value={data.account.mailbox_connected} trueLabel="Conectado" falseLabel="Revocado" />} />
+          <DataRow label="Cuenta de Gmail" value={<BoolBadge value={data.account.mailbox_connected} trueLabel="Conectada" falseLabel="Desconectada" />} />
           <DataRow label="Revocado el" value={formatDate(data.account.mailbox_revoked_at)} />
-          <DataRow label="Scope Gmail" value={data.account.gmail_scope_snapshot.join(", ")} />
+          <DataRow label="Permiso" value="Solo lectura" />
           <p className="privacy-note">
-            La app usa <strong>gmail.readonly</strong>: puede leer metadata/contenido para análisis, pero no puede enviar,
-            modificar, etiquetar ni borrar correos en Gmail.
+            La app puede leer la información necesaria para el análisis, pero no puede enviar, modificar, etiquetar ni
+            borrar correos en Gmail.
           </p>
         </section>
 
         <section className="card privacy-panel">
           <h3><Lock size={18} /> Organización y política</h3>
           <DataRow label="Organización" value={data.org.name} />
-          <DataRow label="Rol" value={data.org.role} />
+          <DataRow label="Rol" value={formatRole(data.org.role)} />
           <DataRow label="Política activa" value={`v${data.org.policy_version}`} />
-          <DataRow label="Setup" value={<BoolBadge value={data.org.setup_ready} trueLabel="Listo" falseLabel="Pendiente" />} />
+          <DataRow label="Configuración" value={<BoolBadge value={data.org.setup_ready} trueLabel="Lista" falseLabel="Pendiente" />} />
           {!data.org.setup_ready && data.org.setup_missing.length > 0 && (
-            <p className="privacy-note warning">Faltan: {data.org.setup_missing.join(", ")}</p>
+            <p className="privacy-note warning">Falta completar: {data.org.setup_missing.map(formatMissingSetupItem).join(", ")}</p>
           )}
         </section>
       </div>
@@ -189,14 +202,14 @@ export function PrivacidadDatosView() {
       <section className="card privacy-panel">
         <h3><Bot size={18} /> Uso de datos e IA</h3>
         <div className="privacy-grid two compact">
-          <DataRow label="Minimización" value={data.privacy.data_minimization_mode} />
+          <DataRow label="Uso mínimo de datos" value="Metadatos y extractos mínimos" />
           <DataRow label="Auditoría IA" value={<BoolBadge value={data.privacy.ai_enabled} trueLabel="Activa" falseLabel="Desactivada" />} />
           <DataRow label="Consentimiento IA" value={formatDate(data.privacy.ai_consent_granted_at)} />
           <DataRow label="Plazo configurado" value={`${data.privacy.retention_days} días`} />
           <DataRow label="Reportes" value={data.privacy.report_mode === "metrics_only" ? "Solo métricas" : "Métricas + elementos en revisión"} />
         </div>
         <p className="privacy-note">
-          Los cuerpos completos no se persisten como fuente de datos de producto. Los excerpts usados para IA se minimizan
+          Los cuerpos completos no se conservan como datos de producto. Los extractos usados para IA se minimizan
           según la política vigente del análisis.
         </p>
         <p className="privacy-note warning">
@@ -269,7 +282,7 @@ export function PrivacidadDatosView() {
             <DisabledActionCard
               icon={<Trash2 size={19} />}
               title="Borrar análisis"
-              description="Eliminar resultados derivados de análisis, sujeto a definición de alcance: por run o todos los runs."
+              description="Eliminar resultados derivados de análisis. Estamos definiendo si esta acción será por análisis individual o para todos."
               reason={data.actions.delete_analysis_data.reason}
               tone="danger"
             />

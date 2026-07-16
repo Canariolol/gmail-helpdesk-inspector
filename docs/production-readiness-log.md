@@ -1869,3 +1869,31 @@ y haría imposible asociar la imagen al código revisado.
 **Qué sigue:** completar las callbacks Google/WorkOS y la rotación WorkOS;
 después se podrá construir la candidata sin tráfico desde este commit. Pagos no
 se modificaron.
+
+## 2026-07-16 — Pasada P0 de copy en la aplicación autenticada
+
+**Estado:** terminado y verificado localmente; pendiente la revisión humana de
+landing y textos legales.
+
+**Qué se hizo:** se reemplazaron referencias visibles a WorkOS, Firestore,
+scopes de Gmail, scheduler, mailbox, estados de ejecución, IDs de ejecución,
+categorías de error y conteos de tokens por texto claro para el usuario. Los
+ítems de configuración faltantes y los estados operativos ahora se traducen
+antes de mostrarse. También se eliminó la exposición del identificador de cada
+ejecución y de su categoría interna de error.
+
+**Motivo:** los nombres de proveedores, campos internos e identificadores no
+ayudan a completar una tarea y pueden confundir o filtrar detalles operativos.
+La app debe explicar el permiso, el estado y la acción siguiente sin requerir
+conocimiento técnico.
+
+**Evidencia:**
+
+- `rg -n -i 'policy_snapshot|pending_backend_contract|provider_subscription_id|invalid_grant' apps/web/src` — sin coincidencias.
+- `npm --prefix apps/web run build` — aprobado (TypeScript y build de Vite).
+- `git diff --check` — aprobado.
+
+**Qué sigue:** revisar visualmente la candidata con una organización real y
+terminar la revisión editorial de landing, precios, términos y privacidad con
+la información legal del responsable. No se modificaron checkout, Mercado Pago
+ni sus webhooks.

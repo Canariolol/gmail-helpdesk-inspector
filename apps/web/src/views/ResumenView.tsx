@@ -41,6 +41,13 @@ type Props = {
   onUpgrade?: () => void;
 };
 
+function formatMissingSetupItem(item: string): string {
+  if (item === "internal_domains") return "dominios de tu equipo";
+  if (item === "valid_request_criteria") return "qué correos deben contar como solicitudes";
+  if (item === "report_recipients") return "destinatarios de reportes";
+  return "un dato de configuración";
+}
+
 export function ResumenView(props: Props) {
   const { run } = props;
   const visibleThreads = filterThreads(props.threads, props.threadFilter);
@@ -73,7 +80,7 @@ export function ResumenView(props: Props) {
             <p>
               Completa la configuración de tu organización antes de iniciar un análisis.
               {props.orgConfig.setup_state.missing.length > 0 && (
-                <> Faltan: {props.orgConfig.setup_state.missing.join(", ")}.</>
+                <> Falta completar: {props.orgConfig.setup_state.missing.map(formatMissingSetupItem).join(", ")}.</>
               )}
             </p>
           </div>
@@ -99,7 +106,7 @@ export function ResumenView(props: Props) {
             <strong>No se pudo iniciar el análisis</strong>
             <p>{props.analysisError}</p>
             {props.analysisError.toLowerCase().includes("demasiadas") && (
-              <span>El límite protege el servicio y evita ejecuciones duplicadas. Intenta más tarde o usa el scheduler configurado.</span>
+              <span>El límite protege el servicio y evita análisis duplicados. Intenta más tarde o espera el análisis automático programado.</span>
             )}
           </div>
         </div>

@@ -89,7 +89,7 @@ export function CuentaView({
       <section className="card">
         <div className="cuenta-head">
           <div>
-            <span className="wizard-step-desc">Cuenta WorkOS</span>
+            <span className="wizard-step-desc">Cuenta</span>
             <h2>{account.account_email}</h2>
           </div>
           {status && (

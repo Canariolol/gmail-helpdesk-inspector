@@ -169,6 +169,20 @@ function formatDateTime(iso: string | null): string {
   });
 }
 
+function formatExecutionStatus(status: string): string {
+  if (status === "running") return "En curso";
+  if (status === "completed") return "Completada";
+  if (status === "failed") return "Con problemas";
+  return "No disponible";
+}
+
+function formatMissingSetupItem(item: string): string {
+  if (item === "internal_domains") return "dominios de tu equipo";
+  if (item === "valid_request_criteria") return "qué correos deben contar como solicitudes";
+  if (item === "report_recipients") return "destinatarios de reportes";
+  return "un dato de configuración";
+}
+
 function SchedulerStatusPanel({ status }: { status: OperationsStatus | undefined }) {
   if (!status) {
     return (
@@ -187,23 +201,22 @@ function SchedulerStatusPanel({ status }: { status: OperationsStatus | undefined
           <span className="wizard-step-desc">Operación automática</span>
           <h3>
             {status.scheduler.enabled ? <Activity size={18} /> : <PauseCircle size={18} />}
-            {status.scheduler.enabled ? "Scheduler activo" : "Scheduler desactivado"}
+            {status.scheduler.enabled ? "Análisis programado activo" : "Análisis programado desactivado"}
           </h3>
         </div>
         <span className={status.scheduler.enabled ? "wizard-ready-badge" : "wizard-not-ready-badge"}>
-          {status.scheduler.enabled ? "weekdays 08:00 local" : "manual"}
+          {status.scheduler.enabled ? "Lunes a viernes, 08:00" : "Solo manual"}
         </span>
       </div>
       <div className="scheduler-status-grid">
         <div><span>Zona horaria</span><strong>{status.scheduler.timezone}</strong></div>
         <div><span>Próximo intento</span><strong>{formatDateTime(status.scheduler.next_run_estimate)}</strong></div>
         <div><span>Destinatarios</span><strong>{status.scheduler.recipients_count}</strong></div>
-        <div><span>Policy</span><strong>v{status.policy.policy_version}</strong></div>
+        <div><span>Reglas de análisis</span><strong>v{status.policy.policy_version}</strong></div>
       </div>
       {last ? (
         <p className="scheduler-status-copy">
-          Última ventana: <strong>{last.window_date_from} → {last.window_date_to}</strong> · estado <strong>{last.status}</strong>
-          {last.run_id ? <> · run <code>{last.run_id.slice(0, 8)}</code></> : null}
+          Última ejecución: <strong>{last.window_date_from} → {last.window_date_to}</strong> · estado <strong>{formatExecutionStatus(last.status)}</strong>
         </p>
       ) : (
         <p className="scheduler-status-copy">Aún no hay ejecuciones automáticas registradas.</p>
@@ -239,7 +252,7 @@ function OperationsHistoryPanel({ history }: { history: OperationsHistory | unde
           {history.entries.map((entry) => (
             <div key={entry.id} className={`operations-history-item status-${entry.status}`}>
               <div>
-                <strong>{entry.kind === "scheduler_attempt" ? "Scheduler" : "Análisis"}</strong>
+                <strong>{entry.kind === "scheduler_attempt" ? "Análisis programado" : "Análisis"}</strong>
                 <span>
                   {formatDateTime(entry.started_at)}
                   {entry.window_date_from && entry.window_date_to
@@ -248,8 +261,7 @@ function OperationsHistoryPanel({ history }: { history: OperationsHistory | unde
                 </span>
               </div>
               <div>
-                <span className="operations-history-status">{entry.status}</span>
-                {entry.error_category && <span className="operations-history-error">{entry.error_category}</span>}
+                <span className="operations-history-status">{formatExecutionStatus(entry.status)}</span>
               </div>
               {entry.error_redacted && <p>{entry.error_redacted}</p>}
             </div>
@@ -403,16 +415,16 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
         </div>
         {!setupState?.ready_for_analysis && setupState?.missing && setupState.missing.length > 0 && (
           <p style={{ fontSize: "var(--fs-sm)", color: "var(--text-muted)" }}>
-            Faltan: {setupState.missing.join(", ")}
+            Falta completar: {setupState.missing.map(formatMissingSetupItem).join(", ")}
           </p>
         )}
         {orgConfig && (
           <p style={{ fontSize: "var(--fs-sm)", color: "var(--text-muted)" }}>
-            Casilla Workspace: <strong style={{ color: "var(--text)" }}>{orgConfig.mailbox.google_account_email}</strong>
+            Cuenta de Gmail: <strong style={{ color: "var(--text)" }}>{orgConfig.mailbox.google_account_email}</strong>
             {orgConfig.policy_version && (
               <> · Política v{orgConfig.policy_version.version}</>
             )}
-            <> · Scope Gmail readonly</>
+            <> · Acceso de solo lectura</>
           </p>
         )}
       </div>
@@ -481,7 +493,7 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
               </div>
               <p className="wizard-help">
                 La zona horaria se usa para calcular tiempos de respuesta y programar análisis automáticos.
-                Elige la zona del mailbox principal si tu equipo opera en múltiples regiones.
+                Elige la zona de la cuenta principal si tu equipo opera en múltiples regiones.
               </p>
             </div>
           )}
@@ -610,7 +622,7 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
                   <li>Participantes, fecha, asunto y texto del mensaje reducido a un máximo de {draft.maxBodyCharsPerMessage} caracteres</li>
                   <li>Hasta {draft.maxAuditMessages} mensajes por hilo</li>
                   <li>
-                    Un mensaje corto puede incluirse completo dentro de ese límite; los excerpts pueden contener texto sensible
+                    Un mensaje corto puede incluirse completo dentro de ese límite; los extractos pueden contener texto sensible
                   </li>
                   <li>
                     <strong>NO</strong> se procesan adjuntos, imágenes ni headers completos
@@ -677,7 +689,7 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
                     placeholder={"operaciones@tuempresa.com\ngerencia@tuempresa.com"}
                   />
                   <span style={{ fontSize: "var(--fs-sm)", color: "var(--text-muted)" }}>
-                    Uno por línea. Requerido si el scheduler está activado.
+                    Uno por línea. Es obligatorio si activas el análisis automático.
                   </span>
                 </div>
               )}

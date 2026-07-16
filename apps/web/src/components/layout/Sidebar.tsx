@@ -67,7 +67,7 @@ export function Sidebar({ view, onNavigate, email, reviewCount, onLogout, availa
         </div>
         <div className="sidebar-user-info">
           <span className="sidebar-user-email">{email}</span>
-          <span className="sidebar-user-scope">Gmail readonly</span>
+          <span className="sidebar-user-scope">Acceso de solo lectura</span>
         </div>
         <button type="button" className="logout-button" onClick={onLogout}>
           <LogOut size={15} />
