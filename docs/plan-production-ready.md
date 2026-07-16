@@ -391,6 +391,12 @@ a API y la cookie se entrega bajo el origen con que navega la persona usuaria.
   - Evidencia 2026-07-16: Cloud Scheduler es la única fuente habilitada y la
     API conserva el scheduler interno desactivado.
 - [ ] Confirmar que la concurrencia máxima no produce análisis simultáneos inesperados.
+  - Observación 2026-07-16: `ghmi-api-00031-6lx` tiene
+    `containerConcurrency=80` y `maxScale=1`. El límite de instancias no
+    serializa hasta 80 requests dentro de la instancia; no se reduce aún a 1
+    porque el análisis programado puede mantener una request activa durante un
+    período largo. La candidata debe probar requests concurrentes contra
+    Firestore real antes de cambiar este valor o escalar.
 - [x] Documentar qué tareas impiden escalar horizontalmente.
   - El rate limiter está en memoria por instancia (`Mutex<HashMap<...>>`), por
     lo que cada instancia tendría su propio cupo.

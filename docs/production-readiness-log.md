@@ -1951,3 +1951,27 @@ los límites de uso subcontados.
 La validación de cupo y la creación de un análisis todavía no son una
 transacción única, por lo que `maxScale=1` se mantiene. Checkout,
 suscripciones y webhooks de Mercado Pago no se modificaron.
+
+## 2026-07-16 — Concurrencia efectiva de la API inventariada
+
+**Estado:** inspección terminada; sin cambios en Cloud Run.
+
+**Qué se hizo:** se consultó la configuración de servicio y de la revisión
+activa de `ghmi-api`. Ambas muestran `maxScale=1` y
+`containerConcurrency=80`.
+
+**Motivo:** limitar la cantidad de instancias no equivale a procesar una sola
+solicitud a la vez. Esta diferencia define qué carreras todavía deben probarse
+contra Firestore antes de autorizar escalado.
+
+**Evidencia:**
+
+- `gcloud run services describe ghmi-api --region=us-central1` —
+  `containerConcurrency: 80`, `autoscaling.knative.dev/maxScale: '1'` y
+  revisión activa `ghmi-api-00031-6lx`.
+
+**Qué sigue:** en la candidata, ejecutar dos requests concurrentes que creen o
+actualicen análisis y observar los contadores y estados en Firestore. No se
+reduce la concurrencia a 1 de forma automática: el scheduler externo puede
+mantener una request de análisis activa por un tiempo prolongado. Pagos no se
+modificaron.
