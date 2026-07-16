@@ -351,11 +351,11 @@ Prioridad: **P0**
     `workos-production-webhook-secret` en Secret Manager.
   - La candidata `ghmi-api-00033-xut` usa ese secreto; falta enviar un evento
     firmado de prueba. La revisión con tráfico no se modificó.
-- [ ] Confirmar `APP_ENCRYPTION_KEY` fuerte.
-- [ ] Confirmar `APP_SESSION_SECRET` fuerte.
-- [ ] Confirmar `GOOGLE_CLIENT_SECRET` en Secret Manager.
-- [ ] Confirmar `CRON_SECRET` fuerte.
-- [ ] Confirmar `RESEND_API_KEY` en Secret Manager.
+- [x] Confirmar `APP_ENCRYPTION_KEY` fuerte.
+- [x] Confirmar `APP_SESSION_SECRET` fuerte.
+- [x] Confirmar `GOOGLE_CLIENT_SECRET` en Secret Manager.
+- [x] Confirmar `CRON_SECRET` fuerte.
+- [x] Confirmar `RESEND_API_KEY` en Secret Manager.
 - [ ] Confirmar que ningún secreto real aparece como variable de texto plano.
 - [ ] Confirmar que ningún secreto está versionado.
 - [ ] Documentar rotación de cada secreto.
@@ -372,6 +372,20 @@ Prioridad: **P0**
 - `scripts/check-secrets.sh` no detectó patrones de credenciales en archivos
   versionados; ese control es acotado y no sustituye la rotación ni una revisión
   humana de secretos.
+
+### Auditoría de fortaleza e inyección — 2026-07-16
+
+- Se leyó cada secreto sólo en memoria y sin registrar su valor. Las versiones
+  vigentes de `app-encryption-key`, `app-session-secret`,
+  `google-client-secret`, `cron-secret` y `resend-api-key` superan el mínimo
+  aplicable, no contienen los defaults de desarrollo conocidos y están
+  inyectadas desde Secret Manager.
+- La candidata `ghmi-api-00033-xut` referencia `workos-api-key:2` y
+  `workos-production-webhook-secret:1`. La revisión que recibe 100% del
+  tráfico (`ghmi-api-00031-6lx`) conserva `WORKOS_API_KEY`,
+  `WORKOS_COOKIE_SECRET` y la firma webhook staging como valores anteriores.
+  Es intencional hasta promover una revisión comprobada; no equivale a una
+  migración completa de secretos.
 
 ## 4.2 Validaciones de arranque
 

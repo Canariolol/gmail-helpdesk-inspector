@@ -2,6 +2,41 @@
 
 Este registro acompaña a `plan-production-ready.md`: solo se anota trabajo terminado con evidencia. Los pagos permanecen diferidos hasta resolver su problema actual.
 
+## 2026-07-16 — Auditoría de secretos de API sin exposición
+
+**Estado:** controles verificables terminados; las rotaciones con impacto
+siguen pendientes.
+
+**Qué se hizo:**
+
+- Se verificó en memoria, sin imprimir valores, la longitud mínima, formato y
+  ausencia de defaults conocidos de `app-encryption-key`, `app-session-secret`,
+  `google-client-secret`, `cron-secret`, `resend-api-key`, la API key WorkOS y
+  la firma webhook WorkOS production.
+- Se comprobó la inyección efectiva por revisión, no sólo la existencia de los
+  secretos: la candidata usa las versiones WorkOS production desde Secret
+  Manager y los cinco secretos ya confirmados también provienen de ese gestor.
+
+**Motivo:** una clave existente no demuestra que el servicio la consuma ni que
+sea apta para producción. La comprobación separa los controles terminados de
+las credenciales que aún no pueden rotarse sin una promoción planificada.
+
+**Evidencia:**
+
+- Todos los secretos auditados superan el mínimo aplicable, cumplen su formato
+  básico y excluyen los valores de desarrollo conocidos.
+- `ghmi-api-00033-xut` referencia `workos-api-key:2` y
+  `workos-production-webhook-secret:1`.
+- La revisión que recibe 100% del tráfico es `ghmi-api-00031-6lx`; todavía
+  tiene `WORKOS_API_KEY` y `WORKOS_COOKIE_SECRET` literales y la firma webhook
+  staging. No se expuso ningún valor durante la auditoría.
+
+**Qué sigue:** después de registrar el callback de Google OAuth, probar la
+candidata y decidir la promoción controlada. La rotación de
+`WORKOS_COOKIE_SECRET` se agenda explícitamente porque invalidará sesiones;
+`APP_ENV=production` y secretos live de Mercado Pago permanecen diferidos hasta
+resolver pagos.
+
 ## 2026-07-16 — Candidata API con WorkOS production, sin tráfico
 
 **Estado:** terminado y verificado sin tráfico; pendiente prueba funcional con
