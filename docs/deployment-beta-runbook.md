@@ -44,7 +44,7 @@ Principios de producción beta:
 | `APP_SESSION_SECRET` | Requerida en producción; no usar default dev. |
 | `GOOGLE_CLIENT_ID` | OAuth Google client id. |
 | `GOOGLE_CLIENT_SECRET` | OAuth Google secret. |
-| `GOOGLE_REDIRECT_URL` | Callback OAuth. Default local: `/auth/google/callback`. |
+| `GOOGLE_REDIRECT_URL` | Callback OAuth. Default local: `/gmail/connect/callback`. |
 | `GMAIL_MAX_THREADS` | Límite global de threads por run; default `50`. |
 | `GCP_PROJECT_ID` | Requerida si `APP_STORAGE != memory`. |
 | `FIRESTORE_DATABASE_ID` | Default `(default)`. |
@@ -93,7 +93,7 @@ Principios de producción beta:
    - Gmail API habilitada.
    - OAuth consent screen con scope `https://www.googleapis.com/auth/gmail.readonly`.
    - Test users cargados mientras OAuth esté en Testing.
-   - Redirect autorizado: `https://<API_DOMAIN>/auth/google/callback` o el valor real de `GOOGLE_REDIRECT_URL`.
+   - Redirect autorizado: `https://<WEB_DOMAIN>/gmail/connect/callback` o el valor real de `GOOGLE_REDIRECT_URL`.
 4. Confirmar Firestore:
    - Proyecto correcto en `GCP_PROJECT_ID`.
    - Service account de API con permisos mínimos necesarios.
@@ -157,7 +157,7 @@ APP_ENV=production
 APP_STORAGE=firestore
 WEB_BASE_URL=https://<WEB_DOMAIN>
 API_BASE_URL=https://<API_DOMAIN>
-GOOGLE_REDIRECT_URL=https://<API_DOMAIN>/auth/google/callback
+GOOGLE_REDIRECT_URL=https://<WEB_DOMAIN>/gmail/connect/callback
 GCP_PROJECT_ID=<GCP_PROJECT_ID>
 FIRESTORE_DATABASE_ID=(default)
 AI_WORKER_URL=https://<AI_WORKER_SERVICE_URL>

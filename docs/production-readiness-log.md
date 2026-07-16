@@ -2504,3 +2504,26 @@ scheduler, borrado y auditoría contra la candidata PostgreSQL. Para Gmail aún
 se requiere que el cliente OAuth de Google acepte exactamente
 `https://mira.ninfasolutions.com/gmail/connect/callback`; pagos continúan
 diferidos.
+
+## 2026-07-16 — Guías OAuth alineadas con el callback canónico
+
+**Estado:** terminado en documentación; no se modificaron Google Cloud, Cloud
+Run ni secretos.
+
+**Qué se hizo:** se actualizó la guía OAuth y el runbook de despliegue para
+usar `/gmail/connect/callback`, que es el valor por defecto de
+`GOOGLE_REDIRECT_URL` y el callback público previsto para Mira. La API conserva
+la ruta legacy `/auth/google/callback` como alias de compatibilidad.
+
+**Motivo:** las guías mezclaban el alias histórico con el callback que debe
+registrarse en la configuración candidata. Una URI distinta en Google rompe el
+intercambio OAuth aunque el resto del despliegue esté correcto.
+
+**Evidencia:** el router registra ambas rutas hacia el mismo handler y la
+configuración por defecto usa `/gmail/connect/callback`; `git diff --check`
+aprobó.
+
+**Qué sigue:** se requiere la acción externa en Google Auth Platform para
+autorizar exactamente `https://mira.ninfasolutions.com/gmail/connect/callback`.
+Después se actualizará `GOOGLE_REDIRECT_URL` en una nueva candidata y se
+probará la conexión Gmail; pagos permanecen diferidos.
