@@ -330,9 +330,9 @@ Prioridad: **P0**
     como variable de texto plano; no registrar ni repetir su valor.
   - Avance 2026-07-16: la clave staging quedó como versión inicial y la nueva
     clave production como versión 2 de `workos-api-key`; sólo `ghmi-runtime`
-    recibió acceso de lectura. La revisión activa conserva el valor literal
-    hasta desplegar y comprobar una revisión candidata; por eso este ítem no
-    está terminado todavía.
+    recibió acceso de lectura. La candidata `ghmi-api-00033-xut` usa esa
+    versión; la revisión activa conserva el valor literal hasta completar la
+    promoción, por eso este ítem no está terminado todavía.
 - [x] Registrar el callback de AuthKit de Mira en la nueva aplicación WorkOS.
   - Evidencia 2026-07-16: el primer callback fue creado en staging. Tras
     recibir las credenciales production, se confirmó que allí no existía y se
@@ -349,8 +349,8 @@ Prioridad: **P0**
     `https://ghmi-api-io54uhmrxa-uc.a.run.app/auth/workos/webhook`, sólo para
     `session.revoked` y `user.deleted`; su firma coincide con
     `workos-production-webhook-secret` en Secret Manager.
-  - Falta enlazar ese secreto únicamente a una revisión candidata y enviar un
-    evento firmado de prueba. La revisión con tráfico no se modificó.
+  - La candidata `ghmi-api-00033-xut` usa ese secreto; falta enviar un evento
+    firmado de prueba. La revisión con tráfico no se modificó.
 - [ ] Confirmar `APP_ENCRYPTION_KEY` fuerte.
 - [ ] Confirmar `APP_SESSION_SECRET` fuerte.
 - [ ] Confirmar `GOOGLE_CLIENT_SECRET` en Secret Manager.
@@ -494,12 +494,23 @@ consulta de solo lectura:
   - `scripts/redeploy-gcp.sh --no-traffic <servicio>` usa el tag `candidate`,
     conserva el tráfico existente e imprime la URL directa para el smoke test.
     Con `all`, la web candidata usa la API candidata.
-    Fue validado con una ejecución simulada; aún no existe una revisión
-    candidata real de las imágenes actuales.
-- [ ] Desplegar una revisión sin tráfico.
-- [ ] Probar `/health`.
+    Fue validado con una ejecución simulada antes de la candidata real.
+- [x] Desplegar una revisión sin tráfico.
+  - Evidencia 2026-07-16: `ghmi-api-00033-xut` fue creada desde la imagen
+    `api:758a21aad6e1`, con tag `candidate` y 0% de tráfico. Cambia sólo la
+    configuración WorkOS y URLs públicas de API necesarias para la candidata.
+- [x] Probar `/health`.
+  - Evidencia 2026-07-16: `GET` a la URL directa de `candidate` devolvió 200.
 - [ ] Probar login WorkOS.
+  - Preflight aprobado: `/auth/workos/login` de la candidata devolvió 307 y su
+    destino contiene el callback de Mira y el `WORKOS_CLIENT_ID` production.
+    El login completo se prueba al enviar tráfico controlado: la callback
+    pública aún llega al proxy web que sirve la revisión activa.
 - [ ] Probar conexión Gmail.
+  - **Acción externa necesaria:** en Google Cloud Console > Google Auth
+    Platform > Clients, abrir el cliente Web usado por `GOOGLE_CLIENT_ID` y
+    añadir exactamente `https://mira.ninfasolutions.com/gmail/connect/callback`
+    en «Authorized redirect URIs». No crear otro cliente ni cambiar su secreto.
 - [ ] Probar lectura de configuración.
 - [ ] Probar checkout sandbox.
 - [ ] Probar recepción de webhook.

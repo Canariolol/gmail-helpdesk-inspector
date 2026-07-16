@@ -2,6 +2,46 @@
 
 Este registro acompaña a `plan-production-ready.md`: solo se anota trabajo terminado con evidencia. Los pagos permanecen diferidos hasta resolver su problema actual.
 
+## 2026-07-16 — Candidata API con WorkOS production, sin tráfico
+
+**Estado:** terminado y verificado sin tráfico; pendiente prueba funcional con
+tráfico controlado.
+
+**Qué se hizo:**
+
+- Se ejecutó `scripts/check-all.sh` antes del despliegue: 163 pruebas Rust, 10
+  del worker, Clippy y build web aprobaron.
+- Se construyó y publicó la imagen `api:758a21aad6e1`.
+- Se creó `ghmi-api-00033-xut` con tag `candidate` y 0% de tráfico. Usa
+  `workos-api-key:2`, `workos-production-webhook-secret:1`, el Client ID
+  production y las URLs públicas de Mira/API. También queda con cookies
+  `Secure` y `SameSite=Lax`.
+- La candidata respondió `/health` con 200. Su inicio de WorkOS devolvió 307
+  hacia AuthKit con el callback de Mira y el Client ID production, sin iniciar
+  sesión ni mover tráfico.
+
+**Motivo:** comprobar que el proceso de la API arranca con las credenciales
+WorkOS production y que la migración de variable literal a Secret Manager no
+rompe el login, antes de afectar a usuarios.
+
+**Evidencia:**
+
+- Cloud Run marca la candidata lista; `ghmi-api-00031-6lx` conserva 100% del
+  tráfico y `ghmi-api-00033-xut` sólo el tag `candidate`.
+- La especificación de candidata referencia las dos versiones de secreto
+  production, no valores literales.
+- La respuesta de inicio de WorkOS valida en memoria callback y Client ID sin
+  registrarlos en logs.
+
+**Qué sigue:** requiere una acción en Google Cloud Console: añadir
+`https://mira.ninfasolutions.com/gmail/connect/callback` al cliente Web usado
+por Mira. Google compara la URI exactamente; una vez guardada, se actualiza la
+variable en otra candidata y se prueba Gmail. El login WorkOS y el webhook
+firmado requieren una etapa posterior de tráfico controlado porque la callback
+pública todavía atraviesa el proxy web activo. `APP_ENV=production` permanece
+diferido: exigiría las credenciales live de Mercado Pago, fuera de alcance
+hasta resolver pagos.
+
 ## 2026-07-16 — Callback de AuthKit de la aplicación Mira
 
 **Estado:** terminado y verificado contra WorkOS; pendiente integración en una

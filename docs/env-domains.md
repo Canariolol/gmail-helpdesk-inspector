@@ -143,20 +143,29 @@ mapping.
    aún puede conservar cache antiguo; no cambiar OAuth desde una respuesta DNS
    local desactualizada.
 
-En el deploy candidato siguiente se actualizarán, como un único cambio
-verificable:
+La candidata de API `ghmi-api-00033-xut` (0% tráfico) ya actualizó:
 
 ```text
 WEB_BASE_URL=https://mira.ninfasolutions.com
-GOOGLE_REDIRECT_URL=https://mira.ninfasolutions.com/gmail/connect/callback
+API_BASE_URL=https://ghmi-api-io54uhmrxa-uc.a.run.app
 WORKOS_REDIRECT_URI=https://mira.ninfasolutions.com/auth/workos/callback
 ```
 
-El callback WorkOS ya quedó registrado en la nueva aplicación específica de
-Mira el 2026-07-16 y fue leído de vuelta mediante la API. Aún se debe registrar
-el callback de Google OAuth e inyectar el `WORKOS_CLIENT_ID` de esa aplicación
-en el despliegue candidato. Los handlers actuales aceptan ambas rutas a través
-del proxy same-origin de `ghmi-web`.
+También usa `WORKOS_CLIENT_ID`, la API key y la firma webhook production desde
+Secret Manager. La candidata respondió `/health` con 200 y su inicio WorkOS
+devolvió el callback esperado; la revisión activa no cambió.
+
+**Acción externa necesaria antes de actualizar `GOOGLE_REDIRECT_URL`:** en
+Google Cloud Console > Google Auth Platform > Clients, abrir el cliente Web de
+Mira y añadir exactamente:
+
+```text
+https://mira.ninfasolutions.com/gmail/connect/callback
+```
+
+Google exige una coincidencia exacta entre esa URI y la enviada por la app. No
+crear otro cliente ni rotar el secreto existente. Una vez guardada, se puede
+actualizar esa variable en una nueva candidata y probar la conexión Gmail.
 
 ### Lanzamiento real: External Application Load Balancer
 
