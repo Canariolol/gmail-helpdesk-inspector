@@ -2,6 +2,62 @@
 
 Este registro acompaña a `plan-production-ready.md`: solo se anota trabajo terminado con evidencia. Los pagos permanecen diferidos hasta resolver su problema actual.
 
+## 2026-07-16 — Callback de AuthKit de la aplicación Mira
+
+**Estado:** terminado y verificado contra WorkOS; pendiente integración en una
+revisión candidata de Cloud Run.
+
+**Qué se hizo:**
+
+- Se validó sin exponerla la nueva `WORKOS_API_KEY` guardada localmente.
+- La lista de redirects de AuthKit estaba vacía; se registró
+  `https://mira.ninfasolutions.com/auth/workos/callback` y se confirmó la
+  respuesta de creación HTTP 201.
+
+**Motivo:** WorkOS sólo permite terminar el login en URLs previamente
+autorizadas. El callback bajo el dominio público conserva la sesión en la
+arquitectura same-origin de Mira.
+
+**Evidencia:**
+
+- `GET /user_management/redirect_uris` autenticado con la nueva clave: lista
+  inicial vacía.
+- `POST /user_management/redirect_uris`: HTTP 201 para el callback de Mira.
+
+**Qué sigue:** obtener el `WORKOS_CLIENT_ID` de la nueva aplicación, migrar la
+API key a Secret Manager y preparar una revisión sin tráfico. La rotación de
+`WORKOS_COOKIE_SECRET` se mantiene separada porque cerrará las sesiones
+existentes. Google OAuth y los pagos no se modificaron.
+
+## 2026-07-16 — Nueva API key de WorkOS resguardada
+
+**Estado:** preparado y verificado en GCP; pendiente asociarla a una revisión
+candidata.
+
+**Qué se hizo:**
+
+- Se creó `workos-api-key` en Secret Manager con la nueva clave como su versión
+  inicial, sin imprimir ni registrar el valor.
+- Se concedió `roles/secretmanager.secretAccessor` únicamente a
+  `ghmi-runtime`, la cuenta de ejecución de `ghmi-api`.
+
+**Motivo:** sustituir la clave literal actual por una clave nueva almacenada y
+entregada por el mecanismo de secretos de GCP, sin afectar todavía el login
+que sirve tráfico.
+
+**Evidencia:**
+
+- Secret Manager confirma `workos-api-key` y su versión inicial.
+- La política del secreto confirma acceso para `ghmi-runtime`.
+- La revisión activa todavía marca `WORKOS_API_KEY` y
+  `WORKOS_COOKIE_SECRET` como literales; `WORKOS_WEBHOOK_SECRET` ya es un
+  secreto. No se modificó la revisión ni se envió tráfico nuevo.
+
+**Qué sigue:** copiar el `WORKOS_CLIENT_ID` de la nueva aplicación para
+configurar la revisión candidata y enlazarle `workos-api-key`. La rotación de
+la cookie requiere una autorización separada porque invalida sesiones. Google
+OAuth y pagos permanecen sin cambios.
+
 ## 2026-07-15 — IDs de correlación HTTP
 
 **Estado:** terminado y verificado localmente.

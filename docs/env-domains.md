@@ -148,9 +148,11 @@ GOOGLE_REDIRECT_URL=https://mira.ninfasolutions.com/gmail/connect/callback
 WORKOS_REDIRECT_URI=https://mira.ninfasolutions.com/auth/workos/callback
 ```
 
-También se deben registrar esas dos callbacks en Google OAuth y WorkOS. Los
-handlers actuales aceptan esas rutas a través del proxy same-origin de
-`ghmi-web`.
+El callback WorkOS ya quedó registrado en la nueva aplicación específica de
+Mira el 2026-07-16 y fue leído de vuelta mediante la API. Aún se debe registrar
+el callback de Google OAuth e inyectar el `WORKOS_CLIENT_ID` de esa aplicación
+en el despliegue candidato. Los handlers actuales aceptan ambas rutas a través
+del proxy same-origin de `ghmi-web`.
 
 ### Lanzamiento real: External Application Load Balancer
 

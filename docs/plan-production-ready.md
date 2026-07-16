@@ -328,6 +328,16 @@ Prioridad: **P0**
 - [ ] Migrar y rotar `WORKOS_API_KEY` hacia Secret Manager.
   - La inspección de configuración 2026-07-15 detectó que aún está inyectada
     como variable de texto plano; no registrar ni repetir su valor.
+  - Avance 2026-07-16: la nueva clave fue cargada como versión inicial de
+    `workos-api-key` y sólo `ghmi-runtime` recibió acceso de lectura. La
+    revisión activa conserva el valor literal hasta desplegar y comprobar una
+    revisión candidata; por eso este ítem no está terminado todavía.
+- [x] Registrar el callback de AuthKit de Mira en la nueva aplicación WorkOS.
+  - Evidencia 2026-07-16: la API autenticada con la nueva clave devolvió una
+    lista inicial vacía; se creó y leyó de vuelta
+    `https://mira.ninfasolutions.com/auth/workos/callback` (HTTP 201). Falta
+    inyectar el `WORKOS_CLIENT_ID` de esa aplicación y desplegar una revisión
+    candidata antes de dirigir tráfico hacia ella.
 - [ ] Migrar y rotar `WORKOS_COOKIE_SECRET` hacia Secret Manager.
   - La inspección de configuración 2026-07-15 detectó que aún está inyectada
     como variable de texto plano; no registrar ni repetir su valor.
@@ -1844,7 +1854,7 @@ Usar esta tabla para mantener una visión ejecutiva:
 |---|---:|---|---|---|---|
 | Checkout embebido | P0 | En progreso |  | `scripts/check-all.sh` — verde; build Docker sandbox con clave pública | Card Payment Brick → token → `/preapproval` `authorized`, sin redirect; la ejecución real espera login WorkOS. |
 | Webhook Mercado Pago | P0 | Diferido |  | Incidente de pagos actual; sin cambios en este avance | Se retoma después de resolver el incidente y autorizar la prueba real. |
-| Configuración de entornos | P0 | En progreso |  | Cloudflare: DNS delegado; mapping Cloud Run listo (2026-07-16) | Certificado HTTPS provisionado; faltan callbacks OAuth/WorkOS, rotación WorkOS y deploy candidato. |
+| Configuración de entornos | P0 | En progreso |  | Cloudflare: DNS delegado; mapping Cloud Run listo; callback WorkOS registrado (2026-07-16) | Certificado HTTPS provisionado; falta callback Google OAuth, `WORKOS_CLIENT_ID`, rotación WorkOS y deploy candidato. |
 | Configuración production | P0 | Listo local |  | `scripts/check-all.sh` — 161 Rust, 10 worker | La validación acepta callbacks HTTPS del origen API o web/proxy y exige secreto de webhook WorkOS; `APP_ENV=production` sigue pendiente de autorización, secretos y pagos. |
 | Sesiones y logout | P0 | Listo local |  | `scripts/check-all.sh` — 161 Rust, 10 worker | Expiración absoluta 30 días, logout individual/global revocable, atributos seguros de cookies y revocación WorkOS de nuevas sesiones; falta smoke test desplegado. |
 | Ciclo de vida WorkOS | P0 | En progreso |  | `WORKOS_WEBHOOK_SECRET` enlazado en `ghmi-api-00030-vxc` | Endpoint y secreto configurados; falta desplegar el handler actual, probar eventos firmados y migrar/rotar las otras credenciales WorkOS que siguen en texto plano. |
