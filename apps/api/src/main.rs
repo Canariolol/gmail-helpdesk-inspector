@@ -7,6 +7,7 @@ mod gmail;
 mod http;
 mod mailbox;
 mod policies;
+mod postgres;
 mod report;
 mod scheduler;
 mod storage;
@@ -25,6 +26,7 @@ use axum::{
 use config::AppConfig;
 use firestore::FirestoreStorage;
 use http::AppState;
+use postgres::PostgresStorage;
 use storage::{MemoryStorage, StorageRepository};
 use tower_http::{
     cors::{AllowOrigin, CorsLayer},
@@ -54,10 +56,19 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let config = AppConfig::from_env()?;
-    let storage: Arc<dyn StorageRepository> = if config.app_storage == "memory" {
-        Arc::new(MemoryStorage::default())
-    } else {
-        Arc::new(FirestoreStorage::new(config.firestore.clone())?)
+    let storage: Arc<dyn StorageRepository> = match config.app_storage.as_str() {
+        "memory" => Arc::new(MemoryStorage::default()),
+        "firestore" => Arc::new(FirestoreStorage::new(config.firestore.clone())?),
+        "postgres" => Arc::new(
+            PostgresStorage::connect(
+                config
+                    .postgres_database_url
+                    .as_deref()
+                    .expect("validated POSTGRES_DATABASE_URL"),
+            )
+            .await?,
+        ),
+        storage => anyhow::bail!("unsupported APP_STORAGE={storage}"),
     };
     let migration = storage.reconcile_manual_review_metrics_v1().await?;
     if migration.already_applied {

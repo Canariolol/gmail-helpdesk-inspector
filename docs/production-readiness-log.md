@@ -2295,3 +2295,37 @@ REST de Supabase exponga datos de negocio por accidente.
 `PostgresStorage` detrás de `StorageRepository`. Después se implementará la
 copia validada desde Firestore; no se han leído, exportado ni modificado datos
 de Firestore y los pagos permanecen diferidos.
+
+## 2026-07-16 — Backend PostgreSQL conectable y verificado localmente
+
+**Estado:** terminado y verificado localmente; no se desplegó ni se movió
+tráfico.
+
+**Qué se hizo:** se incorporó `PostgresStorage` como tercera implementación de
+`StorageRepository` y se habilitó `APP_STORAGE=postgres`. Mantiene WorkOS y
+los contratos HTTP; persiste los registros en el schema privado de Supabase.
+Los incrementos de usage son UPSERTs acumulativos, los claims de scheduler y
+análisis son atómicos y el borrado de análisis se ejecuta en una operación SQL.
+También se generó una contraseña exclusiva de la base, se rotó mediante la API
+de Supabase y se guardó la URL TLS del pooler sólo en Secret Manager como
+`mira-postgres-url` versión 1.
+
+**Motivo:** el cambio permite validar el nuevo backend sin retirar Firestore ni
+crear una segunda API. Usar el pooler con máximo cinco conexiones se ajusta a
+la API limitada temporalmente a una instancia y evita conectar una base por
+cada request.
+
+**Evidencia:**
+
+- `cargo test --manifest-path apps/api/Cargo.toml` — 163 pruebas aprobadas.
+- `cargo clippy --manifest-path apps/api/Cargo.toml -- -D warnings` — aprobado.
+- `APP_STORAGE=postgres` con la URL recuperada en memoria desde Secret Manager
+  inició la API local y `GET /health` respondió HTTP 200.
+- `mira-postgres-url` existe en Secret Manager con versión 1 habilitada; su
+  valor no fue escrito en el repositorio ni expuesto en esta bitácora.
+
+**Qué sigue:** inventariar y exportar Firestore, validar sus marcadores de
+migración de revisión manual y copiar a PostgreSQL de manera idempotente. La
+credencial se concederá a una service account dedicada sólo al construir la
+revisión candidata; no se modifican la revisión activa, los datos Firestore,
+Mercado Pago, checkout ni webhooks.

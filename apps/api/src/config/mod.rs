@@ -22,6 +22,7 @@ pub struct AppConfig {
     pub workos: WorkosConfig,
     pub billing: BillingConfig,
     pub firestore: FirestoreConfig,
+    pub postgres_database_url: Option<String>,
     pub ai: AiConfig,
     pub scheduler: SchedulerConfig,
     pub report: ReportConfig,
@@ -97,6 +98,12 @@ impl AppConfig {
         let app_env = env_or("APP_ENV", "development");
         let production = is_production_env(&app_env);
         let app_storage = env_or("APP_STORAGE", "firestore");
+        let postgres_database_url = empty_to_none(env::var("POSTGRES_DATABASE_URL").ok());
+        if app_storage == "postgres" && postgres_database_url.is_none() {
+            return Err(anyhow!(
+                "POSTGRES_DATABASE_URL is required when APP_STORAGE=postgres"
+            ));
+        }
         let google = GoogleConfig {
             client_id: env_or("GOOGLE_CLIENT_ID", ""),
             client_secret: env_or("GOOGLE_CLIENT_SECRET", ""),
@@ -233,6 +240,7 @@ impl AppConfig {
                     env::var("GOOGLE_APPLICATION_CREDENTIALS").ok(),
                 ),
             },
+            postgres_database_url,
             ai: AiConfig {
                 worker_url: ai_worker_url,
                 worker_audience: ai_worker_audience,
@@ -360,9 +368,9 @@ fn validate_production_runtime(
     if !production {
         return Ok(());
     }
-    if app_storage != "firestore" {
+    if !matches!(app_storage, "firestore" | "postgres") {
         return Err(anyhow!(
-            "APP_STORAGE must be firestore when APP_ENV=production"
+            "APP_STORAGE must be firestore or postgres when APP_ENV=production"
         ));
     }
     if !billing.enforcement_enabled {
@@ -494,6 +502,7 @@ pub(crate) fn test_app_config() -> AppConfig {
             bearer_token: None,
             service_account_path: None,
         },
+        postgres_database_url: None,
         ai: AiConfig {
             worker_url: String::new(),
             worker_audience: None,

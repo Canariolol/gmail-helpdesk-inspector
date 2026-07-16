@@ -1153,16 +1153,23 @@ habilitará acceso directo del frontend a tablas de negocio ni Supabase Auth.
   - Evidencia 2026-07-16: Management API autenticada informa el proyecto
     `Mira`, organización `Ninfa`, región `us-east-2`, estado
     `ACTIVE_HEALTHY`.
-- [ ] Guardar la URL de conexión de PostgreSQL exclusivamente en Secret
-  Manager y asignarla sólo a la API candidata.
-- [ ] Seleccionar el pooler y límite de conexiones compatible con Cloud Run.
+- [x] Guardar la URL de conexión de PostgreSQL exclusivamente en Secret
+  Manager.
+  - Evidencia 2026-07-16: se rotó la contraseña de base y se creó
+    `mira-postgres-url` (versión 1) sin escribir la URL en Git ni mostrarla.
+  - Pendiente de la candidata: concederla únicamente a su identidad de API.
+- [x] Seleccionar un pooler y límite de conexiones compatible con Cloud Run.
+  - La API usa el pooler TLS transaccional de Supabase y un pool local máximo
+    de cinco conexiones. Con `maxScale=1` evita abrir una conexión por request.
 - [ ] Confirmar presupuesto/plan de Supabase apto para producción antes del
   cutover. El plan gratuito no será la única medida de continuidad de datos.
 
 ## 10.2 Implementación del backend PostgreSQL
 
-- [ ] Añadir implementación `PostgresStorage` de `StorageRepository` sin
+- [x] Añadir implementación `PostgresStorage` de `StorageRepository` sin
   cambiar contratos HTTP ni WorkOS.
+  - `APP_STORAGE=postgres` selecciona el backend nuevo; `memory` y
+    `firestore` conservan sus comportamientos actuales para pruebas y rollback.
 - [x] Crear migraciones SQL versionadas y reproducibles.
   - Evidencia 2026-07-16: `0001_mira_records` se aplicó a Supabase y quedó
     registrada con checksum en `mira.schema_migrations`; el aplicador rechaza
@@ -1173,8 +1180,12 @@ habilitará acceso directo del frontend a tablas de negocio ni Supabase Auth.
     organización, proveedor, propietario, run y thread) en columnas indexadas.
     Es una primera capa segura de persistencia; la normalización adicional se
     hará sólo cuando una consulta real la requiera.
-- [ ] Usar transacciones para usage ledger, claims de scheduler/análisis,
-  borrado de datos y futuras operaciones de pagos.
+- [x] Usar operaciones atómicas para usage ledger, claims de scheduler/análisis
+  y borrado de datos.
+  - El usage ledger usa un UPSERT acumulativo; el claim del scheduler usa una
+    transacción con bloqueo de fila; el claim de análisis es `UPDATE ... WHERE
+    state='pending'`; y el borrado se realiza en una sentencia atómica.
+  - Las futuras operaciones de pagos siguen pendientes y fuera de alcance.
 - [x] Mantener tablas de negocio inaccesibles desde el frontend.
   - `mira` no es un schema público y se revocaron privilegios a `anon`,
     `authenticated`, `service_role` y `PUBLIC`.
@@ -1188,6 +1199,8 @@ habilitará acceso directo del frontend a tablas de negocio ni Supabase Auth.
 - [ ] Inventariar conteos y entidades de Firestore antes de copiar datos.
 - [ ] Crear exportador Firestore e importador PostgreSQL idempotentes.
 - [ ] Validar conteos, relaciones y muestra de datos antes del cambio.
+- [ ] Verificar que las migraciones de revisión manual v1/v2 estén aplicadas
+  en Firestore antes de importar; el backend PostgreSQL no las reejecuta.
 - [ ] Probar en candidata con una copia de datos, sin tráfico de usuarios.
 - [ ] Definir una ventana breve de escritura congelada para el cutover; no se
   aplicará dual-write, para no introducir dos fuentes de verdad.
