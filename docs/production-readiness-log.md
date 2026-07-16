@@ -9,7 +9,7 @@ revisión candidata de Cloud Run.
 
 **Qué se hizo:**
 
-- Se validó sin exponerla la nueva `WORKOS_API_KEY` guardada localmente.
+- Se validó sin exponerla una primera `WORKOS_API_KEY` guardada localmente.
 - La lista de redirects de AuthKit estaba vacía; se registró
   `https://mira.ninfasolutions.com/auth/workos/callback` y se confirmó la
   respuesta de creación HTTP 201.
@@ -24,20 +24,22 @@ arquitectura same-origin de Mira.
   inicial vacía.
 - `POST /user_management/redirect_uris`: HTTP 201 para el callback de Mira.
 
-**Qué sigue:** obtener el `WORKOS_CLIENT_ID` de la nueva aplicación, migrar la
-API key a Secret Manager y preparar una revisión sin tráfico. La rotación de
-`WORKOS_COOKIE_SECRET` se mantiene separada porque cerrará las sesiones
-existentes. Google OAuth y los pagos no se modificaron.
+**Qué sigue:** esta primera configuración quedó identificada como staging al
+recibir las credenciales production. La configuración production se registra
+en la entrada posterior y ambas deben permanecer separadas hasta el despliegue
+candidato. Google OAuth y los pagos no se modificaron.
 
-## 2026-07-16 — Nueva API key de WorkOS resguardada
+## 2026-07-16 — Claves WorkOS resguardadas por entorno
 
 **Estado:** preparado y verificado en GCP; pendiente asociarla a una revisión
 candidata.
 
 **Qué se hizo:**
 
-- Se creó `workos-api-key` en Secret Manager con la nueva clave como su versión
-  inicial, sin imprimir ni registrar el valor.
+- Se creó `workos-api-key` en Secret Manager con la clave staging como versión
+  inicial, sin imprimir ni registrar su valor.
+- Tras identificar las nuevas variables production, se añadió su clave como
+  versión 2; la revisión activa no referencia todavía ese secreto.
 - Se concedió `roles/secretmanager.secretAccessor` únicamente a
   `ghmi-runtime`, la cuenta de ejecución de `ghmi-api`.
 
@@ -53,10 +55,44 @@ que sirve tráfico.
   `WORKOS_COOKIE_SECRET` como literales; `WORKOS_WEBHOOK_SECRET` ya es un
   secreto. No se modificó la revisión ni se envió tráfico nuevo.
 
-**Qué sigue:** copiar el `WORKOS_CLIENT_ID` de la nueva aplicación para
-configurar la revisión candidata y enlazarle `workos-api-key`. La rotación de
-la cookie requiere una autorización separada porque invalida sesiones. Google
-OAuth y pagos permanecen sin cambios.
+**Qué sigue:** configurar la revisión candidata con el `WORKOS_CLIENT_ID` y la
+versión production de `workos-api-key`. La rotación de la cookie requiere una
+autorización separada porque invalida sesiones. Google OAuth y pagos permanecen
+sin cambios.
+
+## 2026-07-16 — Webhook WorkOS production aislado y verificado
+
+**Estado:** configuración production terminada y comprobada; pendiente prueba
+firmada en una revisión candidata.
+
+**Qué se hizo:**
+
+- La lectura con `WORKOS_API_KEY` production confirmó que callback y webhook
+  anteriores no existían allí: eran configuración staging.
+- Se creó en production el callback público de Mira y el webhook directo de
+  API. El webhook quedó habilitado sólo para `session.revoked` y
+  `user.deleted`.
+- Su secreto de firma se guardó como versión inicial de
+  `workos-production-webhook-secret`, con acceso exclusivo de `ghmi-runtime`.
+
+**Motivo:** WorkOS separa claves, endpoints y secretos por entorno. Usar la
+firma staging para eventos production haría fallar la validación HMAC y mezclar
+ambos entornos ocultaría el error hasta una revocación real.
+
+**Evidencia:**
+
+- WorkOS production devuelve exactamente un callback y un webhook esperados,
+  ambos habilitados.
+- El webhook anuncia exactamente `session.revoked` y `user.deleted`.
+- Comparación en memoria, sin mostrar valores: la firma retornada por WorkOS
+  coincide con la versión de `workos-production-webhook-secret` en GCP.
+- `ghmi-api-00031-6lx` conserva 100% del tráfico y sigue referenciando el
+  secreto staging; no se modificó la revisión activa.
+
+**Qué sigue:** crear una revisión sin tráfico que use `WORKOS_CLIENT_ID`, la
+API key y la firma production; después enviar desde WorkOS un evento de prueba
+firmado y comprobar `operation=workos_webhook` en Cloud Logging. Google OAuth,
+pagos y la rotación de cookie siguen fuera de este cambio.
 
 ## 2026-07-15 — IDs de correlación HTTP
 

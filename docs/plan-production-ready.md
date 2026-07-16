@@ -328,23 +328,29 @@ Prioridad: **P0**
 - [ ] Migrar y rotar `WORKOS_API_KEY` hacia Secret Manager.
   - La inspección de configuración 2026-07-15 detectó que aún está inyectada
     como variable de texto plano; no registrar ni repetir su valor.
-  - Avance 2026-07-16: la nueva clave fue cargada como versión inicial de
-    `workos-api-key` y sólo `ghmi-runtime` recibió acceso de lectura. La
-    revisión activa conserva el valor literal hasta desplegar y comprobar una
-    revisión candidata; por eso este ítem no está terminado todavía.
+  - Avance 2026-07-16: la clave staging quedó como versión inicial y la nueva
+    clave production como versión 2 de `workos-api-key`; sólo `ghmi-runtime`
+    recibió acceso de lectura. La revisión activa conserva el valor literal
+    hasta desplegar y comprobar una revisión candidata; por eso este ítem no
+    está terminado todavía.
 - [x] Registrar el callback de AuthKit de Mira en la nueva aplicación WorkOS.
-  - Evidencia 2026-07-16: la API autenticada con la nueva clave devolvió una
-    lista inicial vacía; se creó y leyó de vuelta
-    `https://mira.ninfasolutions.com/auth/workos/callback` (HTTP 201). Falta
-    inyectar el `WORKOS_CLIENT_ID` de esa aplicación y desplegar una revisión
-    candidata antes de dirigir tráfico hacia ella.
+  - Evidencia 2026-07-16: el primer callback fue creado en staging. Tras
+    recibir las credenciales production, se confirmó que allí no existía y se
+    creó de nuevo con HTTP 201. Falta desplegar una revisión candidata antes de
+    dirigir tráfico hacia ella.
 - [ ] Migrar y rotar `WORKOS_COOKIE_SECRET` hacia Secret Manager.
   - La inspección de configuración 2026-07-15 detectó que aún está inyectada
     como variable de texto plano; no registrar ni repetir su valor.
 - [x] Configurar `WORKOS_WEBHOOK_SECRET` mediante Secret Manager y registrar el endpoint WorkOS.
-  - Evidencia 2026-07-15: el secreto está enlazado en `ghmi-api` y WorkOS tiene
-    el endpoint configurado. Falta desplegar el handler actual y enviar eventos
-    de prueba firmados.
+  - Evidencia 2026-07-15: corresponde al entorno staging y permanece enlazado
+    a la revisión activa de `ghmi-api`.
+- [x] Preparar el webhook WorkOS de producción y su secreto aislado.
+  - Evidencia 2026-07-16: WorkOS production tiene habilitado
+    `https://ghmi-api-io54uhmrxa-uc.a.run.app/auth/workos/webhook`, sólo para
+    `session.revoked` y `user.deleted`; su firma coincide con
+    `workos-production-webhook-secret` en Secret Manager.
+  - Falta enlazar ese secreto únicamente a una revisión candidata y enviar un
+    evento firmado de prueba. La revisión con tráfico no se modificó.
 - [ ] Confirmar `APP_ENCRYPTION_KEY` fuerte.
 - [ ] Confirmar `APP_SESSION_SECRET` fuerte.
 - [ ] Confirmar `GOOGLE_CLIENT_SECRET` en Secret Manager.
@@ -1854,10 +1860,10 @@ Usar esta tabla para mantener una visión ejecutiva:
 |---|---:|---|---|---|---|
 | Checkout embebido | P0 | En progreso |  | `scripts/check-all.sh` — verde; build Docker sandbox con clave pública | Card Payment Brick → token → `/preapproval` `authorized`, sin redirect; la ejecución real espera login WorkOS. |
 | Webhook Mercado Pago | P0 | Diferido |  | Incidente de pagos actual; sin cambios en este avance | Se retoma después de resolver el incidente y autorizar la prueba real. |
-| Configuración de entornos | P0 | En progreso |  | Cloudflare: DNS delegado; mapping Cloud Run listo; callback WorkOS registrado (2026-07-16) | Certificado HTTPS provisionado; falta callback Google OAuth, `WORKOS_CLIENT_ID`, rotación WorkOS y deploy candidato. |
+| Configuración de entornos | P0 | En progreso |  | Cloudflare: DNS delegado; mapping Cloud Run listo; callbacks y webhook WorkOS production registrados (2026-07-16) | Certificado HTTPS provisionado; falta callback Google OAuth, enlazar las credenciales WorkOS production y deploy candidato. |
 | Configuración production | P0 | Listo local |  | `scripts/check-all.sh` — 161 Rust, 10 worker | La validación acepta callbacks HTTPS del origen API o web/proxy y exige secreto de webhook WorkOS; `APP_ENV=production` sigue pendiente de autorización, secretos y pagos. |
 | Sesiones y logout | P0 | Listo local |  | `scripts/check-all.sh` — 161 Rust, 10 worker | Expiración absoluta 30 días, logout individual/global revocable, atributos seguros de cookies y revocación WorkOS de nuevas sesiones; falta smoke test desplegado. |
-| Ciclo de vida WorkOS | P0 | En progreso |  | `WORKOS_WEBHOOK_SECRET` enlazado en `ghmi-api-00030-vxc` | Endpoint y secreto configurados; falta desplegar el handler actual, probar eventos firmados y migrar/rotar las otras credenciales WorkOS que siguen en texto plano. |
+| Ciclo de vida WorkOS | P0 | En progreso |  | Webhook production y `workos-production-webhook-secret` verificados (2026-07-16) | La revisión con tráfico conserva staging; falta candidata con credenciales production, prueba firmada y rotación de cookie. |
 | Sanitización de errores | P0 | En progreso |  | `scripts/check-all.sh` — 161 Rust, 10 worker | API tiene catálogo público, no enumera análisis ajenos y propaga `request_id`; falta validar el flujo desplegado. |
 | Desconexión Gmail | P0 | Listo local |  | `scripts/check-all.sh` — 161 Rust, 10 worker | Revocación Google, tokens borrados, scheduler desactivado y confirmación UI; falta prueba desplegada. |
 | Borrado de datos | P0 | En progreso |  | `scripts/check-all.sh` — 161 Rust, 10 worker | Borrado de todos los análisis disponible, auditado sin PII y con señal de fallo; falta borrado de cuenta y prueba Firestore real. |

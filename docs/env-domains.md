@@ -57,9 +57,9 @@ API_PROXY_TARGET=https://<ghmi-api-run-app-url>
 BILLING_ENFORCEMENT_ENABLED=true
 ```
 
-`WORKOS_WEBHOOK_SECRET` se inyecta como secreto (no en este bloque). Registra
-en WorkOS el endpoint directo de API y únicamente los eventos `user.deleted` y
-`session.revoked`:
+`WORKOS_WEBHOOK_SECRET` se inyecta como secreto (no en este bloque). El
+endpoint production se registró en WorkOS el 2026-07-16, exclusivamente para
+los eventos `user.deleted` y `session.revoked`:
 
 ```text
 https://<ghmi-api-run-app-url>/auth/workos/webhook
@@ -67,6 +67,10 @@ https://<ghmi-api-run-app-url>/auth/workos/webhook
 
 Tras desplegar, usa «Send test event» de WorkOS para ambos eventos y confirma
 en logs `operation=workos_webhook`; no envíes payloads ni secretos a logs.
+Su firma está almacenada en `workos-production-webhook-secret`. La revisión
+actual todavía referencia el secreto staging `workos-webhook-secret`; el
+cambio de referencia corresponde al despliegue candidato, no a una rotación
+directa de la revisión con tráfico.
 
 Webhook live de Mercado Pago:
 
