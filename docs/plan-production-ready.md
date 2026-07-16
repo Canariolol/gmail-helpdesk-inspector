@@ -116,7 +116,8 @@ No comenzar a cobrar a usuarios externos hasta completar todos los puntos siguie
   - Evidencia 2026-07-15: revisión Cloud Run de `ghmi-api` expone
     `BILLING_ENFORCEMENT_ENABLED=true`.
 - [ ] `APP_ENV=production` activo.
-- [ ] API limitada temporalmente a una instancia.
+- [x] API limitada temporalmente a una instancia.
+  - Evidencia 2026-07-15: `ghmi-api-00030-vxc` tiene `maxScale=1`.
 - [ ] Flujo de pago probado de extremo a extremo.
 - [x] Errores internos sanitizados.
 - [x] Sesiones con expiración y revocación server-side.
@@ -125,7 +126,10 @@ No comenzar a cobrar a usuarios externos hasta completar todos los puntos siguie
   - Evidencia: revoca en Google, invalida tokens en todas las sesiones de la cuenta y bloquea análisis nuevos.
 - [x] Procedimiento de borrado de análisis disponible.
   - Evidencia: confirmación escrita, borrado idempotente de runs y sus datos derivados; la eliminación de cuenta sigue pendiente.
-- [ ] PITR o mecanismo de respaldo equivalente habilitado.
+- [x] PITR o mecanismo de respaldo equivalente habilitado.
+  - Evidencia 2026-07-15: Firestore `(default)` en `southamerica-west1` expone
+    `POINT_IN_TIME_RECOVERY_ENABLED` y `DELETE_PROTECTION_ENABLED`. Falta una
+    prueba de restauración controlada.
 - [ ] Alertas mínimas operativas activas.
 - [ ] Uptime checks activos.
 - [ ] Política de privacidad publicada.
@@ -321,9 +325,16 @@ Prioridad: **P0**
 - [x] Configurar explícitamente `BILLING_ENFORCEMENT_ENABLED=true`.
 - [ ] Configurar `MERCADOPAGO_ACCESS_TOKEN` mediante Secret Manager.
 - [ ] Configurar `MERCADOPAGO_WEBHOOK_SECRET` mediante Secret Manager.
-- [ ] Confirmar `WORKOS_API_KEY` en Secret Manager.
-- [ ] Confirmar `WORKOS_COOKIE_SECRET` fuerte y no reutilizado.
-- [ ] Configurar `WORKOS_WEBHOOK_SECRET` mediante Secret Manager y registrar el endpoint WorkOS.
+- [ ] Migrar y rotar `WORKOS_API_KEY` hacia Secret Manager.
+  - La inspección de configuración 2026-07-15 detectó que aún está inyectada
+    como variable de texto plano; no registrar ni repetir su valor.
+- [ ] Migrar y rotar `WORKOS_COOKIE_SECRET` hacia Secret Manager.
+  - La inspección de configuración 2026-07-15 detectó que aún está inyectada
+    como variable de texto plano; no registrar ni repetir su valor.
+- [x] Configurar `WORKOS_WEBHOOK_SECRET` mediante Secret Manager y registrar el endpoint WorkOS.
+  - Evidencia 2026-07-15: el secreto está enlazado en `ghmi-api` y WorkOS tiene
+    el endpoint configurado. Falta desplegar el handler actual y enviar eventos
+    de prueba firmados.
 - [ ] Confirmar `APP_ENCRYPTION_KEY` fuerte.
 - [ ] Confirmar `APP_SESSION_SECRET` fuerte.
 - [ ] Confirmar `GOOGLE_CLIENT_SECRET` en Secret Manager.
@@ -354,7 +365,9 @@ a API y la cookie se entrega bajo el origen con que navega la persona usuaria.
 
 ## 4.3 Escalado temporal
 
-- [ ] Configurar `max-instances=1` para `ghmi-api`.
+- [x] Configurar `max-instances=1` para `ghmi-api`.
+  - Evidencia 2026-07-15: `autoscaling.knative.dev/maxScale=1` en
+    `ghmi-api-00030-vxc`.
 - [ ] Confirmar que el scheduler externo sigue operativo.
 - [ ] Mantener `SCHEDULER_ENABLED=false` si Cloud Scheduler es la fuente elegida.
 - [ ] No habilitar simultáneamente scheduler interno y externo sin una razón documentada.
@@ -383,6 +396,25 @@ Consulta de sólo lectura: `ghmi-api` permanece en `ghmi-api-00028-7lj` con
 seguras, `SameSite=None` y billing enforcement. Firestore sigue en
 `southamerica-west1` sin PITR ni delete protection. No se consultaron valores
 de secretos ni se modificó infraestructura.
+
+### Aplicación GCP — 2026-07-15
+
+Cambios realizados por la persona operadora y confirmados después mediante
+consulta de solo lectura:
+
+- `ghmi-api` quedó en `maxScale=1` (revisión `ghmi-api-00030-vxc`) para evitar
+  escalado horizontal mientras el rate limit sigue en memoria.
+- Firestore `(default)` en `southamerica-west1` tiene PITR y delete protection
+  habilitados. Aún no existe evidencia de una restauración controlada.
+- `WORKOS_WEBHOOK_SECRET` está referenciado desde Secret Manager por la API y
+  el endpoint fue creado en WorkOS. El handler nuevo sigue pendiente de deploy
+  y de pruebas firmadas con una cuenta desechable.
+- La misma consulta encontró `WORKOS_API_KEY` y `WORKOS_COOKIE_SECRET` como
+  variables de texto plano. Deben rotarse y moverse a Secret Manager antes del
+  siguiente deploy; este plan no conserva sus valores.
+- Uptime checks y alertas permanecen diferidos por decisión operativa: una
+  comprobación externa podría despertar una instancia sin tráfico. Antes del
+  lanzamiento real se debe decidir su coste y volver a evaluar este punto.
 
 ## 4.4 Revisión segura
 
@@ -1581,7 +1613,9 @@ Prioridad: **P1**
 - [ ] Confirmar URLs y redirects OAuth.
 - [ ] Confirmar Mercado Pago sandbox.
 - [ ] Ejecutar smoke test completo.
-- [ ] Activar PITR.
+- [x] Activar PITR.
+  - Evidencia 2026-07-15: Firestore `(default)` con PITR habilitado; falta
+    prueba de restauración controlada.
 - [ ] Activar alertas.
 - [ ] Confirmar canal de soporte.
 - [ ] Publicar documentos legales.
@@ -1647,7 +1681,7 @@ Prioridad: **P1**
 
 ## Fase B — Protección operativa
 
-- [ ] Activar PITR y delete protection.
+- [x] Activar PITR y delete protection.
 - [x] Crear logs estructurados.
 - [x] Crear request IDs.
 - [ ] Crear uptime checks.
@@ -1686,16 +1720,16 @@ Usar esta tabla para mantener una visión ejecutiva:
 |---|---:|---|---|---|---|
 | Checkout embebido | P0 | En progreso |  | `scripts/check-all.sh` — verde; build Docker sandbox con clave pública | Card Payment Brick → token → `/preapproval` `authorized`, sin redirect; la ejecución real espera login WorkOS. |
 | Webhook Mercado Pago | P0 | Diferido |  | Incidente de pagos actual; sin cambios en este avance | Se retoma después de resolver el incidente y autorizar la prueba real. |
-| Configuración de entornos | P0 | En progreso |  | `docker compose --env-file .env.sandbox.example -f docker-compose.yml -f docker-compose.tunnel.yml config --services` | Sandbox con `mira-dev.ninfasolutions.com`; producción con `mira.ninfasolutions.com` y webhook directo a Cloud Run API. |
+| Configuración de entornos | P0 | En progreso |  | `docs/env-domains.md` | Cloudflare aún no está configurado. El subdominio requiere mapping de Cloud Run para beta o un External Application Load Balancer para lanzamiento real. |
 | Configuración production | P0 | Listo local |  | `scripts/check-all.sh` — 161 Rust, 10 worker | La validación acepta callbacks HTTPS del origen API o web/proxy y exige secreto de webhook WorkOS; `APP_ENV=production` sigue pendiente de autorización, secretos y pagos. |
 | Sesiones y logout | P0 | Listo local |  | `scripts/check-all.sh` — 161 Rust, 10 worker | Expiración absoluta 30 días, logout individual/global revocable, atributos seguros de cookies y revocación WorkOS de nuevas sesiones; falta smoke test desplegado. |
-| Ciclo de vida WorkOS | P0 | Listo local |  | `scripts/check-all.sh` — 161 Rust, 10 worker | Webhook HMAC para `user.deleted` y `session.revoked`; falta secreto, endpoint y prueba de eventos en WorkOS/Cloud Run. |
+| Ciclo de vida WorkOS | P0 | En progreso |  | `WORKOS_WEBHOOK_SECRET` enlazado en `ghmi-api-00030-vxc` | Endpoint y secreto configurados; falta desplegar el handler actual, probar eventos firmados y migrar/rotar las otras credenciales WorkOS que siguen en texto plano. |
 | Sanitización de errores | P0 | En progreso |  | `scripts/check-all.sh` — 161 Rust, 10 worker | API tiene catálogo público, no enumera análisis ajenos y propaga `request_id`; falta validar el flujo desplegado. |
 | Desconexión Gmail | P0 | Listo local |  | `scripts/check-all.sh` — 161 Rust, 10 worker | Revocación Google, tokens borrados, scheduler desactivado y confirmación UI; falta prueba desplegada. |
 | Borrado de datos | P0 | En progreso |  | `scripts/check-all.sh` — 161 Rust, 10 worker | Borrado de todos los análisis disponible, auditado sin PII y con señal de fallo; falta borrado de cuenta y prueba Firestore real. |
 | Privacidad y términos | P0 | En progreso |  | `docs/privacy.md`; Configuración y Ayuda | El copy técnico refleja el comportamiento actual; faltan política y términos aprobados/publicables. |
 | Landing/copy público | P1 | Listo local |  | `npm --prefix apps/web run build` | Sin lenguaje de beta; el copy de IA refleja el opt-out real. Onboarding, ayuda y documentos legales continúan aparte. |
-| PITR Firestore | P0 | Pendiente |  |  |  |
+| PITR Firestore | P0 | Habilitado |  | Firestore `(default)`: PITR y delete protection habilitados (2026-07-15) | Falta prueba de restauración controlada. |
 | Uptime y alertas | P0 | Pendiente |  |  |  |
 | Logs API | P0 | Listo local |  | Inicio API/worker y `scripts/check-all.sh` — 161 Rust, 10 worker | API y worker emiten JSON con contexto mínimo y datos redactados; falta verificar Cloud Logging tras desplegar. |
 | CI verde | P0 | Configurado local |  | `.github/workflows/ci.yml`; `scripts/check-all.sh` — 161 Rust, 10 worker, build web y scan de secretos | Corre en PR y `main`, reutiliza el gate y el lockfile. Falta primera ejecución remota y protección de rama. |
@@ -1733,10 +1767,12 @@ Este bloque es una fotografía inicial y debe actualizarse a medida que cambie e
 - [ ] `APP_ENV=production` no está configurado en la API desplegada.
 - [x] Billing enforcement está configurado explícitamente en la revisión auditada.
 - [ ] Mercado Pago no está configurado en la revisión auditada.
-- [ ] API permite hasta 20 instancias.
-- [ ] Firestore PITR desactivado.
-- [ ] Firestore delete protection desactivado.
+- [x] API limitada a una instancia (`ghmi-api-00030-vxc`).
+- [x] Firestore PITR habilitado; falta prueba de restauración controlada.
+- [x] Firestore delete protection habilitado.
 - [ ] No se observaron alertas operativas configuradas.
+- [ ] Migrar y rotar `WORKOS_API_KEY` y `WORKOS_COOKIE_SECRET` desde variables
+  de texto plano a Secret Manager.
 - [x] El check local ya no falla por Clippy; falta su primera corrida remota y
   protección de rama.
 - [x] Checkout versionado no utiliza redirección.

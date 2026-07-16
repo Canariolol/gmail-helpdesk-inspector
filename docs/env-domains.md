@@ -81,3 +81,65 @@ Credenciales:
 
 - Obtén las credenciales exactas para cada entorno desde la aplicación de Mercado Pago; el prefijo depende del producto.
 - No mezclar la `VITE_MERCADOPAGO_PUBLIC_KEY` y el `MERCADOPAGO_ACCESS_TOKEN` de entornos distintos.
+
+## Conectar `mira.ninfasolutions.com` con Cloudflare y Cloud Run
+
+Cloudflare por sí solo no hace que Cloud Run acepte el host
+`mira.ninfasolutions.com`: primero hay que asociar el host al servicio de web
+en Google Cloud. No apuntar un CNAME directo a `*.run.app` ni activar el proxy
+naranja como sustituto de esa asociación.
+
+### Beta o prueba privada: Cloud Run Domain Mapping
+
+Cloud Run Domain Mapping es la ruta más corta para una prueba privada en
+`us-central1`, pero Google la clasifica como Preview y no la recomienda para el
+lanzamiento productivo. Para cobrar a usuarios externos, usar un Global
+External Application Load Balancer delante de `ghmi-web` en lugar de este
+mapping.
+
+1. En Cloudflare, añadir la zona `ninfasolutions.com` y reemplazar en el
+   registrador los nameservers actuales por los que Cloudflare entregue.
+   Conservar todos los registros existentes de correo (MX, SPF, DKIM y DMARC)
+   al revisar la importación. Esperar a que la zona diga `Active`.
+2. En Google Cloud Console, abrir **Cloud Run > Domain mappings > Add mapping**.
+   Elegir `ghmi-web`, la opción **Cloud Run Domain Mappings** y el dominio
+   `mira.ninfasolutions.com`. Si Google pide verificar propiedad, verificar el
+   dominio base `ninfasolutions.com` mediante el TXT que muestra Search Console.
+3. Al finalizar el mapping, abrir **DNS Records** dentro de ese mapping y copiar
+   todos los `resourceRecords` que Google entregue.
+4. En Cloudflare > **DNS > Records**, crear exactamente esos registros para
+   `mira`. Mientras Google valida el dominio y emite el certificado, dejarlos
+   como **DNS only** (nube gris) y no dejar un A/AAAA/CNAME anterior con el
+   mismo nombre.
+5. En Cloudflare > **SSL/TLS > Edge Certificates**, mantener desactivado
+   **Always Use HTTPS** durante la validación y la emisión o renovación del
+   certificado de Google. Esperar hasta 24 horas si el certificado no aparece
+   de inmediato.
+6. Verificar sin iniciar sesión:
+
+   ```bash
+   curl -fsSI https://mira.ninfasolutions.com/
+   ```
+
+   El certificado debe ser válido y la respuesta debe venir de `ghmi-web`.
+
+No cambiar las variables OAuth ni desplegar todavía. En el deploy candidato
+siguiente se actualizarán, como un único cambio verificable:
+
+```text
+WEB_BASE_URL=https://mira.ninfasolutions.com
+GOOGLE_REDIRECT_URL=https://mira.ninfasolutions.com/gmail/connect/callback
+WORKOS_REDIRECT_URI=https://mira.ninfasolutions.com/auth/workos/callback
+```
+
+También se deben registrar esas dos callbacks en Google OAuth y WorkOS. Los
+handlers actuales aceptan esas rutas a través del proxy same-origin de
+`ghmi-web`.
+
+### Lanzamiento real: External Application Load Balancer
+
+Antes de un lanzamiento pagado, reemplazar el Domain Mapping Preview por un
+Global External Application Load Balancer con un serverless NEG que apunte a
+`ghmi-web`. Cloudflare puede seguir siendo el DNS/proxy del subdominio, pero
+el certificado, el host y el enrutamiento quedan gestionados por el balanceador
+GA de Google. Documentar el coste antes de crearlo.

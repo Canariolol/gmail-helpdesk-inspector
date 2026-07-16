@@ -1489,3 +1489,35 @@ incompleta.
 **Qué sigue:** inventariar orígenes de scripts, conexiones e iframes en un
 entorno desplegado antes de imponer `default-src`, `script-src`, `connect-src`
 o `frame-src`. Pagos continúa diferido.
+
+## 2026-07-15 — Controles GCP aplicados y verificados
+
+**Estado:** aplicado por la persona operadora y verificado en solo lectura.
+
+**Qué se hizo:**
+
+- Se creó un commit del trabajo local antes de cambiar infraestructura.
+- `ghmi-api` quedó limitado a una instancia (`maxScale=1`).
+- Firestore `(default)` tiene PITR y delete protection habilitados.
+- El endpoint WorkOS quedó registrado y `WORKOS_WEBHOOK_SECRET` está enlazado
+  desde Secret Manager en `ghmi-api`.
+
+**Motivo:** reducir carreras conocidas de la primera versión, proteger datos
+ante borrados o escrituras accidentales y permitir revocación de sesiones desde
+WorkOS sin registrar secretos en el repositorio.
+
+**Evidencia:** consulta GCP de solo lectura confirmó la revisión
+`ghmi-api-00030-vxc`, `maxScale=1`,
+`POINT_IN_TIME_RECOVERY_ENABLED`, `DELETE_PROTECTION_ENABLED` y la referencia
+de Secret Manager para `WORKOS_WEBHOOK_SECRET`.
+
+**Qué sigue:**
+
+- Migrar y rotar `WORKOS_API_KEY` y `WORKOS_COOKIE_SECRET`, detectados como
+  variables de texto plano; no registrar sus valores.
+- Configurar el dominio y hacer un deploy candidato antes de probar el webhook
+  con eventos firmados de una cuenta desechable.
+- Uptime checks y alertas quedan diferidos hasta el lanzamiento real por la
+  decisión de no despertar instancias sin tráfico.
+- Hacer una restauración Firestore controlada; activar PITR no prueba aún la
+  recuperación.
