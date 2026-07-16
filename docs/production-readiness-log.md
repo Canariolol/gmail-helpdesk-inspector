@@ -1521,3 +1521,57 @@ de Secret Manager para `WORKOS_WEBHOOK_SECRET`.
   decisión de no despertar instancias sin tráfico.
 - Hacer una restauración Firestore controlada; activar PITR no prueba aún la
   recuperación.
+
+## 2026-07-15 — Zona Cloudflare iniciada para el subdominio
+
+**Estado:** zona activa y delegada; pendiente mapping de Cloud Run.
+
+**Qué se hizo:** se creó mediante API la zona `ninfasolutions.com` en
+Cloudflare con un token temporal de alcance DNS. La llave local quedó fuera de
+Git y con permisos de lectura solo para su propietario.
+
+**Motivo:** preparar la delegación de `mira.ninfasolutions.com` hacia
+`ghmi-web` sin desplegar código ni cambiar pagos, OAuth o WorkOS.
+
+**Evidencia:** el token fue validado, la zona no existía antes de crearla y el
+inventario posterior confirmó 23 registros visibles: A, CNAME, MX y TXT. Se
+preservaron los ocho registros de correo relevantes. No quedaron nombres con
+el sufijo duplicado.
+
+**Qué sigue:** crear el Domain Mapping de Cloud Run para
+`mira.ninfasolutions.com`; luego agregar solo los registros DNS que Google
+entregue y verificar HTTPS, correo y web antes de cambiar OAuth o desplegar.
+
+## 2026-07-15 — Mapping Cloud Run para Mira creado
+
+**Estado:** CNAME público creado; certificado HTTPS pendiente.
+
+**Qué se hizo:** se creó el Cloud Run Domain Mapping
+`mira.ninfasolutions.com -> ghmi-web` en `us-central1`. Se agregó únicamente
+el CNAME indicado por Google (`mira -> ghs.googlehosted.com`) como `DNS only`.
+
+**Motivo:** permitir que Google valide el host y emita su certificado antes de
+exponer la aplicación con su subdominio, sin modificar OAuth, WorkOS, pagos ni
+las imágenes desplegadas.
+
+**Evidencia:** el CNAME resuelve desde DNS público; Cloud Run informa
+`Ready=Unknown` con espera de provisioning del certificado.
+
+**Qué sigue:** esperar `Ready=True`, comprobar `https://mira.ninfasolutions.com`
+sin iniciar sesión y, solo entonces, actualizar los callbacks y URLs durante
+un deploy candidato.
+
+## 2026-07-16 — Revalidación de URL de dominio y runtime
+
+**Estado:** certificado pendiente; sin cambios de configuración.
+
+**Qué se verificó:** el mapping aún espera el certificado HTTPS. La web ya usa
+como proxy la URL actual de `ghmi-api`, mientras que `API_BASE_URL` dentro de
+la API conserva un URL `run.app` anterior.
+
+**Motivo:** evitar cambiar redirects antes de que el nuevo host tenga TLS y
+evitar declarar producción con URLs API inconsistentes.
+
+**Qué sigue:** cuando Cloud Run informe `Ready=True`, desplegar una revisión
+candidata que actualice juntas las URLs de web/OAuth/WorkOS y `API_BASE_URL`.
+El webhook WorkOS y los pagos no forman parte de este cambio.

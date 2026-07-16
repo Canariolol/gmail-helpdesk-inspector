@@ -101,6 +101,16 @@ mapping.
    registrador los nameservers actuales por los que Cloudflare entregue.
    Conservar todos los registros existentes de correo (MX, SPF, DKIM y DMARC)
    al revisar la importación. Esperar a que la zona diga `Active`.
+
+   **Estado 2026-07-15:** la zona fue creada por API y se importaron 23
+   registros existentes como `DNS only`, incluyendo MX, SPF, DKIM, DMARC,
+   autodiscover y los hosts web. Los dos NS de Hostinger no se importaron porque
+   Cloudflare será el DNS autoritativo. El ALIAS de Hostinger del ápice se
+   normalizó a CNAME flattening de Cloudflare; ambos destinos raíz existentes
+   resolvían al mismo host Firebase. Se validó que no quedaron nombres con el
+   sufijo duplicado. Los nameservers fueron delegados y se confirmó la
+   resolución pública mediante Cloudflare y Google DNS. Ya es seguro continuar
+   con el mapping de Cloud Run.
 2. En Google Cloud Console, abrir **Cloud Run > Domain mappings > Add mapping**.
    Elegir `ghmi-web`, la opción **Cloud Run Domain Mappings** y el dominio
    `mira.ninfasolutions.com`. Si Google pide verificar propiedad, verificar el
@@ -122,6 +132,11 @@ mapping.
    ```
 
    El certificado debe ser válido y la respuesta debe venir de `ghmi-web`.
+
+   **Estado 2026-07-15:** se creó el Domain Mapping de `mira.ninfasolutions.com`
+   hacia `ghmi-web` y el CNAME `mira -> ghs.googlehosted.com` ya resuelve por
+   DNS público. Cloud Run permanece en `Ready=Unknown` hasta que Google emita
+   su certificado HTTPS; no cambiar OAuth ni desplegar mientras esté pendiente.
 
 No cambiar las variables OAuth ni desplegar todavía. En el deploy candidato
 siguiente se actualizarán, como un único cambio verificable:

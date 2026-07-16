@@ -416,6 +416,16 @@ consulta de solo lectura:
   comprobación externa podría despertar una instancia sin tráfico. Antes del
   lanzamiento real se debe decidir su coste y volver a evaluar este punto.
 
+### Revalidación de dominio — 2026-07-16
+
+- El mapping `mira.ninfasolutions.com -> ghmi-web` sigue en
+  `Ready=Unknown`, esperando el certificado HTTPS de Google. No se cambian
+  aún callbacks OAuth, WorkOS ni imágenes.
+- `ghmi-web` ya proxya al URL actual de API (`ghmi-api-io54uhmrxa-uc.a.run.app`),
+  pero `API_BASE_URL` de la API conserva un URL `run.app` anterior. El deploy
+  candidato debe alinear `API_BASE_URL` con el URL actual de API junto con
+  `WEB_BASE_URL`, `GOOGLE_REDIRECT_URL` y `WORKOS_REDIRECT_URI`.
+
 ## 4.4 Revisión segura
 
 - [ ] Desplegar una revisión sin tráfico.
@@ -1720,7 +1730,7 @@ Usar esta tabla para mantener una visión ejecutiva:
 |---|---:|---|---|---|---|
 | Checkout embebido | P0 | En progreso |  | `scripts/check-all.sh` — verde; build Docker sandbox con clave pública | Card Payment Brick → token → `/preapproval` `authorized`, sin redirect; la ejecución real espera login WorkOS. |
 | Webhook Mercado Pago | P0 | Diferido |  | Incidente de pagos actual; sin cambios en este avance | Se retoma después de resolver el incidente y autorizar la prueba real. |
-| Configuración de entornos | P0 | En progreso |  | `docs/env-domains.md` | Cloudflare aún no está configurado. El subdominio requiere mapping de Cloud Run para beta o un External Application Load Balancer para lanzamiento real. |
+| Configuración de entornos | P0 | En progreso |  | Cloudflare: DNS delegado; mapping Cloud Run creado (2026-07-15) | `mira CNAME ghs.googlehosted.com` ya resuelve; queda esperar el certificado HTTPS antes de cambiar OAuth o desplegar. |
 | Configuración production | P0 | Listo local |  | `scripts/check-all.sh` — 161 Rust, 10 worker | La validación acepta callbacks HTTPS del origen API o web/proxy y exige secreto de webhook WorkOS; `APP_ENV=production` sigue pendiente de autorización, secretos y pagos. |
 | Sesiones y logout | P0 | Listo local |  | `scripts/check-all.sh` — 161 Rust, 10 worker | Expiración absoluta 30 días, logout individual/global revocable, atributos seguros de cookies y revocación WorkOS de nuevas sesiones; falta smoke test desplegado. |
 | Ciclo de vida WorkOS | P0 | En progreso |  | `WORKOS_WEBHOOK_SECRET` enlazado en `ghmi-api-00030-vxc` | Endpoint y secreto configurados; falta desplegar el handler actual, probar eventos firmados y migrar/rotar las otras credenciales WorkOS que siguen en texto plano. |
