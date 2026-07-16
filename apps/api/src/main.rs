@@ -56,6 +56,32 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let config = AppConfig::from_env()?;
+    if std::env::var("MIGRATE_FIRESTORE_TO_POSTGRES")
+        .ok()
+        .is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
+    {
+        if config.app_env.trim().eq_ignore_ascii_case("production") {
+            anyhow::bail!("MIGRATE_FIRESTORE_TO_POSTGRES must run outside APP_ENV=production");
+        }
+        if config.app_storage != "postgres" {
+            anyhow::bail!("MIGRATE_FIRESTORE_TO_POSTGRES requires APP_STORAGE=postgres");
+        }
+        let source = FirestoreStorage::new(config.firestore.clone())?;
+        let target = PostgresStorage::connect(
+            config
+                .postgres_database_url
+                .as_deref()
+                .expect("validated POSTGRES_DATABASE_URL"),
+        )
+        .await?;
+        let counts = source.copy_to_postgres(&target).await?;
+        tracing::info!(?counts, "Firestore to PostgreSQL copy completed");
+        println!(
+            "Firestore to PostgreSQL copy: {}",
+            serde_json::to_string(&counts)?
+        );
+        return Ok(());
+    }
     let storage: Arc<dyn StorageRepository> = match config.app_storage.as_str() {
         "memory" => Arc::new(MemoryStorage::default()),
         "firestore" => Arc::new(FirestoreStorage::new(config.firestore.clone())?),

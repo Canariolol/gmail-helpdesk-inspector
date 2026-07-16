@@ -25,6 +25,7 @@ use crate::{
     config::{FirestoreConfig, ServiceAccountKey},
     mailbox::{FilterPreset, GmailConnection, MailboxMetadata, gmail_connection_is_active},
     policies::{OrgConfigBundle, PolicyVersion, hash_owner_email},
+    postgres::PostgresStorage,
     scheduler::model::{ScheduleConfig, ScheduleState},
     storage::{
         AnalysisDataDeletionAudit, GmailConnectionRefresh, ManualReviewInheritanceMigrationResult,
@@ -317,6 +318,50 @@ impl FirestoreStorage {
         Ok(values)
     }
 
+    async fn list_with_ids<T: DeserializeOwned>(
+        &self,
+        parent: &str,
+        collection: &str,
+    ) -> anyhow::Result<Vec<(String, T)>> {
+        let token = self.token().await?;
+        let url = if parent.is_empty() {
+            format!("{}/{}", self.root(), collection)
+        } else {
+            format!("{}/{}/{}", self.root(), parent, collection)
+        };
+        let mut values = Vec::new();
+        let mut page_token: Option<String> = None;
+        loop {
+            let mut request = self
+                .client
+                .get(&url)
+                .bearer_auth(&token)
+                .query(&[("pageSize", "300")]);
+            if let Some(page_token) = page_token.as_deref() {
+                request = request.query(&[("pageToken", page_token)]);
+            }
+            let response: FirestoreListResponse =
+                request.send().await?.error_for_status()?.json().await?;
+            for doc in response.documents {
+                let id = doc
+                    .name
+                    .rsplit('/')
+                    .next()
+                    .ok_or_else(|| anyhow!("Firestore document name is missing an ID"))?
+                    .to_string();
+                values.push((
+                    id,
+                    serde_json::from_value(firestore_fields_to_json(doc.fields)?)?,
+                ));
+            }
+            page_token = response.next_page_token.filter(|token| !token.is_empty());
+            if page_token.is_none() {
+                break;
+            }
+        }
+        Ok(values)
+    }
+
     async fn list_document_ids(
         &self,
         parent: &str,
@@ -370,6 +415,149 @@ impl FirestoreStorage {
             .error_for_status()
             .with_context(|| format!("failed to delete Firestore document {path}"))?;
         Ok(())
+    }
+}
+
+#[derive(Debug, Default, Serialize)]
+pub(crate) struct FirestoreCopyCounts {
+    pub accounts: u64,
+    pub sessions: u64,
+    pub gmail_connections: u64,
+    pub org_configs: u64,
+    pub subscriptions: u64,
+    pub checkouts: u64,
+    pub usage_ledgers: u64,
+    pub runs: u64,
+    pub threads: u64,
+    pub messages: u64,
+    pub ai_audits: u64,
+    pub manual_reviews: u64,
+    pub manual_overrides: u64,
+    pub filter_presets: u64,
+}
+
+impl FirestoreStorage {
+    /// Copia los datos que consume la aplicación sin tocar Firestore. Los IDs
+    /// de documentos se conservan para que una segunda ejecución sea idempotente.
+    pub(crate) async fn copy_to_postgres(
+        &self,
+        target: &PostgresStorage,
+    ) -> anyhow::Result<FirestoreCopyCounts> {
+        if self
+            .get::<MigrationMarker>(MANUAL_REVIEW_METRICS_MIGRATION_PATH)
+            .await?
+            .is_none()
+            || self
+                .get::<MigrationMarker>(MANUAL_REVIEW_INHERITANCE_MIGRATION_PATH)
+                .await?
+                .is_none()
+        {
+            return Err(anyhow!(
+                "Firestore manual-review migrations v1 and v2 must complete before PostgreSQL import"
+            ));
+        }
+
+        let mut counts = FirestoreCopyCounts::default();
+        for account in self.list::<Account>("", "accounts").await? {
+            target.upsert_account(&account).await?;
+            counts.accounts += 1;
+        }
+        for session in self.list::<UserSession>("", "users").await? {
+            target.upsert_user_session(&session).await?;
+            counts.sessions += 1;
+        }
+        for connection in self.list::<GmailConnection>("", "gmailConnections").await? {
+            target.upsert_gmail_connection(&connection).await?;
+            if let Some(metadata) = self.get_mailbox_metadata(&connection.owner_email).await? {
+                target
+                    .upsert_mailbox_metadata(&connection.owner_email, &metadata)
+                    .await?;
+            }
+            counts.gmail_connections += 1;
+        }
+        for config in self.list::<ScheduleConfig>("", "scheduleConfigs").await? {
+            target.upsert_schedule_config(&config).await?;
+        }
+        for state in self.list::<ScheduleState>("", "scheduleStates").await? {
+            target.upsert_schedule_state(&state).await?;
+        }
+        for owner_profile in self.list_document_ids("", "ownerProfiles").await? {
+            if let Some(bundle) = self
+                .get::<OrgConfigBundle>(&format!("ownerProfiles/{owner_profile}/config/current"))
+                .await?
+            {
+                target.upsert_org_config(&bundle).await?;
+                counts.org_configs += 1;
+            }
+            for (_, preset) in self
+                .list_with_ids::<FilterPreset>(
+                    &format!("ownerProfiles/{owner_profile}"),
+                    "filterPresets",
+                )
+                .await?
+            {
+                target.upsert_filter_preset(&preset).await?;
+                counts.filter_presets += 1;
+            }
+            for (_, review) in self
+                .list_with_ids::<ManualReviewOverride>(
+                    &format!("ownerProfiles/{owner_profile}"),
+                    "manualReviewOverrides",
+                )
+                .await?
+            {
+                target.upsert_manual_review_override(&review).await?;
+                counts.manual_overrides += 1;
+            }
+        }
+        for subscription in self.list::<Subscription>("", "subscriptions").await? {
+            target.upsert_subscription(&subscription).await?;
+            counts.subscriptions += 1;
+        }
+        for checkout in self.list::<CheckoutSession>("", "checkoutSessions").await? {
+            target.upsert_checkout_session(&checkout).await?;
+            counts.checkouts += 1;
+        }
+        for usage in self.list::<UsageLedger>("", "usageLedgers").await? {
+            target.replace_usage_ledger_for_import(&usage).await?;
+            counts.usage_ledgers += 1;
+        }
+        for audit in self
+            .list::<AnalysisDataDeletionAudit>("", "auditLogs")
+            .await?
+        {
+            target.record_analysis_data_deletion(&audit).await?;
+        }
+        for run in self.list::<AnalysisRun>("", "analysisRuns").await? {
+            target.create_analysis_run(&run).await?;
+            counts.runs += 1;
+            for thread in self.list_threads(&run.id).await? {
+                let messages = self.list_messages(&run.id, &thread.id).await?;
+                target.upsert_thread(&thread, &messages).await?;
+                counts.threads += 1;
+                counts.messages += messages.len() as u64;
+                for (id, audit) in self
+                    .list_with_ids::<AiAuditResult>(
+                        &format!("analysisRuns/{}/threads/{}", run.id, thread.id),
+                        "aiAudits",
+                    )
+                    .await?
+                {
+                    target
+                        .import_ai_audit(&id, &run.id, &thread.id, &audit)
+                        .await?;
+                    counts.ai_audits += 1;
+                }
+            }
+            for (_, review) in self
+                .list_with_ids::<ManualReview>(&format!("analysisRuns/{}", run.id), "manualReviews")
+                .await?
+            {
+                target.add_manual_review(&run.id, &review).await?;
+                counts.manual_reviews += 1;
+            }
+        }
+        Ok(counts)
     }
 }
 

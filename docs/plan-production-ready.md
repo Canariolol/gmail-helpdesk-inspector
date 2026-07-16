@@ -1159,8 +1159,9 @@ habilitará acceso directo del frontend a tablas de negocio ni Supabase Auth.
     `mira-postgres-url` (versión 1) sin escribir la URL en Git ni mostrarla.
   - Pendiente de la candidata: concederla únicamente a su identidad de API.
 - [x] Seleccionar un pooler y límite de conexiones compatible con Cloud Run.
-  - La API usa el pooler TLS transaccional de Supabase y un pool local máximo
-    de cinco conexiones. Con `maxScale=1` evita abrir una conexión por request.
+  - La API usa el pooler TLS **de sesión** de Supabase (IPv4, puerto 5432) y
+    un pool local máximo de cinco conexiones. Con `maxScale=1` evita abrir una
+    conexión por request y permite las sentencias preparadas de SQLx.
 - [ ] Confirmar presupuesto/plan de Supabase apto para producción antes del
   cutover. El plan gratuito no será la única medida de continuidad de datos.
 
@@ -1197,10 +1198,17 @@ habilitará acceso directo del frontend a tablas de negocio ni Supabase Auth.
 ## 10.3 Migración y cutover
 
 - [ ] Inventariar conteos y entidades de Firestore antes de copiar datos.
-- [ ] Crear exportador Firestore e importador PostgreSQL idempotentes.
-- [ ] Validar conteos, relaciones y muestra de datos antes del cambio.
-- [ ] Verificar que las migraciones de revisión manual v1/v2 estén aplicadas
-  en Firestore antes de importar; el backend PostgreSQL no las reejecuta.
+- [x] Crear exportador Firestore e importador PostgreSQL idempotentes.
+  - `MIGRATE_FIRESTORE_TO_POSTGRES=true` sólo se permite fuera de
+    `APP_ENV=production`, conserva IDs de origen y nunca escribe en Firestore.
+- [x] Validar el primer copy por conteos y una segunda ejecución.
+  - Evidencia 2026-07-16: PostgreSQL contiene 4 cuentas, 49 sesiones, 2 runs,
+    31 threads, 125 mensajes y 28 auditorías; una segunda copia no incrementó
+    ningún conteo.
+- [x] Verificar que las migraciones de revisión manual v1/v2 estén aplicadas
+  en Firestore antes de importar.
+  - El importador aborta antes de escribir si falta cualquiera de los dos
+    marcadores; PostgreSQL no las reejecuta.
 - [ ] Probar en candidata con una copia de datos, sin tráfico de usuarios.
 - [ ] Definir una ventana breve de escritura congelada para el cutover; no se
   aplicará dual-write, para no introducir dos fuentes de verdad.

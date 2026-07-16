@@ -992,6 +992,43 @@ impl PostgresStorage {
         )
         .await
     }
+
+    pub(crate) async fn replace_usage_ledger_for_import(
+        &self,
+        usage: &UsageLedger,
+    ) -> anyhow::Result<()> {
+        self.put(
+            "usage_ledger",
+            &format!("{}:{}", usage.org_id, usage.period_key),
+            RecordFields {
+                org_id: Some(&usage.org_id),
+                sort_at: Some(usage.updated_at),
+                ..Default::default()
+            },
+            usage,
+        )
+        .await
+    }
+
+    pub(crate) async fn import_ai_audit(
+        &self,
+        id: &str,
+        run_id: &str,
+        thread_id: &str,
+        audit: &AiAuditResult,
+    ) -> anyhow::Result<()> {
+        self.put(
+            "ai_audit",
+            id,
+            RecordFields {
+                run_id: Some(run_id),
+                thread_id: Some(thread_id),
+                ..Default::default()
+            },
+            audit,
+        )
+        .await
+    }
 }
 
 async fn find_provider_record<T: DeserializeOwned>(

@@ -2329,3 +2329,40 @@ migración de revisión manual y copiar a PostgreSQL de manera idempotente. La
 credencial se concederá a una service account dedicada sólo al construir la
 revisión candidata; no se modifican la revisión activa, los datos Firestore,
 Mercado Pago, checkout ni webhooks.
+
+## 2026-07-16 — Copia idempotente de Firestore a PostgreSQL validada
+
+**Estado:** terminado y verificado sobre la base PostgreSQL sin tráfico de
+aplicación; Firestore continúa siendo la fuente activa hasta el cutover.
+
+**Qué se hizo:** se añadió un modo local explícito
+`MIGRATE_FIRESTORE_TO_POSTGRES=true`. Lee las entidades existentes con el
+lector Firestore del backend, exige los marcadores de reconciliación manual
+v1/v2 y conserva los IDs originales al hacer UPSERT en PostgreSQL. Se ejecutó
+la copia y se repitió completa para comprobar idempotencia. Durante la primera
+prueba se detectó que el pooler transaccional no admite las prepared statements
+de SQLx; se cambió únicamente la URL secreta al pooler TLS de sesión (puerto
+5432), manteniendo la misma contraseña y sin exponerla.
+
+**Motivo:** una segunda ejecución segura permite reintentar el copy antes del
+cutover sin duplicar auditorías ni datos. El pooler de sesión es el modo
+adecuado para esta API persistente de una instancia en una red IPv4; evita la
+incompatibilidad de prepared statements del modo transaccional.
+
+**Evidencia:**
+
+- El importador verificó los marcadores Firestore v1/v2 antes de escribir.
+- Conteos PostgreSQL después de la copia: `account=4`, `user_session=49`,
+  `analysis_run=2`, `email_thread=31`, `email_message=125`, `ai_audit=28`,
+  `usage_ledger=2`, además de conexiones Gmail, scheduler y suscripción.
+- La segunda copia terminó correctamente y los conteos por tipo se mantuvieron
+  idénticos.
+- `cargo test --manifest-path apps/api/Cargo.toml` — 163 pruebas aprobadas;
+  Clippy y `git diff --check` también aprobados.
+
+**Qué sigue:** crear una service account de API sin Firestore, concederle sólo
+los secretos requeridos —incluido `mira-postgres-url`— y construir una revisión
+Cloud Run candidata con `APP_STORAGE=postgres` sin tráfico. Antes de promoverla
+se probarán login, Gmail, análisis, scheduler, borrado y rollback a Firestore.
+No se modificaron Mercado Pago, checkout, suscripciones de pago ni sus
+webhooks.
