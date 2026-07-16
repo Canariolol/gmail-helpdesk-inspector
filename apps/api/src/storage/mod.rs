@@ -135,7 +135,14 @@ pub trait StorageRepository: Send + Sync {
         &self,
         provider_subscription_id: &str,
     ) -> anyhow::Result<Option<CheckoutSession>>;
-    async fn upsert_usage_ledger(&self, usage: &UsageLedger) -> anyhow::Result<()>;
+    async fn add_usage(
+        &self,
+        org_id: &str,
+        period_key: &str,
+        runs_created: u32,
+        analyzed_threads: u32,
+        ai_audited_threads: u32,
+    ) -> anyhow::Result<()>;
     async fn get_usage_ledger(
         &self,
         org_id: &str,
@@ -654,11 +661,30 @@ impl StorageRepository for MemoryStorage {
             .cloned())
     }
 
-    async fn upsert_usage_ledger(&self, usage: &UsageLedger) -> anyhow::Result<()> {
-        self.inner.write().await.usage_ledgers.insert(
-            format!("{}:{}", usage.org_id, usage.period_key),
-            usage.clone(),
-        );
+    async fn add_usage(
+        &self,
+        org_id: &str,
+        period_key: &str,
+        runs_created: u32,
+        analyzed_threads: u32,
+        ai_audited_threads: u32,
+    ) -> anyhow::Result<()> {
+        let mut inner = self.inner.write().await;
+        let usage = inner
+            .usage_ledgers
+            .entry(format!("{org_id}:{period_key}"))
+            .or_insert_with(|| UsageLedger {
+                org_id: org_id.to_string(),
+                period_key: period_key.to_string(),
+                runs_created: 0,
+                analyzed_threads: 0,
+                ai_audited_threads: 0,
+                updated_at: Utc::now(),
+            });
+        usage.runs_created = usage.runs_created.saturating_add(runs_created);
+        usage.analyzed_threads = usage.analyzed_threads.saturating_add(analyzed_threads);
+        usage.ai_audited_threads = usage.ai_audited_threads.saturating_add(ai_audited_threads);
+        usage.updated_at = Utc::now();
         Ok(())
     }
 
@@ -1789,6 +1815,28 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn usage_additions_do_not_lose_concurrent_updates() {
+        let storage = MemoryStorage::default();
+        let first = storage.clone();
+        let second = storage.clone();
+        let (first_result, second_result) = tokio::join!(
+            first.add_usage("org-1", "2026-07", 1, 7, 3),
+            second.add_usage("org-1", "2026-07", 1, 11, 5),
+        );
+        first_result.unwrap();
+        second_result.unwrap();
+
+        let usage = storage
+            .get_usage_ledger("org-1", "2026-07")
+            .await
+            .unwrap()
+            .expect("usage ledger expected");
+        assert_eq!(usage.runs_created, 2);
+        assert_eq!(usage.analyzed_threads, 18);
+        assert_eq!(usage.ai_audited_threads, 8);
     }
 
     #[tokio::test]

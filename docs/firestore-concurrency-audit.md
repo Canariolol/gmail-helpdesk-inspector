@@ -12,7 +12,9 @@ una prueba con dos instancias desplegadas.
 | Conexión Gmail | El refresh usa `refresh_gmail_connection`: compara la versión leída y exige conexión activa; Firestore además escribe con `currentDocument.updateTime`. | Mitigado en código: si desconexión, revocación WorkOS u otra reconexión gana la carrera, el refresh no reescribe tokens ni reactiva la conexión. | Prueba local aprobada. Falta observar la precondición perdida contra Firestore desplegado. |
 | Revocación de sesiones | Logout y eventos WorkOS escriben `revoked_at` sobre sesiones concretas. | Bajo: la transición a revocada es idempotente; aún falta probar concurrencia desplegada. | Mantener las pruebas de revocación y validar en Cloud Run. |
 | Lookup de cuenta por email | `accountEmailIndexes/{hash}` se crea al upsert y las cuentas legacy se migran al primer lookup. | Bajo: un índice de correo antiguo se elimina al detectarlo; no autoriza acceso por sí mismo. | Confirmar la migración perezosa desplegada y medir lecturas. |
+| Contadores de uso | `add_usage` lee `usageLedgers/{org}_{periodo}` y lo reescribe sólo con `currentDocument.updateTime`; al crear uno usa `currentDocument.exists=false`. Reintenta hasta tres veces. | Mitigado para incrementos perdidos: el contador de análisis creados, hilos analizados y auditorías IA no puede sobrescribirse silenciosamente por otro escritor. | La validación de cupo y la creación del análisis aún no forman una transacción única. Probar dos instancias reales antes de escalar y revisar la reserva atómica de cupos si aumenta la concurrencia. |
 
-Pagos, usage ledger, checkout y suscripciones quedan fuera de este documento
-por el diferimiento explícito del incidente actual. Sus precondiciones y
-transacciones se revisarán al retomar pagos.
+Checkout y suscripciones quedan fuera de este documento por el diferimiento
+explícito del incidente de pagos. El usage ledger se incluye porque cuenta
+límites de uso no financieros y puede actualizarse mientras un análisis corre
+en segundo plano.

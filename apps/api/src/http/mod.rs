@@ -3856,14 +3856,10 @@ async fn increment_runs_usage(state: &AppState, org_id: Option<&str>) -> Result<
         return Ok(());
     };
     let period_key = current_period_key();
-    let mut usage = state
+    state
         .storage
-        .get_usage_ledger(org_id, &period_key)
-        .await?
-        .unwrap_or_else(|| empty_usage(org_id, &period_key));
-    usage.runs_created = usage.runs_created.saturating_add(1);
-    usage.updated_at = Utc::now();
-    state.storage.upsert_usage_ledger(&usage).await?;
+        .add_usage(org_id, &period_key, 1, 0, 0)
+        .await?;
     Ok(())
 }
 
@@ -3877,15 +3873,10 @@ async fn add_analysis_usage(
         return Ok(());
     };
     let period_key = current_period_key();
-    let mut usage = state
+    state
         .storage
-        .get_usage_ledger(org_id, &period_key)
-        .await?
-        .unwrap_or_else(|| empty_usage(org_id, &period_key));
-    usage.analyzed_threads = usage.analyzed_threads.saturating_add(analyzed_threads);
-    usage.ai_audited_threads = usage.ai_audited_threads.saturating_add(ai_audited_threads);
-    usage.updated_at = Utc::now();
-    state.storage.upsert_usage_ledger(&usage).await
+        .add_usage(org_id, &period_key, 0, analyzed_threads, ai_audited_threads)
+        .await
 }
 
 #[derive(Debug, Deserialize)]

@@ -1922,3 +1922,32 @@ pantallas enfocadas en cobertura y resultados del análisis.
 **Qué sigue:** validar login, OAuth, errores y análisis en la URL candidata
 una vez que se registren sus callbacks. Checkout y sus mensajes no se
 revisaron ni cambiaron debido al incidente de pagos diferido.
+
+## 2026-07-16 — Incrementos de usage ledger protegidos contra carreras
+
+**Estado:** terminado y verificado localmente; validación de cupo atómica y
+prueba desplegada todavía pendientes.
+
+**Qué se hizo:** se reemplazó la secuencia separada de leer, incrementar y
+guardar el `usage ledger` por una única operación de almacenamiento. En
+Firestore, cada escritura exige que el documento conserve su `updateTime`, o
+que aún no exista al crearlo; ante una carrera relee y reintenta hasta tres
+veces. El almacenamiento en memoria ejecuta la misma operación bajo su lock.
+
+**Motivo:** un análisis se ejecuta en segundo plano y puede actualizar los
+contadores al mismo tiempo que otra solicitud crea un análisis. Sin una
+precondición, un guardado tardío podía eliminar el incremento anterior y dejar
+los límites de uso subcontados.
+
+**Evidencia:**
+
+- `cargo test --manifest-path apps/api/Cargo.toml usage_additions_do_not_lose_concurrent_updates` — aprobado.
+- La prueba lanza dos incrementos concurrentes y verifica los totales de
+  análisis creados, hilos analizados y auditorías IA.
+- `cargo fmt --manifest-path apps/api/Cargo.toml -- --check`, Clippy y
+  `git diff --check` — aprobados.
+
+**Qué sigue:** probar la carrera contra Firestore desde dos instancias reales.
+La validación de cupo y la creación de un análisis todavía no son una
+transacción única, por lo que `maxScale=1` se mantiene. Checkout,
+suscripciones y webhooks de Mercado Pago no se modificaron.

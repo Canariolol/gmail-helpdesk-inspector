@@ -37,6 +37,7 @@ const MANUAL_REVIEW_METRICS_MIGRATION_PATH: &str = "systemMigrations/manual-revi
 const MANUAL_REVIEW_INHERITANCE_MIGRATION_PATH: &str =
     "systemMigrations/manual-review-inheritance-v2";
 const SCHEDULE_CLAIM_MAX_ATTEMPTS: usize = 3;
+const USAGE_UPDATE_MAX_ATTEMPTS: usize = 3;
 
 pub struct FirestoreStorage {
     client: Client,
@@ -734,12 +735,44 @@ impl StorageRepository for FirestoreStorage {
         }))
     }
 
-    async fn upsert_usage_ledger(&self, usage: &UsageLedger) -> anyhow::Result<()> {
-        self.put(
-            &format!("usageLedgers/{}_{}", usage.org_id, usage.period_key),
-            usage,
-        )
-        .await
+    async fn add_usage(
+        &self,
+        org_id: &str,
+        period_key: &str,
+        runs_created: u32,
+        analyzed_threads: u32,
+        ai_audited_threads: u32,
+    ) -> anyhow::Result<()> {
+        let path = format!("usageLedgers/{org_id}_{period_key}");
+        for _ in 0..USAGE_UPDATE_MAX_ATTEMPTS {
+            let (mut usage, update_time) = match self.get_with_update_time(&path).await? {
+                Some((usage, update_time)) => (usage, Some(update_time)),
+                None => (
+                    UsageLedger {
+                        org_id: org_id.to_string(),
+                        period_key: period_key.to_string(),
+                        runs_created: 0,
+                        analyzed_threads: 0,
+                        ai_audited_threads: 0,
+                        updated_at: Utc::now(),
+                    },
+                    None,
+                ),
+            };
+            usage.runs_created = usage.runs_created.saturating_add(runs_created);
+            usage.analyzed_threads = usage.analyzed_threads.saturating_add(analyzed_threads);
+            usage.ai_audited_threads = usage.ai_audited_threads.saturating_add(ai_audited_threads);
+            usage.updated_at = Utc::now();
+            if self
+                .put_if_current(&path, &usage, update_time.as_deref())
+                .await?
+            {
+                return Ok(());
+            }
+        }
+        Err(anyhow!(
+            "usage ledger changed concurrently after {USAGE_UPDATE_MAX_ATTEMPTS} attempts"
+        ))
     }
 
     async fn get_usage_ledger(

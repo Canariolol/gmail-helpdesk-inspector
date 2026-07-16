@@ -394,8 +394,9 @@ a API y la cookie se entrega bajo el origen con que navega la persona usuaria.
 - [x] Documentar qué tareas impiden escalar horizontalmente.
   - El rate limiter está en memoria por instancia (`Mutex<HashMap<...>>`), por
     lo que cada instancia tendría su propio cupo.
-  - Los contadores de uso hacen lectura, incremento y `upsert` sin una
-    precondición o transacción; dos instancias podrían perder incrementos.
+  - Los incrementos de uso usan una precondición Firestore y reintento; la
+    validación del cupo y la creación del análisis aún no forman una
+    transacción única.
   - Checkout, suscripción y webhook de billing todavía encadenan lecturas y
     escrituras independientes; sus carreras se resolverán al retomar pagos.
   - El claim del scheduler **no** es ya un bloqueo: Firestore usa
@@ -1027,7 +1028,13 @@ siguen pendientes.
 
 - [x] Identificar operaciones read-modify-write.
   - Evidencia: `docs/firestore-concurrency-audit.md` inventaría scheduler, configuración, runs, Gmail, sesiones y lookup de cuentas sin mezclar el flujo de pagos diferido.
-- [ ] Proteger contadores de uso.
+- [x] Proteger contadores de uso contra incrementos perdidos.
+  - `add_usage` aplica el delta con `currentDocument.updateTime` o
+    `currentDocument.exists=false`, y reintenta hasta tres veces. Cubre los
+    análisis creados, hilos analizados y auditorías IA; la prueba concurrente
+    de `MemoryStorage` verifica que ambos deltas se conservan.
+  - La reserva atómica de cupo junto con la creación del análisis sigue
+    pendiente antes de aumentar la concurrencia o el número de instancias.
 - [x] Proteger claims del scheduler.
   - `scheduleStates/{email}` se crea con `currentDocument.exists=false` o se reemplaza con la precondición `currentDocument.updateTime`; tras tres conflictos se aborta sin ejecutar el análisis duplicado.
   - Verificado localmente con 159 pruebas Rust, 10 del worker, Clippy y build web; falta el escenario de dos instancias desplegadas.
@@ -1386,7 +1393,9 @@ Prioridad: **P0**
 - [ ] Tests de borrado de cuenta.
 - [ ] Tests de retención.
 - [x] Tests de sanitización de errores.
-- [ ] Tests de concurrencia de usage ledger.
+- [x] Tests de concurrencia de usage ledger.
+  - `storage::tests::usage_additions_do_not_lose_concurrent_updates` cubre dos
+    incrementos concurrentes y verifica los tres contadores resultantes.
 
 ## 14.4 E2E mínimo
 
