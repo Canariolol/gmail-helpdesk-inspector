@@ -2399,3 +2399,26 @@ eliminar la candidata sin afectar usuarios.
 crear análisis, scheduler y borrado contra la candidata PostgreSQL, además de
 documentar el rollback exacto a Firestore. No se promoverá tráfico ni se
 activará `APP_ENV=production` mientras pagos siga diferido.
+
+## 2026-07-16 — Runbook de cutover y rollback PostgreSQL
+
+**Estado:** terminado y documentado; no se cambió tráfico.
+
+**Qué se hizo:** se creó `docs/postgres-cutover-runbook.md` con
+precondiciones, promoción controlada, rollback por revisión de Cloud Run y
+estado posterior. El runbook exige capturar la revisión Firestore antes del
+cambio y conserva ambas bases ante un incidente.
+
+**Motivo:** no se implementó dual-write a propósito. Cuando haya usuarios con
+escrituras, devolver tráfico a Firestore sin congelar entradas puede dejar
+datos nuevos sólo en PostgreSQL. Declarar esa condición evita un rollback que
+parezca seguro pero pierda datos.
+
+**Evidencia:** el runbook incluye los comandos no destructivos de promoción y
+rollback, exige la copia idempotente inmediatamente previa y condiciona el
+rollback a que no haya escrituras nuevas sin reconciliar.
+
+**Qué sigue:** realizar las pruebas funcionales autenticadas contra la
+candidata PostgreSQL y, antes de un lanzamiento con usuarios, añadir una
+ventana de escritura congelada. La revisión activa continúa en Firestore al
+100%; pagos, checkout y webhooks siguen diferidos.

@@ -1213,7 +1213,10 @@ habilitará acceso directo del frontend a tablas de negocio ni Supabase Auth.
 - [ ] Probar en candidata con una copia de datos, sin tráfico de usuarios.
 - [ ] Definir una ventana breve de escritura congelada para el cutover; no se
   aplicará dual-write, para no introducir dos fuentes de verdad.
-- [ ] Documentar rollback a Firestore antes de mover tráfico.
+- [x] Documentar rollback a Firestore antes de mover tráfico.
+  - `docs/postgres-cutover-runbook.md` exige ventana de escritura congelada
+    cuando existan usuarios, registra la revisión previa y prohíbe declarar un
+    rollback seguro si PostgreSQL recibió escrituras sin reconciliar.
 - [x] Mover primero una candidata de API a PostgreSQL sin tráfico.
   - Evidencia 2026-07-16: `ghmi-api-00036-yad`, tag `postgres`, arrancó con
     `APP_STORAGE=postgres`, la identidad dedicada y
