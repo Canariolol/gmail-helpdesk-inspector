@@ -2573,3 +2573,22 @@ instantáneas de 6.284 registros.
 **Qué sigue:** completar los smoke tests autenticados después de autorizar el
 callback Google y, antes de mover tráfico, definir la ventana de escritura
 congelada. Pagos siguen diferidos.
+
+## 2026-07-16 — Presupuesto Supabase auditado sin cambio de facturación
+
+**Estado:** verificación parcial terminada; la decisión de presupuesto sigue
+pendiente de la persona responsable.
+
+**Qué se hizo:** se consultó la Management API de Supabase sólo en lectura. El
+proyecto Mira está sano y no tiene add-ons de billing seleccionados. La
+respuesta de proyecto no incluye un plan ni una suscripción verificable.
+
+**Motivo:** antes de un cutover no se debe asumir que la continuidad de la base
+queda cubierta por un plan gratuito ni habilitar cobros sin autorización.
+
+**Evidencia:** `ACTIVE_HEALTHY` en `us-east-2`; `selected_addons=[]`; no se
+crearon add-ons, no se cambió el proyecto y no se expusieron credenciales.
+
+**Qué sigue:** decidir explícitamente si el lanzamiento acepta las condiciones
+del plan actual o si se autoriza un presupuesto para continuidad. La migración
+técnica y los smoke tests Google siguen su curso; pagos permanecen diferidos.

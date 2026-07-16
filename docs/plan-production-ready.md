@@ -1166,6 +1166,11 @@ habilitará acceso directo del frontend a tablas de negocio ni Supabase Auth.
     conexión por request y permite las sentencias preparadas de SQLx.
 - [ ] Confirmar presupuesto/plan de Supabase apto para producción antes del
   cutover. El plan gratuito no será la única medida de continuidad de datos.
+  - Verificación 2026-07-16: el proyecto está `ACTIVE_HEALTHY` y el endpoint
+    de billing no informa add-ons seleccionados, pero no expone un plan o una
+    suscripción que permita certificar continuidad. Requiere decisión explícita
+    de presupuesto de la persona responsable; no se hizo ningún cambio de
+    facturación.
 
 ## 10.2 Implementación del backend PostgreSQL
 
