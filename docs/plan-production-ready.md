@@ -1044,32 +1044,35 @@ siguen pendientes.
 
 ## 9.2 Permisos
 
-- [ ] Revisar permisos de la service account.
+- [x] Revisar permisos de la service account.
 - [ ] Mantener mínimo privilegio.
 - [ ] Evitar roles Owner/Editor.
 - [ ] Confirmar que web y worker no acceden directamente a Firestore.
 - [ ] Separar service accounts por servicio cuando sea útil.
 - [ ] Revisar acceso humano al proyecto.
 - [ ] Activar MFA para cuentas administrativas.
-- [ ] Revisar claves de service account.
+- [x] Revisar claves de service account.
 - [ ] Evitar claves persistentes en producción.
 
 ### Auditoría de identidades — 2026-07-16
 
-- `ghmi-api` y `ghmi-ai-worker` usan hoy
+- `ghmi-api` y `ghmi-ai-worker` con tráfico usan
   `ghmi-runtime@...`; esa identidad tiene `roles/datastore.user` y
-  `roles/secretmanager.secretAccessor`. El worker no contiene cliente
-  Firestore, pero conserva el permiso por compartir identidad con API.
-- `ghmi-web` usa la identidad Compute Engine por defecto y no se observó un
-  rol Firestore para ella. Su código sólo menciona Firestore en copy de ayuda y
-  privacidad.
-- Existe `ghmi-firestore@...` con `roles/datastore.user`, pero no está asignada
-  a un servicio Cloud Run. Tiene una clave `USER_MANAGED` activa creada el
-  2026-06-12; la API desplegada no selecciona
-  `GOOGLE_APPLICATION_CREDENTIALS`, por lo que usa metadata server.
-- Antes del deploy candidato: asignar `ghmi-firestore` a API, concederle sólo
-  los secretos que requiera, retirar `datastore.user` de `ghmi-runtime` y
-  migrar/revocar su clave persistente tras confirmar el uso local.
+  `roles/secretmanager.secretAccessor`. El código del worker no contiene
+  cliente Firestore, pero conserva el permiso por compartir identidad con API.
+- `ghmi-web` con tráfico usa la identidad Compute Engine por defecto, que sí
+  tiene `roles/editor`; no se considera mínimo privilegio.
+- Las candidatas sin tráfico ya separan esos roles: `ghmi-web-00021-qod` usa
+  `ghmi-web-runtime` sin roles de proyecto y devuelve HTTP 200;
+  `ghmi-ai-worker-00011-fom` usa `ghmi-worker-runtime`, sin roles de proyecto
+  y con acceso a nivel de recurso sólo a `bedrock-token`. Ambas están `Ready`
+  y con 0% de tráfico.
+- Las identidades nuevas no tienen claves `USER_MANAGED`. La invocación
+  privada API→worker sigue autorizada para `ghmi-runtime`.
+- Existe `ghmi-firestore@...` con `roles/datastore.user` y una clave
+  `USER_MANAGED` activa. No está asignada a Cloud Run, pero su credencial está
+  en `secrets/gcp-service-account.json` para desarrollo local. No revocarla ni
+  reutilizarla en producción hasta decidir su reemplazo local y la rotación.
 
 ## 9.3 Integridad y concurrencia
 

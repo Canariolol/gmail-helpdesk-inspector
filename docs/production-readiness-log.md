@@ -2,6 +2,42 @@
 
 Este registro acompaña a `plan-production-ready.md`: solo se anota trabajo terminado con evidencia. Los pagos permanecen diferidos hasta resolver su problema actual.
 
+## 2026-07-16 — Candidatas de mínimo privilegio para web y worker
+
+**Estado:** candidatas terminadas y verificadas; promoción y una clave local
+persistente siguen pendientes.
+
+**Qué se hizo:**
+
+- Se auditó Cloud Run e IAM. La web activa usaba la cuenta Compute por defecto
+  con `roles/editor`; API y worker compartían la cuenta con acceso Firestore.
+- Se creó `ghmi-web-runtime` sin roles de proyecto y
+  `ghmi-worker-runtime` sin roles de proyecto, con acceso de secreto limitado
+  al recurso `bedrock-token`.
+- Se desplegaron sin tráfico `ghmi-web-00021-qod` y
+  `ghmi-ai-worker-00011-fom`. Ambas están `Ready`; la web candidata respondió
+  HTTP 200. La cuenta de API ya mantiene su permiso de invocación al worker.
+
+**Motivo:** la web no necesita permisos GCP y el worker no usa Firestore.
+Separar sus identidades reduce el impacto de una vulneración sin modificar los
+flujos activos.
+
+**Evidencia:**
+
+- Las dos cuentas nuevas no tienen roles de proyecto ni claves
+  `USER_MANAGED`.
+- Cloud Run conserva 100% del tráfico en `ghmi-web-00020-kdd` y
+  `ghmi-ai-worker-00010-456`; las candidatas sólo tienen tag `candidate`.
+- La búsqueda estática no encontró uso de Firestore ni credenciales GCP en web
+  o worker.
+
+**Qué sigue:** promover las candidatas junto a la revisión API comprobada,
+después de completar Google OAuth y los smoke tests. Sigue una decisión
+externa: `secrets/gcp-service-account.json` usa la clave persistente de
+`ghmi-firestore` para desarrollo local. Antes de revocarla hay que decidir si
+desarrollo local migrará a credenciales ADC o a una cuenta dev nueva; no se
+debe borrar la clave actual hasta entonces.
+
 ## 2026-07-16 — Auditoría de secretos de API sin exposición
 
 **Estado:** controles verificables terminados; las rotaciones con impacto
