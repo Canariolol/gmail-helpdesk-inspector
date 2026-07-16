@@ -2471,3 +2471,36 @@ conteo de cierre detecta claves duplicadas u omisiones antes de un cutover.
 **Qué sigue:** esperar el conteo automático de cierre, contrastarlo con
 Firestore y repetir la instantánea una vez. Sólo entonces se corregirán los
 conteos históricos de esta bitácora y se marcará la validación de datos.
+
+## 2026-07-16 — Instantánea Firestore → PostgreSQL validada dos veces
+
+**Estado:** terminado y validado sobre la base Supabase candidata. Firestore
+continúa siendo la fuente activa y no se cambió tráfico.
+
+**Qué se hizo:** se ejecutó dos veces la importación explícita fuera de
+producción. Cada pasada reemplazó sólo `mira.records`, importó el histórico
+completo y terminó con el mismo total de 6.284 registros. Se verificaron las
+relaciones que consume la aplicación entre runs, threads, mensajes,
+auditorías y revisiones manuales.
+
+**Motivo:** la anotación anterior de 2 runs, 31 threads, 125 mensajes y 28
+auditorías era una copia parcial y no podía usarse como evidencia de cutover.
+La segunda instantánea estable y la ausencia de referencias huérfanas dan una
+base reproducible para probar el runtime PostgreSQL.
+
+**Evidencia:**
+
+- Conteos de ambas pasadas: 4 cuentas, 49 sesiones, 1 conexión Gmail, 2
+  configuraciones de scheduler, 59 runs, 1.235 threads, 4.092 mensajes, 762
+  auditorías, 75 revisiones manuales, 1 suscripción, 2 usage ledgers y 6.284
+  registros totales.
+- Las comprobaciones `threads_without_run`, `messages_without_thread`,
+  `audits_without_thread` y `reviews_without_thread` devolvieron `0`.
+- Cloud Run conserva `ghmi-api-00031-6lx` en 100% de tráfico; las revisiones
+  `candidate` y `postgres` siguen sin tráfico.
+
+**Qué sigue:** completar una sesión real y los flujos Gmail, análisis,
+scheduler, borrado y auditoría contra la candidata PostgreSQL. Para Gmail aún
+se requiere que el cliente OAuth de Google acepte exactamente
+`https://mira.ninfasolutions.com/gmail/connect/callback`; pagos continúan
+diferidos.

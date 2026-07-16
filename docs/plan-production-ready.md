@@ -1198,23 +1198,31 @@ habilitará acceso directo del frontend a tablas de negocio ni Supabase Auth.
 
 ## 10.3 Migración y cutover
 
-- [ ] Inventariar conteos y entidades de Firestore antes de copiar datos.
+- [x] Inventariar conteos y entidades de Firestore antes de copiar datos.
+  - Evidencia 2026-07-16: la instantánea validada conserva 4 cuentas, 49
+    sesiones, 1 conexión Gmail, 2 configuraciones de scheduler, 59 runs,
+    1.235 threads, 4.092 mensajes, 762 auditorías y 75 revisiones manuales.
 - [x] Crear exportador Firestore e importador PostgreSQL de instantánea.
   - `MIGRATE_FIRESTORE_TO_POSTGRES=true` sólo se permite fuera de
     `APP_ENV=production`, nunca escribe en Firestore y reemplaza el destino
     candidato completo. Conserva las claves de origen y aborta si el total
     PostgreSQL no coincide con el total importado.
-- [ ] Validar una instantánea completa por conteos, segunda ejecución y datos
-  de muestra.
+- [x] Validar una instantánea completa por conteos, segunda ejecución y
+  referencias.
   - Corrección 2026-07-16: los conteos antes anotados (2 runs, 31 threads,
     125 mensajes y 28 auditorías) eran una copia parcial y no constituyen la
-    aceptación de la migración. La ejecución completa en candidata está en
-    curso; se anotarán sus conteos reales al finalizar.
+    aceptación de la migración.
+  - Dos instantáneas consecutivas terminaron con 6.284 registros. Las cuatro
+    comprobaciones de relación run/thread/message/audit/manual review
+    devolvieron cero huérfanos.
 - [x] Verificar que las migraciones de revisión manual v1/v2 estén aplicadas
   en Firestore antes de importar.
   - El importador aborta antes de escribir si falta cualquiera de los dos
     marcadores; PostgreSQL no las reejecuta.
-- [ ] Probar en candidata con una copia de datos, sin tráfico de usuarios.
+- [x] Cargar y validar la base candidata con una copia de datos, sin tráfico
+  de usuarios.
+  - La copia reemplazó sólo `mira.records` de Supabase; la revisión Firestore
+    `ghmi-api-00031-6lx` conserva 100% de tráfico.
 - [ ] Definir una ventana breve de escritura congelada para el cutover; no se
   aplicará dual-write, para no introducir dos fuentes de verdad.
 - [x] Documentar rollback a Firestore antes de mover tráfico.

@@ -17,8 +17,9 @@ las escrituras que hayan ocurrido sólo en PostgreSQL.
 
 ## Precondiciones para promover
 
-1. Ejecutar nuevamente la copia local idempotente desde Firestore y conservar
-   sus conteos por tipo.
+1. Ejecutar nuevamente la instantánea local desde Firestore y conservar sus
+   conteos por tipo. La operación reemplaza `mira.records`; sólo debe apuntar
+   al destino candidato sin escrituras de usuarios.
 2. Verificar que la candidata de PostgreSQL tenga `Ready=True`,
    `APP_STORAGE=postgres`, la service account
    `ghmi-api-postgres-runtime` y el secreto `mira-postgres-url`.
