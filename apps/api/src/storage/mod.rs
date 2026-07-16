@@ -11,8 +11,8 @@ use tokio::sync::RwLock;
 
 use crate::{
     analysis::{
-        AiAuditResult, AnalysisRun, EmailMessage, EmailThread, ManualReview, ManualReviewOverride,
-        apply_manual_review_override, calculate_metrics, message_fingerprint,
+        AiAuditResult, AnalysisRun, AnalysisStatus, EmailMessage, EmailThread, ManualReview,
+        ManualReviewOverride, apply_manual_review_override, calculate_metrics, message_fingerprint,
         reconcile_legacy_thread_classification,
     },
     auth::UserSession,
@@ -149,6 +149,7 @@ pub trait StorageRepository: Send + Sync {
         period_key: &str,
     ) -> anyhow::Result<Option<UsageLedger>>;
     async fn create_analysis_run(&self, run: &AnalysisRun) -> anyhow::Result<()>;
+    async fn claim_pending_analysis_run(&self, id: &str) -> anyhow::Result<Option<AnalysisRun>>;
     async fn update_analysis_run(&self, run: &AnalysisRun) -> anyhow::Result<()>;
     async fn get_analysis_run(&self, id: &str) -> anyhow::Result<Option<AnalysisRun>>;
     async fn list_analysis_runs(&self, user_email: &str) -> anyhow::Result<Vec<AnalysisRun>>;
@@ -709,6 +710,19 @@ impl StorageRepository for MemoryStorage {
             .runs
             .insert(run.id.clone(), run.clone());
         Ok(())
+    }
+
+    async fn claim_pending_analysis_run(&self, id: &str) -> anyhow::Result<Option<AnalysisRun>> {
+        let mut inner = self.inner.write().await;
+        let Some(run) = inner.runs.get_mut(id) else {
+            return Ok(None);
+        };
+        if run.status != AnalysisStatus::Pending {
+            return Ok(None);
+        }
+        run.status = AnalysisStatus::Running;
+        run.progress_message = "Iniciando lectura de Gmail".to_string();
+        Ok(Some(run.clone()))
     }
 
     async fn update_analysis_run(&self, run: &AnalysisRun) -> anyhow::Result<()> {
@@ -1837,6 +1851,65 @@ mod tests {
         assert_eq!(usage.runs_created, 2);
         assert_eq!(usage.analyzed_threads, 18);
         assert_eq!(usage.ai_audited_threads, 8);
+    }
+
+    #[tokio::test]
+    async fn concurrent_start_claims_only_allow_one_analysis() {
+        let storage = MemoryStorage::default();
+        let now = Utc::now();
+        storage
+            .create_analysis_run(&AnalysisRun {
+                id: "run-1".to_string(),
+                user_email: "owner@example.com".to_string(),
+                org_id: Some("org-1".to_string()),
+                mailbox_id: None,
+                trigger_type: None,
+                policy_version_id: None,
+                policy_hash: None,
+                policy_snapshot: None,
+                gmail_scope_snapshot: vec![],
+                retention_expires_at: None,
+                data_minimization_mode: None,
+                config: AnalysisConfig {
+                    date_from: "2026-07-01".to_string(),
+                    date_to: "2026-07-01".to_string(),
+                    time_from: "00:00".to_string(),
+                    time_to: "23:59".to_string(),
+                    timezone: "America/Santiago".to_string(),
+                    internal_domains: vec![],
+                    ignored_senders: vec![],
+                    ignored_domains: vec![],
+                    ignored_keywords: vec![],
+                    include_labels: vec![],
+                    exclude_labels: vec![],
+                },
+                status: AnalysisStatus::Pending,
+                progress_message: "Listo para analizar".to_string(),
+                processed_threads: 0,
+                total_candidate_threads: 0,
+                metrics: AnalysisMetrics::default(),
+                created_at: now,
+                completed_at: None,
+                error_message: None,
+            })
+            .await
+            .unwrap();
+
+        let first = storage.clone();
+        let second = storage.clone();
+        let (first_result, second_result) = tokio::join!(
+            first.claim_pending_analysis_run("run-1"),
+            second.claim_pending_analysis_run("run-1"),
+        );
+        let claims = [first_result.unwrap(), second_result.unwrap()];
+        assert_eq!(claims.iter().filter(|claim| claim.is_some()).count(), 1);
+
+        let run = storage
+            .get_analysis_run("run-1")
+            .await
+            .unwrap()
+            .expect("analysis run expected");
+        assert_eq!(run.status, AnalysisStatus::Running);
     }
 
     #[tokio::test]

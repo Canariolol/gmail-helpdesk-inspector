@@ -1048,6 +1048,12 @@ siguen pendientes.
   - La sincronización de `scheduleConfigs` exige una `GmailConnection` activa; la preferencia queda guardada para una reconexión válida. La protección de conflictos generales de configuración sigue pendiente.
 - [x] Evitar que un refresh Gmail tardío restaure una conexión revocada.
   - El refresh compara la conexión leída con la actual y, en Firestore, su `updateTime`; si cambia, cancela el tick sin reescribir tokens.
+- [x] Evitar inicios duplicados del mismo análisis.
+  - `claim_pending_analysis_run` cambia `Pending` a `Running` sólo si el
+    documento conserva el `currentDocument.updateTime`; quien pierde la
+    carrera recibe conflicto y no crea una segunda tarea en segundo plano.
+  - La prueba concurrente de `MemoryStorage` demuestra un único claim; falta
+    validarlo contra Firestore desplegado.
 - [ ] Proteger actualización de suscripciones.
 - [ ] Proteger creación de checkout.
 - [ ] Usar transacciones/precondiciones donde corresponda.

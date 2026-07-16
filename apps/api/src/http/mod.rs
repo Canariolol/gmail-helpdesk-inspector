@@ -2263,7 +2263,7 @@ async fn start_analysis_run(
         .get_gmail_connection(&session.google_account_email)
         .await?;
     require_gmail_connected(connection.as_ref())?;
-    let mut run = require_owned_run(&state, &id, &session).await?;
+    let run = require_owned_run(&state, &id, &session).await?;
     if run.status != AnalysisStatus::Pending {
         return Err(ApiError::conflict(
             "el análisis solo puede iniciarse cuando está pendiente",
@@ -2276,9 +2276,13 @@ async fn start_analysis_run(
         state.config.rate_limit.analysis_start_per_hour,
     )
     .await?;
-    run.status = AnalysisStatus::Running;
-    run.progress_message = "Iniciando lectura de Gmail".to_string();
-    state.storage.update_analysis_run(&run).await?;
+    let run = state
+        .storage
+        .claim_pending_analysis_run(&run.id)
+        .await?
+        .ok_or_else(|| {
+            ApiError::conflict("el análisis solo puede iniciarse cuando está pendiente")
+        })?;
 
     let access_token = decrypt_token(
         &gmail_access_token(connection.as_ref())?,

@@ -16,8 +16,8 @@ use uuid::Uuid;
 
 use crate::{
     analysis::{
-        AiAuditResult, AnalysisRun, EmailMessage, EmailThread, ManualReview, ManualReviewOverride,
-        apply_manual_review_override, calculate_metrics, message_fingerprint,
+        AiAuditResult, AnalysisRun, AnalysisStatus, EmailMessage, EmailThread, ManualReview,
+        ManualReviewOverride, apply_manual_review_override, calculate_metrics, message_fingerprint,
         reconcile_legacy_thread_classification,
     },
     auth::UserSession,
@@ -38,6 +38,7 @@ const MANUAL_REVIEW_INHERITANCE_MIGRATION_PATH: &str =
     "systemMigrations/manual-review-inheritance-v2";
 const SCHEDULE_CLAIM_MAX_ATTEMPTS: usize = 3;
 const USAGE_UPDATE_MAX_ATTEMPTS: usize = 3;
+const ANALYSIS_START_CLAIM_MAX_ATTEMPTS: usize = 3;
 
 pub struct FirestoreStorage {
     client: Client,
@@ -786,6 +787,28 @@ impl StorageRepository for FirestoreStorage {
 
     async fn create_analysis_run(&self, run: &AnalysisRun) -> anyhow::Result<()> {
         self.put(&format!("analysisRuns/{}", run.id), run).await
+    }
+
+    async fn claim_pending_analysis_run(&self, id: &str) -> anyhow::Result<Option<AnalysisRun>> {
+        let path = format!("analysisRuns/{id}");
+        for _ in 0..ANALYSIS_START_CLAIM_MAX_ATTEMPTS {
+            let Some((mut run, update_time)) =
+                self.get_with_update_time::<AnalysisRun>(&path).await?
+            else {
+                return Ok(None);
+            };
+            if run.status != AnalysisStatus::Pending {
+                return Ok(None);
+            }
+            run.status = AnalysisStatus::Running;
+            run.progress_message = "Iniciando lectura de Gmail".to_string();
+            if self.put_if_current(&path, &run, Some(&update_time)).await? {
+                return Ok(Some(run));
+            }
+        }
+        Err(anyhow!(
+            "analysis start claim changed concurrently after {ANALYSIS_START_CLAIM_MAX_ATTEMPTS} attempts"
+        ))
     }
 
     async fn update_analysis_run(&self, run: &AnalysisRun) -> anyhow::Result<()> {

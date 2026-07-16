@@ -1975,3 +1975,30 @@ actualicen análisis y observar los contadores y estados en Firestore. No se
 reduce la concurrencia a 1 de forma automática: el scheduler externo puede
 mantener una request de análisis activa por un tiempo prolongado. Pagos no se
 modificaron.
+
+## 2026-07-16 — Inicio de análisis protegido contra doble ejecución
+
+**Estado:** terminado y verificado localmente; prueba Firestore desplegada
+pendiente.
+
+**Qué se hizo:** se añadió un claim atómico para iniciar un análisis. El
+repositorio sólo cambia un run de `Pending` a `Running` si la versión de
+Firestore que leyó sigue vigente; al perder la carrera, la segunda solicitud
+recibe un conflicto y no inicia otra tarea en segundo plano. El almacenamiento
+en memoria aplica la misma transición bajo su lock.
+
+**Motivo:** Cloud Run permite 80 requests simultáneas por instancia. Dos clics
+o reintentos casi simultáneos podían observar el estado pendiente y lanzar dos
+análisis para la misma solicitud.
+
+**Evidencia:**
+
+- `cargo test --manifest-path apps/api/Cargo.toml concurrent_start_claims_only_allow_one_analysis` — aprobado.
+- La prueba dispara dos claims concurrentes y verifica un único ganador y el
+  estado final `Running`.
+- Formato, Clippy y `git diff --check` — aprobados.
+
+**Qué sigue:** ejecutar el mismo caso contra Firestore desde la revisión
+candidata y conservar `maxScale=1` hasta medirlo. Las actualizaciones de
+progreso/estado terminal aún requieren revisión antes de escalar. No se
+modificaron checkout, suscripciones ni webhooks de Mercado Pago.
