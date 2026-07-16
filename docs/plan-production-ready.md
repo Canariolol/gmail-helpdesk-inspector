@@ -1245,6 +1245,11 @@ habilitará acceso directo del frontend a tablas de negocio ni Supabase Auth.
 
 ## 10.4 Modelo relacional inicial esperado
 
+El backend actual usa `mira.records` como capa privada compatible con el
+contrato existente. Normalizar tablas no es un gate adicional para este
+cutover: se hará por entidad sólo cuando una consulta medida requiera relaciones
+o índices que el modelo actual no cubra.
+
 - [ ] `accounts`
 - [ ] `organizations`
 - [ ] `memberships`
@@ -1948,8 +1953,8 @@ Prioridad: **P1**
 - [ ] Retención automática.
 - [ ] OpenTelemetry.
 - [ ] Grafana Cloud si se justifica.
-- [ ] Evaluación formal Firestore vs Supabase.
-- [ ] Migración a Postgres si el beneficio ya es concreto.
+- [ ] Normalización selectiva de entidades PostgreSQL si una consulta medida lo
+  requiere.
 - [ ] Escalado multi-instancia.
 - [ ] Rate limiting distribuido.
 - [ ] Conexión multiproveedor.
@@ -1981,7 +1986,7 @@ Usar esta tabla para mantener una visión ejecutiva:
 | Hardening contenedores | P1 | En progreso |  | Builds Docker, salud y UID no-root de API/worker/web | Runtime separado, lockfile y usuarios no-root; faltan CSP, escaneo y límites operativos. |
 | Retención automática | P1 | Pendiente |  |  |  |
 | OpenTelemetry/Grafana | P2 | Pendiente |  |  |  |
-| Migración Supabase | P2 | Pendiente |  |  |  |
+| Migración Supabase | P0 | Candidata validada |  | Dos instantáneas de 6.284 registros y `ghmi-api-00036-yad` sin tráfico | Falta sesión real, Gmail y cutover controlado; Firestore sigue activo. |
 | Multiproveedor | P3 | Planificado |  | `docs/plan-conexion-multiproveedor.md` |  |
 
 ---
@@ -2060,7 +2065,6 @@ No requiere todavía:
 - Loki/Prometheus/Grafana autohospedados.
 - SOC 2 o ISO 27001.
 - Panel admin sofisticado.
-- Supabase.
 - Multiproveedor.
 - Escalado horizontal.
 

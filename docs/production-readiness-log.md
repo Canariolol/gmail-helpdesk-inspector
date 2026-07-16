@@ -2552,3 +2552,24 @@ conexión PostgreSQL antes de afectar sesiones reales o mover tráfico.
 prueba y completar login/Gmail en la candidata después de registrar el callback
 Google. La rotación de `WORKOS_COOKIE_SECRET` requiere autorización explícita
 porque invalida las sesiones actuales; pagos continúan diferidos.
+
+## 2026-07-16 — Plan de migración coherente con el estado candidato
+
+**Estado:** documentación terminada; no se modificaron datos ni servicios.
+
+**Qué se hizo:** el registro ejecutivo ahora clasifica Supabase como P0 con
+candidata validada, se eliminó la migración duplicada de la fase posterior y
+se dejó explícito que la normalización de tablas se realizará sólo cuando una
+consulta medida la requiera.
+
+**Motivo:** el plan aún mostraba Supabase como P2 pendiente y como una decisión
+futura, contradiciendo la migración ya acordada y las dos instantáneas
+verificadas. Mantener esa contradicción puede retrasar o confundir el cutover.
+
+**Evidencia:** el backend usa el schema privado `mira`, la candidata
+`ghmi-api-00036-yad` está lista sin tráfico y la bitácora registra las dos
+instantáneas de 6.284 registros.
+
+**Qué sigue:** completar los smoke tests autenticados después de autorizar el
+callback Google y, antes de mover tráfico, definir la ventana de escritura
+congelada. Pagos siguen diferidos.
