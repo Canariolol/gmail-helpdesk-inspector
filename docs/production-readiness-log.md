@@ -2527,3 +2527,28 @@ aprobó.
 autorizar exactamente `https://mira.ninfasolutions.com/gmail/connect/callback`.
 Después se actualizará `GOOGLE_REDIRECT_URL` en una nueva candidata y se
 probará la conexión Gmail; pagos permanecen diferidos.
+
+## 2026-07-16 — Webhook WorkOS firmado en candidata PostgreSQL
+
+**Estado:** smoke sintético terminado y verificado en la candidata sin
+tráfico. No sustituye una entrega real generada por WorkOS.
+
+**Qué se hizo:** se envió un evento `session.revoked` con un identificador de
+prueba inexistente y una firma HMAC generada en memoria desde el mismo secreto
+de Secret Manager que consume `ghmi-api-00036-yad`. La candidata respondió 204
+y Cloud Logging registró `operation=workos_webhook` con el tipo de evento.
+
+**Motivo:** comprobar la ruta pública, la firma production, el handler y la
+conexión PostgreSQL antes de afectar sesiones reales o mover tráfico.
+
+**Evidencia:**
+
+- HTTP 204 en `/auth/workos/webhook` de la candidata PostgreSQL.
+- Log estructurado de `workos_webhook` y request correlacionado, sin payload ni
+  firma expuestos.
+- La consulta PostgreSQL confirmó cero sesiones con el identificador de prueba.
+
+**Qué sigue:** observar una entrega real de WorkOS al revocar una sesión de
+prueba y completar login/Gmail en la candidata después de registrar el callback
+Google. La rotación de `WORKOS_COOKIE_SECRET` requiere autorización explícita
+porque invalida las sesiones actuales; pagos continúan diferidos.

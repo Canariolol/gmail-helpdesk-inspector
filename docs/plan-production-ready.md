@@ -355,8 +355,9 @@ Prioridad: **P0**
     `https://ghmi-api-io54uhmrxa-uc.a.run.app/auth/workos/webhook`, sólo para
     `session.revoked` y `user.deleted`; su firma coincide con
     `workos-production-webhook-secret` en Secret Manager.
-  - La candidata `ghmi-api-00033-xut` usa ese secreto; falta enviar un evento
-    firmado de prueba. La revisión con tráfico no se modificó.
+  - La candidata PostgreSQL `ghmi-api-00036-yad` aceptó un evento sintético
+    firmado con HTTP 204 y registró `operation=workos_webhook`; no había una
+    sesión con el ID de prueba. Aún falta observar una entrega real de WorkOS.
 - [x] Confirmar `APP_ENCRYPTION_KEY` fuerte.
 - [x] Confirmar `APP_SESSION_SECRET` fuerte.
 - [x] Confirmar `GOOGLE_CLIENT_SECRET` en Secret Manager.
@@ -1966,7 +1967,7 @@ Usar esta tabla para mantener una visión ejecutiva:
 | Configuración de entornos | P0 | En progreso |  | Cloudflare: DNS delegado; mapping Cloud Run listo; callbacks y webhook WorkOS production registrados (2026-07-16) | Certificado HTTPS provisionado; falta callback Google OAuth, enlazar las credenciales WorkOS production y deploy candidato. |
 | Configuración production | P0 | Listo local |  | `scripts/check-all.sh` — 161 Rust, 10 worker | La validación acepta callbacks HTTPS del origen API o web/proxy y exige secreto de webhook WorkOS; `APP_ENV=production` sigue pendiente de autorización, secretos y pagos. |
 | Sesiones y logout | P0 | Listo local |  | `scripts/check-all.sh` — 161 Rust, 10 worker | Expiración absoluta 30 días, logout individual/global revocable, atributos seguros de cookies y revocación WorkOS de nuevas sesiones; falta smoke test desplegado. |
-| Ciclo de vida WorkOS | P0 | En progreso |  | Webhook production y `workos-production-webhook-secret` verificados (2026-07-16) | La revisión con tráfico conserva staging; falta candidata con credenciales production, prueba firmada y rotación de cookie. |
+| Ciclo de vida WorkOS | P0 | En progreso |  | Webhook production y smoke firmado en `ghmi-api-00036-yad` (2026-07-16) | La revisión con tráfico conserva staging; faltan login/entrega real y rotación de cookie. |
 | Sanitización de errores | P0 | En progreso |  | `scripts/check-all.sh` — 161 Rust, 10 worker | API tiene catálogo público, no enumera análisis ajenos y propaga `request_id`; falta validar el flujo desplegado. |
 | Desconexión Gmail | P0 | Listo local |  | `scripts/check-all.sh` — 161 Rust, 10 worker | Revocación Google, tokens borrados, scheduler desactivado y confirmación UI; falta prueba desplegada. |
 | Borrado de datos | P0 | En progreso |  | `scripts/check-all.sh` — 161 Rust, 10 worker | Borrado de todos los análisis disponible, auditado sin PII y con señal de fallo; falta borrado de cuenta y prueba Firestore real. |
