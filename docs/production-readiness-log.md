@@ -1897,3 +1897,28 @@ conocimiento técnico.
 terminar la revisión editorial de landing, precios, términos y privacidad con
 la información legal del responsable. No se modificaron checkout, Mercado Pago
 ni sus webhooks.
+
+## 2026-07-16 — Cierre de estados y métricas técnicas visibles
+
+**Estado:** terminado y verificado localmente; los flujos de pago permanecen
+fuera de esta revisión.
+
+**Qué se hizo:** se completó la revisión estática de banners, modales y
+pantallas de la app autenticada. Se retiraron los tokens de IA de Ayuda y del
+reporte consolidado, y el número de llamadas al proveedor de IA del embudo.
+El embudo conserva la información útil: cuántos hilos se analizaron y cuántos
+requirieron revisión con IA.
+
+**Motivo:** esos valores describen coste o implementación interna, no una
+acción ni un resultado que el cliente pueda interpretar. Suprimirlos deja las
+pantallas enfocadas en cobertura y resultados del análisis.
+
+**Evidencia:**
+
+- Búsqueda estática de los campos y textos visibles en `apps/web/src`.
+- `npm --prefix apps/web run build` — aprobado.
+- `git diff --check` — aprobado.
+
+**Qué sigue:** validar login, OAuth, errores y análisis en la URL candidata
+una vez que se registren sus callbacks. Checkout y sus mensajes no se
+revisaron ni cambiaron debido al incidente de pagos diferido.

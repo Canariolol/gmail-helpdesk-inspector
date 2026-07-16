@@ -1,4 +1,4 @@
-import { Ban, Bot, CheckCheck, CheckCircle2, ClipboardList, Clock, HelpCircle, History, Mail, Reply, ShieldCheck, Timer } from "lucide-react";
+import { Ban, CheckCheck, CheckCircle2, ClipboardList, Clock, HelpCircle, History, Mail, Reply, ShieldCheck, Timer } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { AnalysisRun } from "../api/types";
 import { ReportTrendCharts } from "../components/charts/ReportTrendCharts";
@@ -6,7 +6,7 @@ import { EmptyState } from "../components/common/EmptyState";
 import { MetricCard } from "../components/common/MetricCard";
 import { RangeField } from "../components/filters/RangeField";
 import { aggregateRuns, buildTrendPoints, selectReportRuns } from "../lib/aggregate";
-import { formatDuration, formatNumber, formatPercent } from "../lib/format";
+import { formatDuration, formatPercent } from "../lib/format";
 
 type Props = {
   runs: AnalysisRun[];
@@ -74,7 +74,6 @@ export function ReportesView({ runs }: Props) {
             <MetricCard icon={ShieldCheck} label="Confianza ponderada" value={formatPercent(totals.reportConfidence)} tone="purple" />
             <MetricCard icon={Timer} label="T. medio respuesta" value={formatDuration(totals.avgFirstResponseMinutes)} tone="gray" />
             <MetricCard icon={CheckCheck} label="Cierre medio" value={formatDuration(totals.avgResolutionMinutes)} tone="gray" />
-            <MetricCard icon={Bot} label="Tokens IA (in · out)" value={`${formatNumber(totals.aiInputTokens)} · ${formatNumber(totals.aiOutputTokens)}`} tone="gray" />
           </div>
           {selectedRuns.length >= 2 ? (
             <ReportTrendCharts points={points} />

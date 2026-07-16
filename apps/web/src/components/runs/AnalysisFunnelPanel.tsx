@@ -32,7 +32,6 @@ export function AnalysisFunnelPanel({ run }: Props) {
   const aiBatch = funnel.ai_batch_classified ?? 0;
   const aiDetailed = funnel.ai_detailed_audited ?? 0;
   const aiUnique = funnel.ai_unique_threads ?? 0;
-  const aiCalls = funnel.ai_calls ?? 0;
   if (totalDropped === 0 && aiUnique === 0) return null;
 
   const candidates = run.total_candidate_threads;
@@ -51,7 +50,7 @@ export function AnalysisFunnelPanel({ run }: Props) {
           Embudo del análisis
         </span>
         <span className="funnel-subtitle">
-          Gmail encontró {candidates}; se analizaron {analyzed} y {aiUnique} se enviaron a IA en {aiCalls} llamadas.
+          Gmail encontró {candidates}; se analizaron {analyzed} y {aiUnique} requirieron revisión con IA.
         </span>
         <ChevronDown size={18} className={open ? "funnel-chevron open" : "funnel-chevron"} />
       </button>
@@ -73,7 +72,7 @@ export function AnalysisFunnelPanel({ run }: Props) {
               tone="tone-orange"
             />
             <FunnelStat icon={ListChecks} label="Analizados" value={analyzed} tone="tone-mint" />
-            <FunnelStat icon={Bot} label="Clasificados por lote" value={aiBatch} tone="tone-violet" />
+            <FunnelStat icon={Bot} label="Revisión inicial con IA" value={aiBatch} tone="tone-violet" />
             <FunnelStat
               icon={SearchCheck}
               label="Auditoría detallada"

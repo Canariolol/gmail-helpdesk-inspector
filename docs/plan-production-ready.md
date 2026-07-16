@@ -711,8 +711,14 @@ Para cada proveedor:
 - [x] Buscar `console.error`.
 - [x] Eliminar logs innecesarios de producción.
 - [x] No imprimir objetos de error completos.
-- [ ] Revisar mensajes visibles en banners y modales.
-- [ ] Traducir estados técnicos a lenguaje de usuario.
+- [x] Revisar mensajes visibles en banners y modales no financieros.
+  - Evidencia 2026-07-16: revisión estática de vistas y componentes de la app
+    autenticada; los errores siguen usando el contrato público de API. Los
+    mensajes y modales de checkout quedan diferidos junto con pagos.
+- [x] Traducir estados técnicos a lenguaje de usuario.
+  - Evidencia 2026-07-16: estados de análisis y ejecución programada se
+    traducen antes de renderizarse; se eliminaron IDs, categorías de error,
+    tokens de IA y conteos de llamadas al proveedor de la UI.
 - [ ] Revisar Network:
   - Login fallido.
   - Gmail OAuth fallido.

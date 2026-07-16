@@ -24,7 +24,7 @@ export function AyudaView() {
             crear e iniciar el análisis de la casilla.
           </li>
           <li>
-            <strong>Sigue el progreso.</strong> El banner muestra el avance (hilos procesados y tokens de IA consumidos).
+            <strong>Sigue el progreso.</strong> El banner muestra el avance y los hilos procesados.
             Las métricas y gráficos se actualizan automáticamente cada pocos segundos.
           </li>
           <li>
