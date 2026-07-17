@@ -2837,3 +2837,34 @@ tráfico y `/health` devolvió HTTP 200.
 con el mismo email, verificar el login y que conserve su configuración e
 historial. Cloud Scheduler permanece pausado hasta completar los smoke tests
 funcionales.
+
+## 2026-07-17 — Diagnóstico seguro de ejecución de análisis fallida
+
+**Estado:** instrumentación desplegada; causa puntual pendiente de una
+ejecución nueva.
+
+**Qué se hizo:** se verificó que la ejecución reportada inició y pasó a
+`Failed` sin persistir hilos. El `409` posterior se debe al claim atómico que
+sólo permite iniciar ejecuciones `Pending`, por lo que no se alteró ni reintentó
+ese registro. Se incorporaron etapas seguras al worker de análisis:
+`run_lookup`, `plan_lookup`, `usage_lookup`, `gmail_list_threads` e
+`initial_run_progress`. Ante un error sólo se registra esa etapa y se conserva
+el error público genérico, sin incluir token OAuth, dirección de correo,
+contenido de mensajes ni respuesta del proveedor. La revisión
+`ghmi-api-00042-79r` quedó con 100% de tráfico.
+
+**Motivo:** el registro anterior sólo informaba `analysis failed`; como no
+había hilos persistidos, no permitía distinguir con evidencia una consulta a
+Gmail de la preparación de plan/uso o del primer guardado de progreso. La nueva
+señal acota el diagnóstico sin degradar el límite de datos sensibles.
+
+**Evidencia:** `cargo test --manifest-path apps/api/Cargo.toml` aprobó 165
+pruebas, Clippy, build release, 10 pruebas del worker, auditoría de
+dependencias y build web aprobaron. `ghmi-api-00042-79r` quedó `Ready=True`,
+con `APP_STORAGE=postgres`, las variables esperadas sin exponer valores y
+`GET /health` devolvió HTTP 200.
+
+**Qué sigue:** crear una ejecución de análisis nueva e iniciarla una sola vez.
+Si falla, consultar el log por la etapa segura y corregir la capa concreta. La
+ejecución ya fallida se conserva como evidencia y Cloud Scheduler sigue
+pausado.

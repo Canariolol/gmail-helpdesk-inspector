@@ -577,6 +577,16 @@ consulta de solo lectura:
 - [ ] Probar checkout sandbox.
 - [ ] Probar recepción de webhook.
 - [ ] Probar creación y ejecución de análisis.
+  - Incidente 2026-07-17: una ejecución inició correctamente, falló antes de
+    persistir hilos y un nuevo `POST /start` devolvió 409. El 409 es el efecto
+    esperado del claim atómico: sólo permite pasar de `Pending` a `Running`, no
+    relanzar una ejecución `Failed`.
+  - Avance 2026-07-17: `ghmi-api-00042-79r` registra únicamente la etapa segura
+    del worker (`run_lookup`, `plan_lookup`, `usage_lookup`,
+    `gmail_list_threads` o `initial_run_progress`) al fallar, sin tokens,
+    direcciones ni contenido de correo. Está `Ready=True`, recibe 100% de
+    tráfico y `/health` devolvió 200. Falta crear una ejecución nueva para
+    conocer la causa concreta; no se modifica ni se reintenta la fallida.
 - [ ] Probar scheduler manualmente.
 - [ ] Enviar tráfico progresivamente.
   - 0% → pruebas internas.
@@ -1310,6 +1320,11 @@ habilitará acceso directo del frontend a tablas de negocio ni Supabase Auth.
     `https://mira.ninfasolutions.com/gmail/connect/callback`; la candidata
     vigente ya usa esa URI. Falta completar una sesión real y los flujos que
     escriben datos.
+  - Avance 2026-07-17: `ghmi-api-00042-79r` está `Ready=True`, conserva
+    `APP_STORAGE=postgres`, recibe 100% de tráfico y `/health` devolvió 200.
+    Se añadió observabilidad segura para el primer fallo de análisis detectado;
+    la validación funcional requiere una ejecución nueva, pues la original ya
+    quedó en estado `Failed` y no admite un segundo inicio.
 - [ ] Retirar Firestore del runtime sólo después de un periodo de observación y
   respaldo exportado.
 
