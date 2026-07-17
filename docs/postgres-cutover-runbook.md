@@ -10,10 +10,21 @@ No existe dual-write deliberadamente: dos fuentes de verdad harían más riesgos
 el cobro y la recuperación. Por lo tanto, el cambio de tráfico sólo se puede
 hacer cuando no haya escrituras de usuarios en curso.
 
-Hoy eso se cumple porque no hay usuarios externos ni cobros habilitados. Cuando
-existan, se debe implementar y anunciar una ventana breve de escritura
-congelada antes del paso de tráfico. Sin esa ventana, un rollback puede perder
-las escrituras que hayan ocurrido sólo en PostgreSQL.
+Para este cutover hay un tester recurrente, pero no usuarios externos ni cobros
+habilitados. La persona responsable autorizó una ventana breve de escritura
+congelada: pausar al tester, pausar Cloud Scheduler, esperar las requests en
+curso, ejecutar la instantánea final y sólo entonces cambiar tráfico. Sin esa
+ventana, un rollback puede perder las escrituras que hayan ocurrido sólo en
+PostgreSQL.
+
+No se ha activado todavía la ventana. Al iniciar el cambio, ejecutar:
+
+```bash
+gcloud scheduler jobs pause ghmi-daily-report --location us-central1
+```
+
+No reanudar el job hasta que la validación posterior sea satisfactoria o el
+tráfico haya vuelto a Firestore.
 
 ## Precondiciones para promover
 
@@ -33,8 +44,8 @@ las escrituras que hayan ocurrido sólo en PostgreSQL.
      --format='value(status.traffic[0].revisionName,status.traffic[0].percent)'
    ```
 
-5. Para un lanzamiento con usuarios, activar primero la ventana de escritura
-   congelada y repetir la copia inmediatamente antes de cambiar tráfico.
+5. Confirmar con el tester que no usará Mira durante el cambio, pausar Cloud
+   Scheduler y repetir la copia inmediatamente antes de cambiar tráfico.
 
 ## Promoción controlada
 
@@ -66,6 +77,12 @@ Confirmar que la revisión Firestore responde y conservar la revisión
 PostgreSQL en 0% para investigar. No borrar PostgreSQL ni Firestore durante el
 incidente. Si hubo escrituras PostgreSQL, exportarlas y reconciliarlas antes de
 informar que el rollback preservó los datos.
+
+Al terminar un rollback válido, reanudar el scheduler:
+
+```bash
+gcloud scheduler jobs resume ghmi-daily-report --location us-central1
+```
 
 ## Estado posterior estable
 

@@ -2592,3 +2592,29 @@ crearon add-ons, no se cambió el proyecto y no se expusieron credenciales.
 **Qué sigue:** decidir explícitamente si el lanzamiento acepta las condiciones
 del plan actual o si se autoriza un presupuesto para continuidad. La migración
 técnica y los smoke tests Google siguen su curso; pagos permanecen diferidos.
+
+## 2026-07-16 — Decisiones de cutover temprano aceptadas
+
+**Estado:** terminado en documentación; no se modificaron servicios, datos ni
+Secret Manager.
+
+**Qué se hizo:** la persona responsable aceptó Supabase Free para el
+lanzamiento temprano —sin usuarios externos ni cobros— y retiró el plan de
+Supabase como bloqueo de esta etapa. También autorizó una ventana breve de
+escritura congelada antes del corte: pausar al tester y Cloud Scheduler,
+esperar requests en curso, tomar la instantánea final y mover tráfico sólo
+después. Se dejó explícito que `mira.records` sigue siendo el modelo inicial;
+normalizar entidades se posterga hasta que una consulta real lo justifique.
+
+**Motivo:** el sistema es pequeño y todavía está en desarrollo. Introducir un
+plan de pago, una reescritura relacional completa o una migración de secretos
+en paralelo no mejora la validación del backend PostgreSQL y añadiría riesgo.
+
+**Evidencia:** decisión expresa de la persona responsable; el proyecto
+Supabase continúa `ACTIVE_HEALTHY`, no tiene add-ons seleccionados y conserva
+dos instantáneas verificadas de 6.284 registros.
+
+**Qué sigue:** crear una nueva revisión PostgreSQL sin tráfico con
+`GOOGLE_REDIRECT_URL=https://mira.ninfasolutions.com/gmail/connect/callback`,
+verificarla sin mover tráfico y completar los flujos funcionales autenticados.
+No se tocará Secret Manager en este avance; pagos continúan diferidos.

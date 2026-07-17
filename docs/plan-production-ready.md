@@ -344,9 +344,11 @@ Prioridad: **P0**
     recibir las credenciales production, se confirmó que allí no existía y se
     creó de nuevo con HTTP 201. Falta desplegar una revisión candidata antes de
     dirigir tráfico hacia ella.
-- [ ] Migrar y rotar `WORKOS_COOKIE_SECRET` hacia Secret Manager.
-  - La inspección de configuración 2026-07-15 detectó que aún está inyectada
-    como variable de texto plano; no registrar ni repetir su valor.
+- [-] Posponer la migración y rotación de `WORKOS_COOKIE_SECRET`.
+  - Decisión de la persona responsable 2026-07-16: no se harán cambios en
+    Secret Manager ni se invalidarán sesiones durante el cutover PostgreSQL.
+    Se retomará al definir una estrategia de secretos separada (por ejemplo,
+    Infisical) o al planificar una invalidación de sesiones.
 - [x] Configurar `WORKOS_WEBHOOK_SECRET` mediante Secret Manager y registrar el endpoint WorkOS.
   - Evidencia 2026-07-15: corresponde al entorno staging y permanece enlazado
     a la revisión activa de `ghmi-api`.
@@ -376,6 +378,9 @@ Prioridad: **P0**
 - Solo `WORKOS_API_KEY` y `WORKOS_COOKIE_SECRET` permanecen como valores
   literales en la revisión activa. La migración debe incluir una API key nueva
   emitida desde WorkOS y la rotación de la cookie cerrará las sesiones actuales.
+- La deuda de la cookie se acepta para este cutover temprano: no bloquea una
+  revisión candidata ni autoriza modificar Secret Manager. Debe reevaluarse
+  antes de ampliar el acceso de usuarios o cambiar la estrategia de secretos.
 - `scripts/check-secrets.sh` no detectó patrones de credenciales en archivos
   versionados; ese control es acotado y no sustituye la rotación ni una revisión
   humana de secretos.
@@ -481,7 +486,8 @@ consulta de solo lectura:
   y de pruebas firmadas con una cuenta desechable.
 - La misma consulta encontró `WORKOS_API_KEY` y `WORKOS_COOKIE_SECRET` como
   variables de texto plano. Deben rotarse y moverse a Secret Manager antes del
-  siguiente deploy; este plan no conserva sus valores.
+  siguiente despliegue de producción pagada; para el cutover temprano se
+  acepta explícitamente diferir esa rotación y no tocar Secret Manager.
 - Uptime checks y alertas permanecen diferidos por decisión operativa: una
   comprobación externa podría despertar una instancia sin tráfico. Antes del
   lanzamiento real se debe decidir su coste y volver a evaluar este punto.
@@ -1164,13 +1170,13 @@ habilitará acceso directo del frontend a tablas de negocio ni Supabase Auth.
   - La API usa el pooler TLS **de sesión** de Supabase (IPv4, puerto 5432) y
     un pool local máximo de cinco conexiones. Con `maxScale=1` evita abrir una
     conexión por request y permite las sentencias preparadas de SQLx.
-- [ ] Confirmar presupuesto/plan de Supabase apto para producción antes del
-  cutover. El plan gratuito no será la única medida de continuidad de datos.
-  - Verificación 2026-07-16: el proyecto está `ACTIVE_HEALTHY` y el endpoint
-    de billing no informa add-ons seleccionados, pero no expone un plan o una
-    suscripción que permita certificar continuidad. Requiere decisión explícita
-    de presupuesto de la persona responsable; no se hizo ningún cambio de
-    facturación.
+- [x] Aceptar el plan actual de Supabase para el lanzamiento temprano.
+  - Decisión de la persona responsable 2026-07-16: con cero usuarios externos
+    y sin cobros, Supabase Free es suficiente por ahora y no bloquea declarar
+    lista la infraestructura de esta etapa. Se reevaluará el plan al crecer el
+    uso o antes de asumir compromisos de continuidad mayores.
+  - Verificación previa: el proyecto está `ACTIVE_HEALTHY` y no tiene add-ons
+    seleccionados; no se hizo ningún cambio de facturación.
 
 ## 10.2 Implementación del backend PostgreSQL
 
@@ -1229,8 +1235,12 @@ habilitará acceso directo del frontend a tablas de negocio ni Supabase Auth.
   de usuarios.
   - La copia reemplazó sólo `mira.records` de Supabase; la revisión Firestore
     `ghmi-api-00031-6lx` conserva 100% de tráfico.
-- [ ] Definir una ventana breve de escritura congelada para el cutover; no se
+- [x] Definir una ventana breve de escritura congelada para el cutover; no se
   aplicará dual-write, para no introducir dos fuentes de verdad.
+  - Decisión 2026-07-16: antes de la promoción, la persona responsable pausa
+    al único tester y Cloud Scheduler, se espera que terminen las requests en
+    curso, se ejecuta la instantánea final y sólo entonces se mueve el tráfico.
+    Scheduler se reanuda después de validar PostgreSQL o de volver a Firestore.
 - [x] Documentar rollback a Firestore antes de mover tráfico.
   - `docs/postgres-cutover-runbook.md` exige ventana de escritura congelada
     cuando existan usuarios, registra la revisión previa y prohíbe declarar un
@@ -1244,7 +1254,10 @@ habilitará acceso directo del frontend a tablas de negocio ni Supabase Auth.
   scheduler, borrado y auditoría.
   - Avance 2026-07-16: `GET /auth/workos/login` de la candidata devolvió 307
     con callback público `https://mira.ninfasolutions.com/auth/workos/callback`.
-    Falta completar una sesión real y los flujos que escriben datos.
+    La persona responsable ya registró en Google el origen JavaScript y la URI
+    `https://mira.ninfasolutions.com/gmail/connect/callback`; falta desplegar
+    esa URI en la nueva candidata y completar una sesión real y los flujos que
+    escriben datos.
 - [ ] Retirar Firestore del runtime sólo después de un periodo de observación y
   respaldo exportado.
 
@@ -1254,6 +1267,10 @@ El backend actual usa `mira.records` como capa privada compatible con el
 contrato existente. Normalizar tablas no es un gate adicional para este
 cutover: se hará por entidad sólo cuando una consulta medida requiera relaciones
 o índices que el modelo actual no cubra.
+
+La persona responsable acepta este modelo inicial para producción temprana: no
+se reescribirá la persistencia como tablas por entidad hasta que una consulta o
+reporte real justifique la migración incremental.
 
 - [ ] `accounts`
 - [ ] `organizations`
