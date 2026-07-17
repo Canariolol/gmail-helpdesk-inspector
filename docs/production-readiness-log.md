@@ -2646,3 +2646,30 @@ final, promover temporalmente PostgreSQL y completar con el tester la conexión
 Gmail, análisis, scheduler, borrado y auditoría. Si falla antes de escrituras
 aceptadas, volver a Firestore con el runbook. Pagos y Secret Manager permanecen
 fuera de este avance.
+
+## 2026-07-16 — Instantánea final PostgreSQL validada durante el corte
+
+**Estado:** terminado; PostgreSQL sigue sin tráfico y Cloud Scheduler está
+pausado.
+
+**Qué se hizo:** se leyó la URL PostgreSQL existente sólo en memoria para la
+importación local, sin crear, rotar ni actualizar secretos. La primera
+ejecución local se solapó con una segunda tras un timeout de consola y dejó un
+destino parcial que nunca recibió tráfico; ambas ejecuciones se detuvieron. Se
+repitió una sola importación controlada desde Firestore y sustituyó por completo
+`mira.records`.
+
+**Motivo:** sin una instantánea final consistente no es seguro cambiar la
+fuente de verdad. Ejecutar una única copia con Scheduler pausado evita que una
+escritura programada quede fuera de la validación.
+
+**Evidencia:** el importador terminó con 6.284 registros: 4 cuentas, 49
+sesiones, 1 conexión Gmail, 2 configuraciones de scheduler, 59 runs, 1.235
+threads, 4.092 mensajes, 762 auditorías y 75 revisiones manuales. Las
+comprobaciones de threads sin run, mensajes/auditorías sin thread y revisiones
+sin thread devolvieron cero. `ghmi-api-00031-6lx` conserva 100% de tráfico
+Firestore.
+
+**Qué sigue:** promover la candidata PostgreSQL para realizar con el tester
+login, Gmail, análisis, scheduler, borrado y auditoría. Scheduler se reanuda
+sólo después de esa validación o de un rollback; pagos continúan diferidos.

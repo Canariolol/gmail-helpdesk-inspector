@@ -1243,6 +1243,10 @@ habilitará acceso directo del frontend a tablas de negocio ni Supabase Auth.
   de usuarios.
   - La copia reemplazó sólo `mira.records` de Supabase; la revisión Firestore
     `ghmi-api-00031-6lx` conserva 100% de tráfico.
+  - Instantánea final 2026-07-16: con Cloud Scheduler pausado, una única
+    importación controlada terminó con 6.284 registros: 59 runs, 1.235 threads,
+    4.092 mensajes, 762 auditorías y 75 revisiones manuales. Las relaciones
+    run/thread/message/audit/manual review no tienen huérfanos.
 - [x] Definir una ventana breve de escritura congelada para el cutover; no se
   aplicará dual-write, para no introducir dos fuentes de verdad.
   - Decisión 2026-07-16: antes de la promoción, la persona responsable pide
@@ -1250,6 +1254,8 @@ habilitará acceso directo del frontend a tablas de negocio ni Supabase Auth.
     que terminen las requests en curso, se ejecuta la instantánea final y sólo
     entonces se mueve el tráfico. Scheduler se reanuda después de validar
     PostgreSQL o de volver a Firestore.
+  - Avance 2026-07-16: Cloud Scheduler quedó `PAUSED` y la instantánea final
+    fue validada. No se ha movido tráfico todavía.
 - [x] Documentar rollback a Firestore antes de mover tráfico.
   - `docs/postgres-cutover-runbook.md` exige ventana de escritura congelada
     cuando existan usuarios, registra la revisión previa y prohíbe declarar un

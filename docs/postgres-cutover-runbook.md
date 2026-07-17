@@ -1,8 +1,9 @@
 # Cutover Firestore → PostgreSQL
 
-Estado al 2026-07-16: **no ejecutar todavía**. PostgreSQL ya tiene una copia
-validada y una candidata de Cloud Run sin tráfico. Firestore continúa siendo
-la fuente activa.
+Estado al 2026-07-16: **ventana de corte activa, promoción pendiente**.
+PostgreSQL tiene la instantánea final validada y una candidata de Cloud Run sin
+tráfico. Cloud Scheduler está pausado; Firestore continúa siendo la fuente
+activa hasta completar los smoke tests autenticados.
 
 ## Regla de consistencia
 
@@ -17,7 +18,7 @@ curso, ejecutar la instantánea final y sólo entonces cambiar tráfico. Sin esa
 ventana, un rollback puede perder las escrituras que hayan ocurrido sólo en
 PostgreSQL.
 
-No se ha activado todavía la ventana. Al iniciar el cambio, ejecutar:
+La ventana está activa y el job ya fue pausado con:
 
 ```bash
 gcloud scheduler jobs pause ghmi-daily-report --location us-central1
