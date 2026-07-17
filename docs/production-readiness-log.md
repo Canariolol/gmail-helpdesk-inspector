@@ -2618,3 +2618,30 @@ dos instantáneas verificadas de 6.284 registros.
 `GOOGLE_REDIRECT_URL=https://mira.ninfasolutions.com/gmail/connect/callback`,
 verificarla sin mover tráfico y completar los flujos funcionales autenticados.
 No se tocará Secret Manager en este avance; pagos continúan diferidos.
+
+## 2026-07-16 — Callback Google público aplicado a candidata PostgreSQL
+
+**Estado:** terminado y verificado sin mover tráfico.
+
+**Qué se hizo:** tras la confirmación de que Google Auth Platform ya acepta el
+origen JavaScript y la URI de callback de Mira, se creó
+`ghmi-api-00037-vov` desde la plantilla PostgreSQL existente. Cambia sólo
+`GOOGLE_REDIRECT_URL` a
+`https://mira.ninfasolutions.com/gmail/connect/callback` y mantiene el tag
+`postgres` sin tráfico.
+
+**Motivo:** la URL configurada antes apuntaba al hostname técnico de la web de
+Cloud Run. El callback canónico público evita que un login real de Gmail vuelva
+a staging o a una URL no autorizada cuando se promueva PostgreSQL.
+
+**Evidencia:** la revisión quedó `Ready=True`, con `APP_STORAGE=postgres` y la
+service account dedicada; `GET /health` de su URL tag respondió 200. El
+preflight WorkOS devolvió 307 con el callback público de Mira, Cloud Logging no
+mostró eventos `ERROR` para esta revisión y `ghmi-api-00031-6lx` permanece con
+100% de tráfico Firestore.
+
+**Qué sigue:** durante la ventana de corte autorizada, tomar la instantánea
+final, promover temporalmente PostgreSQL y completar con el tester la conexión
+Gmail, análisis, scheduler, borrado y auditoría. Si falla antes de escrituras
+aceptadas, volver a Firestore con el runbook. Pagos y Secret Manager permanecen
+fuera de este avance.

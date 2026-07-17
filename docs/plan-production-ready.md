@@ -526,11 +526,19 @@ consulta de solo lectura:
   - Evidencia 2026-07-16: `ghmi-api-00033-xut` fue creada desde la imagen
     `api:758a21aad6e1`, con tag `candidate` y 0% de tráfico. Cambia sólo la
     configuración WorkOS y URLs públicas de API necesarias para la candidata.
+  - Avance PostgreSQL 2026-07-16: `ghmi-api-00037-vov` conserva la candidata
+    PostgreSQL sin tráfico bajo el tag `postgres` y actualiza sólo
+    `GOOGLE_REDIRECT_URL` a
+    `https://mira.ninfasolutions.com/gmail/connect/callback`.
 - [x] Probar `/health`.
   - Evidencia 2026-07-16: `GET` a la URL directa de `candidate` devolvió 200.
+    La URL directa del tag `postgres` de `ghmi-api-00037-vov` también devolvió
+    200, sin errores Cloud Logging observados.
 - [ ] Probar login WorkOS.
   - Preflight aprobado: `/auth/workos/login` de la candidata devolvió 307 y su
     destino contiene el callback de Mira y el `WORKOS_CLIENT_ID` production.
+    Se repitió en `ghmi-api-00037-vov` después del cambio Google y conserva el
+    callback público de WorkOS.
     El login completo se prueba al enviar tráfico controlado: la callback
     pública aún llega al proxy web que sirve la revisión activa.
 - [ ] Probar conexión Gmail.
@@ -1250,6 +1258,9 @@ habilitará acceso directo del frontend a tablas de negocio ni Supabase Auth.
     `APP_STORAGE=postgres`, la identidad dedicada y
     `POSTGRES_DATABASE_URL=mira-postgres-url:2`; `/health` respondió 200 y
     Cloud Logging no registró errores.
+  - La revisión vigente del tag `postgres` es `ghmi-api-00037-vov`; conserva
+    `APP_STORAGE=postgres` e identidad dedicada, está `Ready=True`, recibe 0%
+    de tráfico y usa el callback Google público canónico.
 - [ ] Verificar en la candidata login, Gmail, análisis,
   scheduler, borrado y auditoría.
   - Avance 2026-07-16: `GET /auth/workos/login` de la candidata devolvió 307

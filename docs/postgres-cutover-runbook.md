@@ -53,7 +53,7 @@ Reemplaza los nombres por las revisiones verificadas justo antes del cambio:
 
 ```bash
 export PREVIOUS_REVISION='ghmi-api-00031-6lx'
-export POSTGRES_REVISION='ghmi-api-00036-yad'
+export POSTGRES_REVISION='ghmi-api-00037-vov'
 
 gcloud run services update-traffic ghmi-api --region us-central1 \
   --to-revisions "${POSTGRES_REVISION}=100"
