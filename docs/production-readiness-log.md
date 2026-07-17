@@ -2805,3 +2805,35 @@ No se registraron emails, IDs, códigos OAuth, tokens ni secretos.
 nueva. Si responde correctamente, continuar la validación PostgreSQL con
 conexión Gmail, análisis, borrado y auditoría; Cloud Scheduler permanece
 pausado.
+
+## 2026-07-17 — Protección de cuentas heredadas al entrar a WorkOS Production
+
+**Estado:** implementación y despliegue terminados; la primera sesión de cada
+cuenta heredada la validará funcionalmente.
+
+**Qué se hizo:** se implementó el re-enlace por email después de que WorkOS
+autentica al usuario. Si no existe cuenta por el nuevo ID, pero existe una
+cuenta migrada con el mismo email, el backend conserva su `org_id`, fechas y
+datos de tenant, sustituye sólo el ID de WorkOS y revoca las sesiones locales
+anteriores. En PostgreSQL ambas operaciones se realizan dentro de una única
+transacción; las implementaciones Memory y Firestore mantienen la misma
+semántica para pruebas y rollback. La revisión `ghmi-api-00041-fvc` quedó con
+100% de tráfico.
+
+**Motivo:** los usuarios de WorkOS son distintos entre Staging y Production.
+Sin este paso, una cuenta migrada cuyo email ya existe provocaría el mismo
+conflicto de índice único al entrar por primera vez. El re-enlace conserva el
+tenant y las entidades que ya se consultan por email u organización, sin
+duplicar una cuenta ni perder historial.
+
+**Evidencia:** la prueba `rebind_account_preserves_org_and_revokes_previous_sessions`
+comprueba que el ID antiguo deja de resolver, el nuevo conserva el tenant y
+sesiones de terceros siguen activas. El predeploy ejecutó 164 tests Rust,
+clippy, build release, 10 tests worker, auditoría de dependencias y build web.
+`ghmi-api-00041-fvc` quedó `Ready=True`, `APP_STORAGE=postgres`, 100% de
+tráfico y `/health` devolvió HTTP 200.
+
+**Qué sigue:** cuando una cuenta heredada inicie sesión en WorkOS Production
+con el mismo email, verificar el login y que conserve su configuración e
+historial. Cloud Scheduler permanece pausado hasta completar los smoke tests
+funcionales.

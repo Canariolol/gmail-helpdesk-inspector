@@ -1,7 +1,7 @@
 # Cutover Firestore → PostgreSQL
 
 Estado al 2026-07-17: **PostgreSQL recibe 100% de tráfico en
-`ghmi-api-00040-8mm`, validación
+`ghmi-api-00041-fvc`, validación
 funcional pendiente**. La instantánea final fue validada y Cloud Scheduler
 sigue pausado. Firestore se conserva como rollback hasta completar los smoke
 tests autenticados.

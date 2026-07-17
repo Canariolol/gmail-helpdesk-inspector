@@ -560,6 +560,14 @@ consulta de solo lectura:
     production y se revocaron cuatro sesiones locales anteriores. La
     comprobación posterior devolvió una coincidencia de cuenta por ID y email,
     y cero sesiones legacy activas. Falta el login real de confirmación.
+  - Protección general 2026-07-17: `ghmi-api-00041-fvc` detecta, después de
+    autenticar en WorkOS Production, una cuenta heredada con el mismo email y
+    otro ID de WorkOS. PostgreSQL reasocia la cuenta y revoca sus sesiones
+    heredadas dentro de una transacción, preservando email, `org_id`, creación
+    y todos los registros ya ligados al tenant. El flujo no crea ni modifica
+    datos hasta el primer login autenticado de esa cuenta. La prueba cubre la
+    preservación del tenant y la revocación selectiva; 164 tests pasaron y
+    `/health` devolvió 200 con 100% de tráfico en la revisión nueva.
 - [ ] Probar conexión Gmail.
   - **Acción externa necesaria:** en Google Cloud Console > Google Auth
     Platform > Clients, abrir el cliente Web usado por `GOOGLE_CLIENT_ID` y
