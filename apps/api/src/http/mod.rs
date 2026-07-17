@@ -1284,12 +1284,13 @@ async fn get_data_summary(
                 .len();
         }
     }
+    let mailbox_connected = bundle.mailbox.revoked_at.is_none();
 
     Ok(Json(DataSummaryResponse {
         account: DataSummaryAccount {
             google_account_email: session.google_account_email,
             gmail_scope_snapshot: bundle.mailbox.gmail_scope_snapshot.clone(),
-            mailbox_connected: bundle.mailbox.revoked_at.is_none(),
+            mailbox_connected,
             mailbox_revoked_at: bundle.mailbox.revoked_at,
         },
         org: DataSummaryOrg {
@@ -1315,8 +1316,12 @@ async fn get_data_summary(
         },
         actions: DataActionAvailability {
             disconnect_gmail: DataActionStatus {
-                available: false,
-                reason: "available_in_account",
+                available: mailbox_connected,
+                reason: if mailbox_connected {
+                    "requires_confirmation"
+                } else {
+                    "already_disconnected"
+                },
             },
             delete_analysis_data: DataActionStatus {
                 available: true,
@@ -5938,10 +5943,10 @@ mod tests {
         assert_eq!(body["stored_data"]["threads_count"], 1);
         assert_eq!(body["stored_data"]["messages_count"], 1);
         assert_eq!(body["actions"]["delete_analysis_data"]["available"], true);
-        assert_eq!(body["actions"]["disconnect_gmail"]["available"], false);
+        assert_eq!(body["actions"]["disconnect_gmail"]["available"], true);
         assert_eq!(
             body["actions"]["disconnect_gmail"]["reason"],
-            "available_in_account"
+            "requires_confirmation"
         );
     }
 

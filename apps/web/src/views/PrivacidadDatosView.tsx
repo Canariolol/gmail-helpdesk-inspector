@@ -30,7 +30,7 @@ function formatDate(iso: string | null): string {
 }
 
 function humanizeReason(reason: string): string {
-  if (reason === "available_in_account") return "Disponible en Cuenta";
+  if (reason === "already_disconnected") return "Gmail ya está desconectado";
   if (reason === "account_deletion_policy_pending") return "El borrado de cuenta aún está en definición";
   if (reason === "requires_confirmation") return "Requiere confirmación";
   return reason.split("_").join(" ");
@@ -110,6 +110,7 @@ function DisabledActionCard({
 
 export function PrivacidadDatosView() {
   const queryClient = useQueryClient();
+  const [confirmingGmailDisconnect, setConfirmingGmailDisconnect] = useState(false);
   const [confirmingDeletion, setConfirmingDeletion] = useState(false);
   const [deletionConfirmation, setDeletionConfirmation] = useState("");
   const summary = useQuery({
@@ -129,6 +130,15 @@ export function PrivacidadDatosView() {
       setDeletionConfirmation("");
       queryClient.invalidateQueries({ queryKey: ["data-summary"] });
       queryClient.invalidateQueries({ queryKey: ["runs"] });
+    },
+  });
+  const disconnectGmail = useMutation({
+    mutationFn: () => api<void>("/gmail/disconnect", { method: "POST" }),
+    onSuccess: () => {
+      setConfirmingGmailDisconnect(false);
+      queryClient.invalidateQueries({ queryKey: ["account"] });
+      queryClient.invalidateQueries({ queryKey: ["org-config"] });
+      queryClient.invalidateQueries({ queryKey: ["data-summary"] });
     },
   });
 
@@ -232,13 +242,48 @@ export function PrivacidadDatosView() {
           efectos, retención y protecciones de seguridad.
         </p>
         <div className="privacy-actions">
-          <DisabledActionCard
-            icon={<Unplug size={19} />}
-            title="Desconectar Gmail"
-            description="Revoca acceso OAuth y detiene nuevos análisis automáticos. Esta acción se realiza desde Cuenta."
-            reason={data.actions.disconnect_gmail.reason}
-            tone="warning"
-          />
+          {data.actions.disconnect_gmail.available ? (
+            <div className="privacy-action-card warning">
+              <div className="privacy-action-head">
+                <div className="privacy-action-icon" aria-hidden="true"><Unplug size={19} /></div>
+                <div>
+                  <strong>Desconectar Gmail</strong>
+                  <p>Revoca acceso OAuth y detiene nuevos análisis automáticos.</p>
+                </div>
+              </div>
+              {!confirmingGmailDisconnect ? (
+                <button type="button" className="btn-ghost" onClick={() => setConfirmingGmailDisconnect(true)}>
+                  Desconectar Gmail
+                </button>
+              ) : (
+                <div className="cuenta-confirm">
+                  <span>Dejarás de analizar esta casilla. Los análisis existentes se conservan. ¿Desconectar?</span>
+                  {disconnectGmail.error && <span role="alert">{disconnectGmail.error.message}</span>}
+                  <div className="cuenta-confirm-actions">
+                    <button
+                      type="button"
+                      className="btn-ghost"
+                      disabled={disconnectGmail.isPending}
+                      onClick={() => disconnectGmail.mutate()}
+                    >
+                      {disconnectGmail.isPending ? "Desconectando…" : "Sí, desconectar"}
+                    </button>
+                    <button type="button" className="access-text-btn" onClick={() => setConfirmingGmailDisconnect(false)}>
+                      Volver
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : (
+            <DisabledActionCard
+              icon={<Unplug size={19} />}
+              title="Desconectar Gmail"
+              description="Revoca acceso OAuth y detiene nuevos análisis automáticos."
+              reason={data.actions.disconnect_gmail.reason}
+              tone="warning"
+            />
+          )}
           {data.actions.delete_analysis_data.available ? (
             <div className="privacy-action-card danger">
               <div className="privacy-action-head">
