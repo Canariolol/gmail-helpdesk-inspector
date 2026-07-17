@@ -5,8 +5,6 @@ use sha2::{Digest, Sha256};
 
 use crate::policies::PolicySnapshot;
 
-pub const AI_AUTO_APPLY_THRESHOLD: f64 = 0.92;
-
 /// Un hilo largo pero resuelto (o respondido) dentro de esta ventana se considera
 /// bien atendido y no "sospechoso": 8 horas ≈ una jornada laboral.
 const SUSPICIOUS_QUICK_RESOLUTION_MINUTES: i64 = 8 * 60;
@@ -1013,26 +1011,6 @@ fn percentile(sorted: &[f64], p: f64) -> Option<f64> {
     sorted.get(idx).copied()
 }
 
-/// True si todos los ids de mensaje que la IA referencia existen en el hilo
-/// (evita aplicar una auditoría que inventó ids).
-pub fn ai_message_ids_known(result: &AiAuditResult, known_message_ids: &[String]) -> bool {
-    let known = |id: &Option<String>| {
-        id.as_ref()
-            .map(|id| known_message_ids.contains(id))
-            .unwrap_or(true)
-    };
-    known(&result.first_client_message_id)
-        && known(&result.first_internal_reply_message_id)
-        && known(&result.last_internal_message_id)
-}
-
-pub fn should_auto_apply_ai(result: &AiAuditResult, known_message_ids: &[String]) -> bool {
-    if result.confidence < AI_AUTO_APPLY_THRESHOLD || result.manual_review_required {
-        return false;
-    }
-    ai_message_ids_known(result, known_message_ids)
-}
-
 /// Categorías/pestañas de Gmail que rara vez corresponden a una solicitud de
 /// soporte válida; se usan como señal para refinar la clasificación heurística.
 const GMAIL_PROMOTIONS_LABEL: &str = "CATEGORY_PROMOTIONS";
@@ -1496,34 +1474,6 @@ mod tests {
         // La IA manda: no se reclasifica ni se fuerza revisión por la etiqueta.
         assert_eq!(thread.classification, Classification::ValidClientRequest);
         assert!(thread.is_valid_client_request);
-    }
-
-    #[test]
-    fn ai_auto_apply_requires_threshold_and_known_ids() {
-        let result = AiAuditResult {
-            policy_version_id: None,
-            prompt_version: None,
-            model_id: None,
-            auto_apply_threshold: None,
-            max_audit_messages: None,
-            max_body_chars_per_message: None,
-            classification: Classification::ValidClientRequest,
-            is_valid_client_request: true,
-            is_answered: true,
-            first_client_message_id: Some("m1".to_string()),
-            first_internal_reply_message_id: Some("m2".to_string()),
-            last_internal_message_id: Some("m2".to_string()),
-            confidence: 0.93,
-            manual_review_required: false,
-            issues: vec![],
-            input_tokens: 10,
-            output_tokens: 5,
-        };
-        assert!(should_auto_apply_ai(
-            &result,
-            &["m1".to_string(), "m2".to_string()]
-        ));
-        assert!(!should_auto_apply_ai(&result, &["m1".to_string()]));
     }
 
     #[test]

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { AlertTriangle } from "lucide-react";
 import type { Classification, ThreadDetail } from "../../api/types";
 import { classificationLabels, formatDateTime } from "../../lib/format";
 
@@ -54,6 +55,14 @@ export function ReviewForm({ detail, onReview, saving, reviewError, reviewSavedA
       }}
     >
       <h3>Revisión manual</h3>
+      {detail.thread.manual_review_required && detail.thread.classification_source === "ai" && (
+        <p className="ai-suggestion">
+          <AlertTriangle size={16} aria-hidden="true" />
+          <span>
+            Mira sugiere estado: <strong>{classificationLabels[detail.thread.classification]} · {detail.thread.is_answered ? "Respondido" : "Sin respuesta"}</strong>
+          </span>
+        </p>
+      )}
       <label>
         Clasificación
         <select value={classification} onChange={(event) => setClassification(event.target.value as Classification)}>

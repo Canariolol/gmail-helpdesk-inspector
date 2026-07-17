@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 
 Classification = Literal[
@@ -82,20 +82,14 @@ class BatchMessageSummary(BaseModel):
     from_email: str
     date: datetime
     is_internal: bool
-    is_external: bool
     is_automated: bool
-    excerpt: str = ""
+    content: str = Field(default="", validation_alias=AliasChoices("content", "excerpt"))
 
 
 class BatchThreadSummary(BaseModel):
     thread_id: str
     subject: str
     gmail_labels: list[str] = Field(default_factory=list)
-    automatic_classification: Classification
-    automatic_confidence: float = Field(ge=0, le=1)
-    automatic_is_valid: bool
-    automatic_is_answered: bool
-    automatic_manual_review_required: bool
     messages: list[BatchMessageSummary] = Field(default_factory=list)
 
 
@@ -109,6 +103,9 @@ class BatchAuditDecision(BaseModel):
     classification: Classification
     is_valid_client_request: bool
     is_answered: bool
+    first_client_message_id: str | None = None
+    first_internal_reply_message_id: str | None = None
+    last_internal_message_id: str | None = None
     confidence: float = Field(ge=0, le=1)
     manual_review_required: bool
     issues: list[str] = Field(default_factory=list)

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Bot, ChevronDown, Clock, Filter, Inbox, ListChecks, SearchCheck } from "lucide-react";
+import { Bot, ChevronDown, Clock, Filter, Inbox, ListChecks } from "lucide-react";
 import type { AnalysisRun, DroppedThreadInfo } from "../../api/types";
 import { formatDateTime } from "../../lib/format";
 
@@ -30,7 +30,6 @@ export function AnalysisFunnelPanel({ run }: Props) {
   const skippedByPlan = funnel.skipped_by_plan_cap ?? 0;
   const totalDropped = droppedNotPrimary + droppedWindow + skippedByPlan;
   const aiBatch = funnel.ai_batch_classified ?? 0;
-  const aiDetailed = funnel.ai_detailed_audited ?? 0;
   const aiUnique = funnel.ai_unique_threads ?? 0;
   if (totalDropped === 0 && aiUnique === 0) return null;
 
@@ -72,13 +71,7 @@ export function AnalysisFunnelPanel({ run }: Props) {
               tone="tone-orange"
             />
             <FunnelStat icon={ListChecks} label="Analizados" value={analyzed} tone="tone-mint" />
-            <FunnelStat icon={Bot} label="Revisión inicial con IA" value={aiBatch} tone="tone-violet" />
-            <FunnelStat
-              icon={SearchCheck}
-              label="Auditoría detallada"
-              value={aiDetailed}
-              tone="tone-blue"
-            />
+            <FunnelStat icon={Bot} label="Auditados con Mira" value={aiBatch} tone="tone-violet" />
           </div>
 
           {skippedByPlan > 0 && (

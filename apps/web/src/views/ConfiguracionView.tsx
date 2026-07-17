@@ -84,7 +84,7 @@ function initDraft(config: OrgConfig | null): WizardDraft {
       validSignalKeywordsText: "",
       aiEnabled: true,
       aiConsentChecked: true,
-      maxAuditMessages: 14,
+      maxAuditMessages: 4,
       maxBodyCharsPerMessage: 280,
       schedulerEnabled: false,
       reportRecipientsText: "",
@@ -620,7 +620,7 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
                 <h4>¿Qué datos procesa?</h4>
                 <ul>
                   <li>Participantes, fecha, asunto y texto del mensaje reducido a un máximo de {draft.maxBodyCharsPerMessage} caracteres</li>
-                  <li>Hasta {draft.maxAuditMessages} mensajes por hilo</li>
+                  <li>Hasta 4 mensajes clave por hilo, sin duplicados</li>
                   <li>
                     Un mensaje corto puede incluirse completo dentro de ese límite; los extractos pueden contener texto sensible
                   </li>

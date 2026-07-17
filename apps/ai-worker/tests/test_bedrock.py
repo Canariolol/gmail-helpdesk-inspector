@@ -65,20 +65,14 @@ def batch_payload() -> BatchAuditRequest:
                 {
                     "thread_id": "g1",
                     "subject": "Ayuda",
-                    "automatic_classification": "valid_client_request",
-                    "automatic_confidence": 0.86,
-                    "automatic_is_valid": True,
-                    "automatic_is_answered": False,
-                    "automatic_manual_review_required": False,
                     "messages": [
                         {
                             "message_id": "m1",
                             "from_email": "client@example.com",
                             "date": "2026-06-12T10:00:00Z",
                             "is_internal": False,
-                            "is_external": True,
                             "is_automated": False,
-                            "excerpt": "Necesito ayuda",
+                            "content": "Necesito ayuda",
                         }
                     ],
                 }
@@ -266,14 +260,33 @@ async def test_audit_parses_fenced_json_response() -> None:
     assert result.output_tokens == 20
 
 
-def test_batch_prompt_uses_one_compact_excerpt_per_message() -> None:
+def test_batch_prompt_uses_only_selected_content_and_metadata() -> None:
     prompt = build_batch_user_prompt(batch_payload())
     body = json.loads(prompt)
     message = body["threads"][0]["messages"][0]
-    assert message["excerpt"] == "Necesito ayuda"
+    assert message["content"] == "Necesito ayuda"
+    assert set(message) == {
+        "message_id",
+        "from_email",
+        "date",
+        "is_internal",
+        "is_automated",
+        "content",
+    }
     assert "snippet" not in message
     assert "text" not in message
+    assert "automatic_classification" not in body["threads"][0]
     assert "policy_context" not in body
+
+
+def test_batch_payload_accepts_legacy_excerpt() -> None:
+    legacy = batch_payload().model_dump(mode="json")
+    message = legacy["threads"][0]["messages"][0]
+    message["excerpt"] = message.pop("content")
+
+    parsed = BatchAuditRequest.model_validate(legacy)
+
+    assert parsed.threads[0].messages[0].content == "Necesito ayuda"
 
 
 @pytest.mark.asyncio
@@ -285,6 +298,7 @@ async def test_batch_audit_parses_decisions_and_uses_batch_model() -> None:
         )
         request_json = json.loads(request.content)
         assert len(request_json["system"]) == 1
+        assert request_json["inferenceConfig"]["maxTokens"] == 6000
         return httpx.Response(
             200,
             json={
@@ -300,6 +314,9 @@ async def test_batch_audit_parses_decisions_and_uses_batch_model() -> None:
                                                 "classification": "valid_client_request",
                                                 "is_valid_client_request": True,
                                                 "is_answered": False,
+                                                "first_client_message_id": "m1",
+                                                "first_internal_reply_message_id": None,
+                                                "last_internal_message_id": None,
                                                 "confidence": 0.95,
                                                 "manual_review_required": False,
                                                 "issues": [],
@@ -327,5 +344,6 @@ async def test_batch_audit_parses_decisions_and_uses_batch_model() -> None:
         )
 
     assert result.decisions[0].thread_id == "g1"
+    assert result.decisions[0].first_client_message_id == "m1"
     assert result.input_tokens == 321
     assert result.output_tokens == 54

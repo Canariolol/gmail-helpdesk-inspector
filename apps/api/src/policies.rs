@@ -452,7 +452,7 @@ fn default_ai_policy(enabled: bool, consent_granted_at: Option<DateTime<Utc>>) -
         prompt_version: "helpdesk-auditor-v1".to_string(),
         auto_apply_threshold: 0.92,
         manual_review_threshold: 0.72,
-        max_audit_messages: 14,
+        max_audit_messages: 4,
         max_body_chars_per_message: 280,
         allowed_fields: vec![
             "headers".to_string(),

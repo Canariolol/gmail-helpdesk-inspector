@@ -762,6 +762,30 @@ El `request_id` siempre se genera en servidor y se devuelve además en header.
 
 ## 6.2 Proveedores externos
 
+### Auditoría única por lotes — avance local 2026-07-17
+
+- [x] La API agrupa hasta 20 hilos elegibles en una única auditoría
+  `/audit/batch`; conserva el split/retry y deja de llamar `/audit/thread`.
+- [x] Cada hilo envía asunto y etiquetas una sola vez, más un máximo efectivo de
+  cuatro hitos humanos únicos, ordenados cronológicamente. El cuerpo se limita a
+  280 caracteres por defecto y `snippet` se usa sólo como fallback local.
+- [x] El payload elimina destinatarios, CC, asunto por mensaje y el resultado
+  heurístico. El worker devuelve los tres IDs relevantes y admite `excerpt`
+  como alias legado de `content`.
+- [x] Resultados con confianza `>= 0.92`, sin revisión solicitada e IDs válidos,
+  se aplican automáticamente. Entre `0.72` y `0.92`, o si Mira solicita
+  revisión, se conserva una propuesta IA preseleccionada; por debajo del umbral,
+  con IDs inválidos o sin decisión, se conserva la heurística.
+- [x] La web muestra una sola etapa **Auditados con Mira**, titula las razones
+  **Observaciones de Mira** y presenta la sugerencia pendiente en una línea junto
+  al formulario de revisión.
+- [x] Validación local: `scripts/check-all.sh` aprobado (166 tests Rust, 11
+  tests del worker, clippy, build release, auditoría de dependencias y build
+  TypeScript).
+- [ ] Desplegar en orden worker → API → web y confirmar en Cloud Logging una
+  llamada `/audit/batch`, ninguna `/audit/thread`, además de comparar tokens con
+  la medición de referencia de 2600 entrada / 470 salida para un hilo.
+
 Revisar y sanitizar errores de:
 
 - [x] WorkOS.
@@ -2105,6 +2129,7 @@ Usar esta tabla para mantener una visión ejecutiva:
 | PITR Firestore | P0 | Habilitado |  | Firestore `(default)`: PITR y delete protection habilitados (2026-07-15) | Falta prueba de restauración controlada. |
 | Uptime y alertas | P0 | Pendiente |  |  |  |
 | Logs API | P0 | En progreso |  | Evento HTTP correlacionado en Cloud Logging de `ghmi-api-00033-xut` | API ya validó campos estructurados y redacción en candidata; faltan Bedrock y errores reales de proveedores. |
+| Consumo Bedrock | P1 | Listo local |  | Auditoría única `/audit/batch`; `scripts/check-all.sh` aprobado (166 Rust, 11 worker y build web) | Falta validación desplegada contra la referencia 2600/470. |
 | CI verde | P0 | Configurado local |  | `.github/workflows/ci.yml`; `scripts/check-all.sh` — 167 Rust, 10 worker, build web y scan de secretos | Corre en PR y `main`, reutiliza el gate y el lockfile. Falta primera ejecución remota y protección de rama. |
 | Panel admin | P1 | Pendiente |  |  |  |
 | Hardening contenedores | P1 | En progreso |  | Builds Docker, salud y UID no-root de API/worker/web | Runtime separado, lockfile y usuarios no-root; faltan CSP, escaneo y límites operativos. |

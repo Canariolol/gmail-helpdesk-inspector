@@ -162,7 +162,7 @@ def build_batch_system_prompt(
     settings: Settings, policy: AuditPolicyContext | None = None
 ) -> str:
     policy = policy or _fallback_policy_context(settings)
-    return f"""Classify a batch of compact email-thread summaries for one helpdesk mailbox. The tenant policy below applies to every thread in the batch. Return strict JSON with one decision per supplied thread_id and no extra text.
+    return f"""Audit a batch of email threads for one helpdesk mailbox. The tenant policy below applies to every thread. Return strict JSON with one decision per supplied thread_id and no extra text.
 
 Mailbox: {policy.mailbox_email or "not specified"}
 Internal domains:
@@ -177,12 +177,14 @@ Ignored senders/domains/keywords:
 For each thread:
 - valid_client_request means an external human asks for work covered by the policy.
 - is_answered requires a later human internal reply; automated acknowledgements do not count.
-- Use ambiguous and manual_review_required=true when compact evidence is insufficient or conflicts with the automatic classification.
+- The selected messages are the first client message, first human internal reply, last client message and last human internal reply when each exists.
+- Use only supplied message_id values for first_client_message_id, first_internal_reply_message_id and last_internal_message_id; never invent ids.
+- Use ambiguous and manual_review_required=true when the evidence is insufficient.
 - Preserve every supplied thread_id exactly and return exactly one decision for each.
 - Issues must be written in Spanish.
 
 Output shape:
-{{"decisions":[{{"thread_id":"...","classification":"valid_client_request|internal|automated|newsletter|spam|misc|ambiguous","is_valid_client_request":true,"is_answered":false,"confidence":0.0,"manual_review_required":false,"issues":[]}}]}}"""
+{{"decisions":[{{"thread_id":"...","classification":"valid_client_request|internal|automated|newsletter|spam|misc|ambiguous","is_valid_client_request":true,"is_answered":false,"first_client_message_id":"...|null","first_internal_reply_message_id":"...|null","last_internal_message_id":"...|null","confidence":0.0,"manual_review_required":false,"issues":[]}}]}}"""
 
 
 def build_batch_user_prompt(payload: BatchAuditRequest) -> str:
@@ -212,7 +214,7 @@ async def audit_batch_with_bedrock(
             }
         ],
         "inferenceConfig": {
-            "maxTokens": 4000,
+            "maxTokens": 6000,
             "temperature": 0,
         },
     }

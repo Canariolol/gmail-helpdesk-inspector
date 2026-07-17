@@ -1001,6 +1001,11 @@
   font-weight: 700;
 }
 
+.reason-box h3 {
+  margin: 0 0 var(--space-1);
+  font-size: var(--fs-sm);
+}
+
 .timeline {
   display: grid;
   gap: var(--space-2);
@@ -1051,6 +1056,19 @@
   gap: var(--space-3);
   border-top: 1px solid var(--border);
   padding-top: var(--space-4);
+}
+
+.ai-suggestion {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  color: var(--chip-amber-fg);
+  font-size: var(--fs-sm);
+}
+
+.ai-suggestion svg {
+  flex: 0 0 auto;
 }
 
 .checkline {

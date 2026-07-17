@@ -39,6 +39,7 @@ export function ThreadDetailPanel({ detail, onReview, saving, reviewError, revie
       </div>
       {detail.thread.reasons.length > 0 && (
         <div className="reason-box">
+          <h3>Observaciones de Mira</h3>
           {detail.thread.reasons.map((reason) => (
             <span key={reason}>{formatReason(reason)}</span>
           ))}
