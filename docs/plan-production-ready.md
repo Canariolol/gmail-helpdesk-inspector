@@ -1255,7 +1255,7 @@ habilitará acceso directo del frontend a tablas de negocio ni Supabase Auth.
     entonces se mueve el tráfico. Scheduler se reanuda después de validar
     PostgreSQL o de volver a Firestore.
   - Avance 2026-07-16: Cloud Scheduler quedó `PAUSED` y la instantánea final
-    fue validada. No se ha movido tráfico todavía.
+    fue validada; en ese punto Firestore aún tenía 100% de tráfico.
 - [x] Documentar rollback a Firestore antes de mover tráfico.
   - `docs/postgres-cutover-runbook.md` exige ventana de escritura congelada
     cuando existan usuarios, registra la revisión previa y prohíbe declarar un
@@ -1266,15 +1266,16 @@ habilitará acceso directo del frontend a tablas de negocio ni Supabase Auth.
     `POSTGRES_DATABASE_URL=mira-postgres-url:2`; `/health` respondió 200 y
     Cloud Logging no registró errores.
   - La revisión vigente del tag `postgres` es `ghmi-api-00037-vov`; conserva
-    `APP_STORAGE=postgres` e identidad dedicada, está `Ready=True`, recibe 0%
-    de tráfico y usa el callback Google público canónico.
+    `APP_STORAGE=postgres` e identidad dedicada, está `Ready=True` y usa el
+    callback Google público canónico. Antes de la promoción recibía 0% de
+    tráfico.
 - [x] Promover PostgreSQL tras validar la instantánea final.
   - Evidencia 2026-07-16: `ghmi-api-00037-vov` recibe 100% de tráfico con
     `APP_STORAGE=postgres`; `/health` devolvió 200, el preflight WorkOS mantiene
     el callback público de Mira, `https://mira.ninfasolutions.com` devolvió 200
     y Cloud Logging no mostró errores inmediatos. Cloud Scheduler sigue pausado
     durante la validación funcional.
-- [ ] Verificar en la candidata login, Gmail, análisis,
+- [ ] Verificar en el servicio activo login, Gmail, análisis,
   scheduler, borrado y auditoría.
   - Avance 2026-07-16: `GET /auth/workos/login` de la candidata devolvió 307
     con callback público `https://mira.ninfasolutions.com/auth/workos/callback`.

@@ -2649,8 +2649,8 @@ fuera de este avance.
 
 ## 2026-07-16 — Instantánea final PostgreSQL validada durante el corte
 
-**Estado:** terminado; PostgreSQL sigue sin tráfico y Cloud Scheduler está
-pausado.
+**Estado al cierre de la instantánea:** terminado; PostgreSQL seguía sin
+tráfico y Cloud Scheduler estaba pausado.
 
 **Qué se hizo:** se leyó la URL PostgreSQL existente sólo en memoria para la
 importación local, sin crear, rotar ni actualizar secretos. La primera
