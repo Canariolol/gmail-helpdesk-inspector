@@ -2899,3 +2899,27 @@ las variables esperadas sin valores expuestos y `GET /health` devolvió HTTP
 avance desde `Pending` a `Running` y luego a `Completed`. Si falla, usar la
 etapa segura registrada por la revisión anterior para identificar la causa sin
 inspeccionar tokens ni correos. Cloud Scheduler continúa pausado.
+
+## 2026-07-17 — Smoke test real de WorkOS, Gmail y análisis
+
+**Estado:** validación funcional parcial terminada; el gate integral permanece
+abierto.
+
+**Qué se hizo:** después de la corrección de renovación Gmail en
+`ghmi-api-00043-dp2`, se completó un inicio de sesión real en WorkOS Production
+y se creó e inició una ejecución nueva de análisis que terminó correctamente.
+Esto confirma la sesión local, la lectura de la casilla ya conectada, la
+renovación de credenciales y la persistencia PostgreSQL en el flujo principal.
+
+**Motivo:** era necesario distinguir la corrección implementada de una prueba
+real. El `409` previo corresponde sólo a la ejecución que ya había pasado a
+`Failed`; no se reintentó ni se modificó ese registro.
+
+**Evidencia:** confirmación interactiva de la persona responsable tras el
+despliegue de `ghmi-api-00043-dp2`, que permanece `Ready=True`, recibe 100% de
+tráfico y cuyo `/health` responde HTTP 200. Cloud Scheduler continúa `PAUSED`.
+
+**Qué sigue:** el smoke test integral aún requiere configuración, borrado de
+análisis y auditoría, scheduler y una entrega real del webhook WorkOS. El modo
+`APP_ENV=production` queda pendiente mientras pagos siga diferido, por lo que
+no se declara un lanzamiento pagado como production-ready.

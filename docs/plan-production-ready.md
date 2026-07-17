@@ -328,17 +328,23 @@ Prioridad: **P0**
 ## 4.1 Variables y secretos
 
 - [ ] Configurar `APP_ENV=production`.
+  - Estado 2026-07-17: la revisión activa no declara `APP_ENV`, por lo que el
+    backend usa `development` por defecto. No se debe declarar un lanzamiento
+    pagado como production-ready mientras siga así.
+  - Bloqueo conocido: el modo `production` exige las dos credenciales de
+    Mercado Pago; pagos permanece explícitamente diferido. Falta decidir si se
+    habilita producción sin billing o si Mira continúa como despliegue técnico
+    controlado hasta retomar pagos.
 - [x] Configurar explícitamente `BILLING_ENFORCEMENT_ENABLED=true`.
 - [ ] Configurar `MERCADOPAGO_ACCESS_TOKEN` mediante Secret Manager.
 - [ ] Configurar `MERCADOPAGO_WEBHOOK_SECRET` mediante Secret Manager.
-- [ ] Migrar y rotar `WORKOS_API_KEY` hacia Secret Manager.
-  - La inspección de configuración 2026-07-15 detectó que aún está inyectada
-    como variable de texto plano; no registrar ni repetir su valor.
-  - Avance 2026-07-16: la clave staging quedó como versión inicial y la nueva
-    clave production como versión 2 de `workos-api-key`; sólo `ghmi-runtime`
-    recibió acceso de lectura. La candidata `ghmi-api-00033-xut` usa esa
-    versión; la revisión activa conserva el valor literal hasta completar la
-    promoción, por eso este ítem no está terminado todavía.
+- [-] Mantener `WORKOS_API_KEY` como valor literal durante esta etapa temprana.
+  - Decisión 2026-07-17: la persona responsable no autoriza cambios ni
+    rotaciones en Secret Manager y prefiere definir más adelante una estrategia
+    de secretos distinta. La clave production literal funciona en la revisión
+    activa; no registrar ni repetir su valor.
+  - Condición de revisión: antes de ampliar el acceso a usuarios o al definir
+    una estrategia como Infisical, migrar y rotar esta clave de forma planificada.
 - [x] Registrar el callback de AuthKit de Mira en la nueva aplicación WorkOS.
   - Evidencia 2026-07-16: el primer callback fue creado en staging. Tras
     recibir las credenciales production, se confirmó que allí no existía y se
@@ -534,7 +540,7 @@ consulta de solo lectura:
   - Evidencia 2026-07-16: `GET` a la URL directa de `candidate` devolvió 200.
     La URL directa del tag `postgres` de `ghmi-api-00037-vov` también devolvió
     200, sin errores Cloud Logging observados.
-- [ ] Probar login WorkOS.
+- [x] Probar login WorkOS.
   - Preflight aprobado: `/auth/workos/login` de la candidata devolvió 307 y su
     destino contiene el callback de Mira y el `WORKOS_CLIENT_ID` production.
     Se repitió en `ghmi-api-00037-vov` después del cambio Google y conserva el
@@ -568,15 +574,21 @@ consulta de solo lectura:
     datos hasta el primer login autenticado de esa cuenta. La prueba cubre la
     preservación del tenant y la revocación selectiva; 164 tests pasaron y
     `/health` devolvió 200 con 100% de tráfico en la revisión nueva.
+  - Evidencia 2026-07-17: se completó un inicio de sesión real contra WorkOS
+    Production en la revisión PostgreSQL activa. La protección para cuentas
+    heredadas queda desplegada; falta observar el primer login de la tester
+    heredada principal para confirmar su tenant real, sin crear ni alterar datos
+    antes de esa autenticación.
 - [ ] Probar conexión Gmail.
-  - **Acción externa necesaria:** en Google Cloud Console > Google Auth
-    Platform > Clients, abrir el cliente Web usado por `GOOGLE_CLIENT_ID` y
-    añadir exactamente `https://mira.ninfasolutions.com/gmail/connect/callback`
-    en «Authorized redirect URIs». No crear otro cliente ni cambiar su secreto.
+  - Configuración 2026-07-17: el cliente OAuth de Google ya contiene
+    exactamente `https://mira.ninfasolutions.com/gmail/connect/callback`.
+  - Avance 2026-07-17: un análisis real terminó correctamente, lo que confirma
+    lectura Gmail y renovación de la credencial ya conectada. Sigue pendiente
+    probar de punta a punta una conexión o reconexión OAuth nueva en producción.
 - [ ] Probar lectura de configuración.
 - [ ] Probar checkout sandbox.
 - [ ] Probar recepción de webhook.
-- [ ] Probar creación y ejecución de análisis.
+- [x] Probar creación y ejecución de análisis.
   - Incidente 2026-07-17: una ejecución inició correctamente, falló antes de
     persistir hilos y un nuevo `POST /start` devolvió 409. El 409 es el efecto
     esperado del claim atómico: sólo permite pasar de `Pending` a `Running`, no
@@ -594,18 +606,25 @@ consulta de solo lectura:
     pide reconectar Gmail y conserva el run en `Pending`; no lo marca fallido.
     La revisión está `Ready=True`, recibe 100% de tráfico y `/health` devolvió
     200. Falta confirmar una ejecución nueva exitosa.
+  - Evidencia 2026-07-17: tras desplegar `ghmi-api-00043-dp2`, se creó e inició
+    una ejecución nueva que terminó correctamente. El 409 de la ejecución
+    anterior queda documentado como incidente resuelto; no se reintenta ese
+    registro fallido.
 - [ ] Probar scheduler manualmente.
-- [ ] Enviar tráfico progresivamente.
+- [x] Enviar tráfico progresivamente para el uso controlado actual.
   - 0% → pruebas internas.
   - 10% → smoke test.
-  - 100% → solo después de validar logs.
+  - 100% → `ghmi-api-00043-dp2` recibe el tráfico de Mira; no equivale todavía
+    a un GO de lanzamiento pagado ni habilita Cloud Scheduler.
 
 ### Evidencia requerida
 
-- [ ] Nombre de revisión Cloud Run.
-- [ ] Lista de variables configuradas, sin valores.
-- [ ] Resultado de smoke test.
-- [ ] Confirmación de tráfico y rollback disponible.
+- [x] Nombre de revisión Cloud Run: `ghmi-api-00043-dp2`.
+- [x] Lista de variables configuradas, sin valores, revisada en la revisión activa.
+- [x] Resultado de smoke test parcial: login WorkOS, lectura Gmail y análisis
+  real correctos; scheduler, borrado y auditoría siguen pendientes.
+- [x] Confirmación de tráfico y rollback disponible: PostgreSQL tiene 100% y
+  Firestore se conserva como rollback documentado.
 
 ---
 
@@ -1335,8 +1354,12 @@ habilitará acceso directo del frontend a tablas de negocio ni Supabase Auth.
   - Corrección 2026-07-17: `ghmi-api-00043-dp2` está `Ready=True`, conserva
     `APP_STORAGE=postgres`, recibe 100% de tráfico y `/health` devolvió 200.
     El inicio manual ahora renueva la conexión Gmail de forma atómica antes de
-    reclamar el análisis; falta ejecutar el smoke test real de creación e
-    inicio para cerrar esta parte de la validación.
+    reclamar el análisis; el smoke test real de creación e inicio se confirmó
+    después en la misma revisión.
+  - Validación 2026-07-17: login WorkOS, lectura Gmail y una ejecución nueva de
+    análisis terminaron correctamente en la revisión activa. Permanecen
+    pendientes scheduler, borrado de análisis y su auditoría; por eso este
+    checklist integral sigue abierto.
 - [ ] Retirar Firestore del runtime sólo después de un periodo de observación y
   respaldo exportado.
 
@@ -2020,7 +2043,7 @@ Prioridad: **P1**
 - [ ] Terminar checkout embebido.
 - [ ] Cerrar seguridad e idempotencia del webhook.
 - [ ] Configurar modo producción.
-- [ ] Limitar API a una instancia.
+- [x] Limitar API a una instancia.
 - [x] Sanitizar errores.
 - [x] Corregir sesión/logout.
 - [x] Implementar desconexión Gmail.
@@ -2068,26 +2091,26 @@ Usar esta tabla para mantener una visión ejecutiva:
 
 | Área | Prioridad | Estado | Responsable | Evidencia | Observaciones |
 |---|---:|---|---|---|---|
-| Checkout embebido | P0 | En progreso |  | `scripts/check-all.sh` — verde; build Docker sandbox con clave pública | Card Payment Brick → token → `/preapproval` `authorized`, sin redirect; la ejecución real espera login WorkOS. |
+| Checkout embebido | P0 | Diferido |  | Implementación y sandbox local previos | Pagos quedan fuera del avance actual; falta la prueba real antes de cualquier lanzamiento pagado. |
 | Webhook Mercado Pago | P0 | Diferido |  | Incidente de pagos actual; sin cambios en este avance | Se retoma después de resolver el incidente y autorizar la prueba real. |
-| Configuración de entornos | P0 | En progreso |  | Cloudflare: DNS delegado; mapping Cloud Run listo; callbacks y webhook WorkOS production registrados (2026-07-16) | Certificado HTTPS provisionado; falta callback Google OAuth, enlazar las credenciales WorkOS production y deploy candidato. |
-| Configuración production | P0 | Listo local |  | `scripts/check-all.sh` — 161 Rust, 10 worker | La validación acepta callbacks HTTPS del origen API o web/proxy y exige secreto de webhook WorkOS; `APP_ENV=production` sigue pendiente de autorización, secretos y pagos. |
-| Sesiones y logout | P0 | Listo local |  | `scripts/check-all.sh` — 161 Rust, 10 worker | Expiración absoluta 30 días, logout individual/global revocable, atributos seguros de cookies y revocación WorkOS de nuevas sesiones; falta smoke test desplegado. |
-| Ciclo de vida WorkOS | P0 | En progreso |  | Webhook production y smoke firmado en `ghmi-api-00036-yad` (2026-07-16) | La revisión con tráfico conserva staging; faltan login/entrega real y rotación de cookie. |
-| Sanitización de errores | P0 | En progreso |  | `scripts/check-all.sh` — 161 Rust, 10 worker | API tiene catálogo público, no enumera análisis ajenos y propaga `request_id`; falta validar el flujo desplegado. |
+| Configuración de entornos | P0 | Listo para uso controlado |  | Cloudflare, dominio Mira, callbacks Google y WorkOS Production activos; `ghmi-api-00043-dp2` `Ready=True` | Falta decidir el modo production mientras pagos sigue diferido. |
+| Configuración production | P0 | Diferida por pagos |  | Revisión activa no declara `APP_ENV`; 167 tests Rust y 10 worker en predeploy | `APP_ENV=production` exige Mercado Pago; no declarar GO pagado todavía. |
+| Sesiones y logout | P0 | Validado parcialmente |  | Login WorkOS Production real y re-enlace de cuentas heredadas desplegado | Falta confirmar el primer login de la tester heredada principal. |
+| Ciclo de vida WorkOS | P0 | Validado parcialmente |  | Login real; webhook Production y smoke firmado | Falta observar una entrega real de webhook y la deuda aceptada de rotación de cookie. |
+| Sanitización de errores | P0 | Validado parcialmente |  | Análisis real posterior a los logs seguros; `request_id` y etapas seguras desplegadas | Falta la parte de Mercado Pago, diferida con pagos. |
 | Desconexión Gmail | P0 | Listo local |  | `scripts/check-all.sh` — 161 Rust, 10 worker | Revocación Google, tokens borrados, scheduler desactivado y confirmación UI; falta prueba desplegada. |
-| Borrado de datos | P0 | En progreso |  | `scripts/check-all.sh` — 161 Rust, 10 worker | Borrado de todos los análisis disponible, auditado sin PII y con señal de fallo; falta borrado de cuenta y prueba Firestore real. |
+| Borrado de datos | P0 | En progreso |  | `scripts/check-all.sh` — 167 Rust, 10 worker | Borrado de todos los análisis disponible, auditado sin PII y con señal de fallo; falta borrado de cuenta y prueba contra PostgreSQL activo. |
 | Privacidad y términos | P0 | En progreso |  | `docs/privacy.md`; Configuración y Ayuda | El copy técnico refleja el comportamiento actual; faltan política y términos aprobados/publicables. |
 | Landing/copy público | P1 | Listo local |  | `npm --prefix apps/web run build` | Sin lenguaje de beta; el copy de IA refleja el opt-out real. Onboarding, ayuda y documentos legales continúan aparte. |
 | PITR Firestore | P0 | Habilitado |  | Firestore `(default)`: PITR y delete protection habilitados (2026-07-15) | Falta prueba de restauración controlada. |
 | Uptime y alertas | P0 | Pendiente |  |  |  |
 | Logs API | P0 | En progreso |  | Evento HTTP correlacionado en Cloud Logging de `ghmi-api-00033-xut` | API ya validó campos estructurados y redacción en candidata; faltan Bedrock y errores reales de proveedores. |
-| CI verde | P0 | Configurado local |  | `.github/workflows/ci.yml`; `scripts/check-all.sh` — 161 Rust, 10 worker, build web y scan de secretos | Corre en PR y `main`, reutiliza el gate y el lockfile. Falta primera ejecución remota y protección de rama. |
+| CI verde | P0 | Configurado local |  | `.github/workflows/ci.yml`; `scripts/check-all.sh` — 167 Rust, 10 worker, build web y scan de secretos | Corre en PR y `main`, reutiliza el gate y el lockfile. Falta primera ejecución remota y protección de rama. |
 | Panel admin | P1 | Pendiente |  |  |  |
 | Hardening contenedores | P1 | En progreso |  | Builds Docker, salud y UID no-root de API/worker/web | Runtime separado, lockfile y usuarios no-root; faltan CSP, escaneo y límites operativos. |
 | Retención automática | P1 | Pendiente |  |  |  |
 | OpenTelemetry/Grafana | P2 | Pendiente |  |  |  |
-| Migración Supabase | P0 | Candidata validada |  | Dos instantáneas de 6.284 registros y `ghmi-api-00036-yad` sin tráfico | Falta sesión real, Gmail y cutover controlado; Firestore sigue activo. |
+| Migración Supabase | P0 | Activa y validada parcialmente |  | Instantánea final de 6.284 registros; `ghmi-api-00043-dp2` con 100% de tráfico; login, Gmail y análisis reales | Falta scheduler, borrado/auditoría y periodo de observación antes de retirar Firestore como rollback. |
 | Multiproveedor | P3 | Planificado |  | `docs/plan-conexion-multiproveedor.md` |  |
 
 ---
@@ -2104,12 +2127,13 @@ Este bloque es una fotografía inicial y debe actualizarse a medida que cambie e
 - [x] Tokens Gmail cifrados antes de persistirse.
 - [x] OAuth incluye protecciones de state/PKCE.
 - [x] Aislamiento de runs y threads probado.
-- [x] 147 tests Rust pasan.
+- [x] 167 tests Rust pasan.
 - [x] 10 tests Python pasan.
 - [x] Frontend compila para producción.
 - [x] API compila en release.
 - [x] `npm audit --omit=dev` sin vulnerabilidades reportadas al 2026-06-25.
-- [x] Cloud Scheduler existe y está habilitado.
+- [x] Cloud Scheduler existe y está intencionalmente `PAUSED` durante la
+  validación funcional de PostgreSQL.
 - [x] Worker no es público.
 
 ## Pendiente o riesgoso
@@ -2117,12 +2141,13 @@ Este bloque es una fotografía inicial y debe actualizarse a medida que cambie e
 - [ ] `APP_ENV=production` no está configurado en la API desplegada.
 - [x] Billing enforcement está configurado explícitamente en la revisión auditada.
 - [ ] Mercado Pago no está configurado en la revisión auditada.
-- [x] API limitada a una instancia (`ghmi-api-00030-vxc`).
+- [x] API limitada a una instancia (`max-instances=1` en `ghmi-api`).
 - [x] Firestore PITR habilitado; falta prueba de restauración controlada.
 - [x] Firestore delete protection habilitado.
 - [ ] No se observaron alertas operativas configuradas.
-- [ ] Migrar y rotar `WORKOS_API_KEY` y `WORKOS_COOKIE_SECRET` desde variables
-  de texto plano a Secret Manager.
+- [-] Migración y rotación de `WORKOS_API_KEY` y `WORKOS_COOKIE_SECRET` hacia
+  Secret Manager: deuda aceptada por decisión explícita; revisar antes de
+  ampliar usuarios o al adoptar una estrategia de secretos alternativa.
 - [x] El check local ya no falla por Clippy; falta su primera corrida remota y
   protección de rama.
 - [x] Checkout versionado no utiliza redirección.
