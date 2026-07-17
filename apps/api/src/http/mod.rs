@@ -3,10 +3,12 @@ mod internal;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     convert::Infallible,
+    fmt,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use anyhow::Context as _;
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
@@ -2648,8 +2650,31 @@ async fn apply_manual_review_request(
     Ok(Json(run))
 }
 
-pub(crate) async fn mark_run_failed(state: &AppState, run_id: &str, _error: &anyhow::Error) {
-    tracing::error!(operation = "analysis_run", run_id, "analysis failed");
+#[derive(Debug)]
+struct AnalysisFailureStage(&'static str);
+
+impl fmt::Display for AnalysisFailureStage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.0)
+    }
+}
+
+impl std::error::Error for AnalysisFailureStage {}
+
+fn analysis_failure_stage(error: &anyhow::Error) -> &'static str {
+    error
+        .downcast_ref::<AnalysisFailureStage>()
+        .map(|stage| stage.0)
+        .unwrap_or("unknown")
+}
+
+pub(crate) async fn mark_run_failed(state: &AppState, run_id: &str, error: &anyhow::Error) {
+    tracing::error!(
+        operation = "analysis_run",
+        run_id,
+        stage = analysis_failure_stage(error),
+        "analysis failed"
+    );
     if let Ok(Some(mut failed)) = state.storage.get_analysis_run(run_id).await {
         failed.status = AnalysisStatus::Failed;
         failed.error_message = Some("analysis_failed".to_string());
@@ -2666,17 +2691,22 @@ pub(crate) async fn execute_analysis(
     let mut run = state
         .storage
         .get_analysis_run(&run_id)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("analysis run not found"))?;
+        .await
+        .context(AnalysisFailureStage("run_lookup"))?
+        .ok_or_else(|| anyhow::anyhow!("analysis run not found"))
+        .context(AnalysisFailureStage("run_lookup"))?;
     // Plan vigente para este run (pagado o Mira Free por defecto). El tope del plan
     // se aplica sobre los hilos ANALIZADOS (los que sobreviven el embudo), no sobre
     // los recuperados de Gmail.
-    let plan = plan_for_run(&state, run.org_id.as_deref()).await?;
+    let plan = plan_for_run(&state, run.org_id.as_deref())
+        .await
+        .context(AnalysisFailureStage("plan_lookup"))?;
     let used_analyzed = match run.org_id.as_deref() {
         Some(org_id) => state
             .storage
             .get_usage_ledger(org_id, &current_period_key())
-            .await?
+            .await
+            .context(AnalysisFailureStage("usage_lookup"))?
             .map(|usage| usage.analyzed_threads)
             .unwrap_or(0),
         None => 0,
@@ -2706,12 +2736,17 @@ pub(crate) async fn execute_analysis(
     let page = state
         .gmail
         .list_thread_ids(&access_token, &run.config, retrieval_max)
-        .await?;
+        .await
+        .context(AnalysisFailureStage("gmail_list_threads"))?;
     let more_beyond_retrieved = page.next_page_token.is_some();
     let thread_ids = page.ids;
     run.total_candidate_threads = thread_ids.len() as u64;
     run.progress_message = format!("{} hilos encontrados en Gmail", thread_ids.len());
-    state.storage.update_analysis_run(&run).await?;
+    state
+        .storage
+        .update_analysis_run(&run)
+        .await
+        .context(AnalysisFailureStage("initial_run_progress"))?;
 
     let mut ai_input_tokens = 0u64;
     let mut ai_output_tokens = 0u64;
@@ -4681,6 +4716,18 @@ mod tests {
                 .as_deref()
                 .unwrap_or_default()
                 .contains("secret-token")
+        );
+    }
+
+    #[test]
+    fn analysis_failure_stage_is_safe_and_specific() {
+        let staged = anyhow::anyhow!("provider body contains secret-token")
+            .context(AnalysisFailureStage("gmail_list_threads"));
+
+        assert_eq!(analysis_failure_stage(&staged), "gmail_list_threads");
+        assert_eq!(
+            analysis_failure_stage(&anyhow::anyhow!("provider body contains secret-token")),
+            "unknown"
         );
     }
 
