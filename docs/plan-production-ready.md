@@ -549,6 +549,11 @@ consulta de solo lectura:
     `APP_STORAGE=postgres`, recibe 100% de tráfico y `/health` devolvió 200.
     Falta reintentar una sesión real para confirmar el canje del código y la
     creación de la sesión local.
+  - Avance 2026-07-17: tras repetirse el 500, `ghmi-api-00040-8mm` añadió
+    únicamente logs de etapa sin datos sensibles para separar
+    `authenticate_request`, `authenticate_response`, `storage_lookup`,
+    `storage_account` y `storage_session`. Recibe 100% de tráfico y `/health`
+    devolvió 200. El siguiente intento identificará la capa fallida.
 - [ ] Probar conexión Gmail.
   - **Acción externa necesaria:** en Google Cloud Console > Google Auth
     Platform > Clients, abrir el cliente Web usado por `GOOGLE_CLIENT_ID` y

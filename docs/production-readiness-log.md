@@ -2749,3 +2749,30 @@ cambio de tráfico.
 **Qué sigue:** reintentar «Iniciar sesión» con Google o email y contraseña en
 Mira. Si el callback crea la sesión, continuar inmediatamente con conexión
 Gmail, un análisis, borrado y auditoría; Cloud Scheduler permanece pausado.
+
+## 2026-07-17 — Diagnóstico seguro del callback WorkOS desplegado
+
+**Estado:** desplegado y listo para el siguiente intento; causa final aún
+pendiente de una nueva callback.
+
+**Qué se hizo:** se añadió instrumentación mínima al callback de WorkOS. Ante
+un error interno registra sólo la etapa técnica (`authenticate_request`,
+`authenticate_response`, `storage_lookup`, `storage_account` o
+`storage_session`) y mantiene el mismo error público genérico. Se validaron el
+test del callback, los 163 tests Rust, clippy, build release, 10 tests del
+worker, auditoría de dependencias y build web. La imagen se publicó y la
+revisión `ghmi-api-00040-8mm` quedó con 100% de tráfico.
+
+**Motivo:** el CNAME `mira-auth.ninfasolutions.com` sólo sirve el dominio
+hospedado de WorkOS; el callback que falla llega a
+`mira.ninfasolutions.com`. La traza por etapa permite distinguir el canje con
+WorkOS de una lectura/escritura PostgreSQL sin registrar códigos OAuth,
+correos, tokens ni secretos.
+
+**Evidencia:** `ghmi-api-00040-8mm` quedó `Ready=True`, conserva
+`APP_STORAGE=postgres` y `WORKOS_API_KEY` literal, recibe 100% de tráfico y
+`GET /health` respondió HTTP 200.
+
+**Qué sigue:** reintentar una vez el inicio de sesión y consultar el log
+estructurado de esa request. Con la etapa registrada se corrige sólo la capa
+afectada; Cloud Scheduler continúa pausado.
