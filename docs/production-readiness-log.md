@@ -2720,3 +2720,32 @@ cero. No se registraron claves, correos ni tokens.
 (recomendado: código de seis dígitos por correo) o Email + Password desde
 Authentication. Luego crear/iniciar sesión con la cuenta tester y continuar
 Gmail, análisis, scheduler, borrado y auditoría. Cloud Scheduler sigue pausado.
+
+## 2026-07-17 — Credencial WorkOS production aplicada al runtime
+
+**Estado:** configuración runtime terminada; reintento funcional de login
+pendiente.
+
+**Qué se hizo:** se comprobó que Google completó el flujo hospedado de WorkOS
+y creó el primer usuario del entorno Production, sin registrar sus datos. El
+callback de Mira devolvió HTTP 500 y no añadió cuentas ni sesiones a
+PostgreSQL. La revisión activa aún referenciaba `workos-api-key:2`; se crearon
+dos revisiones sin tráfico para retirar sólo esa referencia y establecer la
+`WORKOS_API_KEY` production presente en `.keys` como variable literal de Cloud
+Run. La revisión final `ghmi-api-00038-djz` recibió 100% de tráfico.
+
+**Motivo:** el código de autorización sólo se canjea al regresar a Mira. Usar
+la credencial de la aplicación WorkOS Production evita que ese canje dependa de
+la referencia anterior, sin crear, rotar ni modificar secretos en Secret
+Manager.
+
+**Evidencia:** el Client ID activo coincide con el configurado localmente; la
+consulta autenticada a WorkOS devolvió un usuario production; los conteos de
+PostgreSQL continuaron en 4 cuentas y 49 sesiones tras el callback fallido. La
+revisión `ghmi-api-00038-djz` quedó `Ready=True`, con `APP_STORAGE=postgres`,
+la clave WorkOS como valor literal y `GET /health` respondió HTTP 200 tras el
+cambio de tráfico.
+
+**Qué sigue:** reintentar «Iniciar sesión» con Google o email y contraseña en
+Mira. Si el callback crea la sesión, continuar inmediatamente con conexión
+Gmail, un análisis, borrado y auditoría; Cloud Scheduler permanece pausado.
