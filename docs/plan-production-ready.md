@@ -587,6 +587,13 @@ consulta de solo lectura:
     direcciones ni contenido de correo. Está `Ready=True`, recibe 100% de
     tráfico y `/health` devolvió 200. Falta crear una ejecución nueva para
     conocer la causa concreta; no se modifica ni se reintenta la fallida.
+  - Corrección 2026-07-17: se detectó que el inicio manual usaba el access
+    token almacenado, mientras el scheduler sí lo renovaba. Como esos tokens
+    expiran normalmente, `ghmi-api-00043-dp2` los renueva y persiste antes de
+    reclamar la ejecución. Si falta el refresh token o Google lo revocó, la API
+    pide reconectar Gmail y conserva el run en `Pending`; no lo marca fallido.
+    La revisión está `Ready=True`, recibe 100% de tráfico y `/health` devolvió
+    200. Falta confirmar una ejecución nueva exitosa.
 - [ ] Probar scheduler manualmente.
 - [ ] Enviar tráfico progresivamente.
   - 0% → pruebas internas.
@@ -1325,6 +1332,11 @@ habilitará acceso directo del frontend a tablas de negocio ni Supabase Auth.
     Se añadió observabilidad segura para el primer fallo de análisis detectado;
     la validación funcional requiere una ejecución nueva, pues la original ya
     quedó en estado `Failed` y no admite un segundo inicio.
+  - Corrección 2026-07-17: `ghmi-api-00043-dp2` está `Ready=True`, conserva
+    `APP_STORAGE=postgres`, recibe 100% de tráfico y `/health` devolvió 200.
+    El inicio manual ahora renueva la conexión Gmail de forma atómica antes de
+    reclamar el análisis; falta ejecutar el smoke test real de creación e
+    inicio para cerrar esta parte de la validación.
 - [ ] Retirar Firestore del runtime sólo después de un periodo de observación y
   respaldo exportado.
 

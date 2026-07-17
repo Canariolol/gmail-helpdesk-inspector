@@ -2868,3 +2868,34 @@ con `APP_STORAGE=postgres`, las variables esperadas sin exponer valores y
 Si falla, consultar el log por la etapa segura y corregir la capa concreta. La
 ejecución ya fallida se conserva como evidencia y Cloud Scheduler sigue
 pausado.
+
+## 2026-07-17 — Renovación de credencial Gmail antes del análisis manual
+
+**Estado:** corrección desplegada; smoke test funcional pendiente.
+
+**Qué se hizo:** se corrigió la asimetría entre el scheduler y el inicio manual:
+el primero ya intercambiaba el refresh token por un access token nuevo, mientras
+el segundo enviaba el access token almacenado directamente a Gmail. Ahora el
+inicio manual renueva y guarda la conexión antes de reclamar el run. Si falta
+el refresh token, si Google lo rechaza o si la conexión cambia durante la
+renovación, responde con una instrucción segura y el run permanece `Pending`;
+no se lanza un worker que lo termine en `Failed`. Se publicó
+`ghmi-api-00043-dp2` con 100% de tráfico.
+
+**Motivo:** los access tokens de Google son de corta duración. La falta de
+renovación es una causa probable del primer fallo, y era un defecto objetivo
+del flujo manual aunque la señal de etapa desplegada anteriormente será la que
+confirme cualquier causa restante en una ejecución nueva.
+
+**Evidencia:** las pruebas cubren que un refresh token ausente bloquea el
+inicio antes del claim y deja el run `Pending`, y que las respuestas de refresh
+no incluyen detalles del proveedor. El predeploy aprobó 167 pruebas Rust,
+Clippy, build release, 10 pruebas del worker, auditoría de dependencias y build
+web. `ghmi-api-00043-dp2` quedó `Ready=True`, conserva `APP_STORAGE=postgres`,
+las variables esperadas sin valores expuestos y `GET /health` devolvió HTTP
+200.
+
+**Qué sigue:** crear un análisis nuevo, iniciarlo una sola vez y comprobar que
+avance desde `Pending` a `Running` y luego a `Completed`. Si falla, usar la
+etapa segura registrada por la revisión anterior para identificar la causa sin
+inspeccionar tokens ni correos. Cloud Scheduler continúa pausado.
