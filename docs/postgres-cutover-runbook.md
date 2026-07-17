@@ -1,9 +1,9 @@
 # Cutover Firestore → PostgreSQL
 
-Estado al 2026-07-16: **ventana de corte activa, promoción pendiente**.
-PostgreSQL tiene la instantánea final validada y una candidata de Cloud Run sin
-tráfico. Cloud Scheduler está pausado; Firestore continúa siendo la fuente
-activa hasta completar los smoke tests autenticados.
+Estado al 2026-07-16: **PostgreSQL recibe 100% de tráfico, validación
+funcional pendiente**. La instantánea final fue validada y Cloud Scheduler
+sigue pausado. Firestore se conserva como rollback hasta completar los smoke
+tests autenticados.
 
 ## Regla de consistencia
 

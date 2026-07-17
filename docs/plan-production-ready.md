@@ -1268,6 +1268,11 @@ habilitará acceso directo del frontend a tablas de negocio ni Supabase Auth.
   - La revisión vigente del tag `postgres` es `ghmi-api-00037-vov`; conserva
     `APP_STORAGE=postgres` e identidad dedicada, está `Ready=True`, recibe 0%
     de tráfico y usa el callback Google público canónico.
+- [x] Promover PostgreSQL tras validar la instantánea final.
+  - Evidencia 2026-07-16: `ghmi-api-00037-vov` recibe 100% de tráfico con
+    `APP_STORAGE=postgres`; `/health` devolvió 200, el preflight WorkOS mantiene
+    el callback público de Mira y Cloud Logging no mostró errores inmediatos.
+    Cloud Scheduler sigue pausado durante la validación funcional.
 - [ ] Verificar en la candidata login, Gmail, análisis,
   scheduler, borrado y auditoría.
   - Avance 2026-07-16: `GET /auth/workos/login` de la candidata devolvió 307

@@ -2673,3 +2673,26 @@ Firestore.
 **Qué sigue:** promover la candidata PostgreSQL para realizar con el tester
 login, Gmail, análisis, scheduler, borrado y auditoría. Scheduler se reanuda
 sólo después de esa validación o de un rollback; pagos continúan diferidos.
+
+## 2026-07-16 — Tráfico de Mira promovido a PostgreSQL
+
+**Estado:** promoción técnica terminada; validación funcional autenticada en
+curso.
+
+**Qué se hizo:** después de validar la instantánea final, se movió 100% del
+tráfico de `ghmi-api` a `ghmi-api-00037-vov`, la revisión con
+`APP_STORAGE=postgres`. Firestore no se eliminó ni se modificó; queda como
+destino de rollback mientras Cloud Scheduler permanece pausado.
+
+**Motivo:** el proxy público de Mira necesita que la revisión activa sea
+PostgreSQL para validar una sesión real y el callback Gmail en el mismo origen
+que usa la persona tester.
+
+**Evidencia:** `GET /health` del servicio activo devolvió HTTP 200. El login
+WorkOS redirige al callback público de Mira y Cloud Logging no mostró eventos
+`ERROR` inmediatos para `ghmi-api-00037-vov`.
+
+**Qué sigue:** completar con la cuenta tester login, conexión Gmail, un
+análisis, scheduler, borrado y auditoría. Si falla antes de aceptar una
+escritura, volver a `ghmi-api-00031-6lx` mediante el runbook; si pasa, reanudar
+Cloud Scheduler y mantener Firestore sólo como rollback durante observación.
