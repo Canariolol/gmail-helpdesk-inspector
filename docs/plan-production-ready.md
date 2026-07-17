@@ -554,6 +554,12 @@ consulta de solo lectura:
     `authenticate_request`, `authenticate_response`, `storage_lookup`,
     `storage_account` y `storage_session`. Recibe 100% de tráfico y `/health`
     devolvió 200. El siguiente intento identificará la capa fallida.
+  - Corrección 2026-07-17: el log indicó `storage_account`. La cuenta heredada
+    tenía el mismo email, pero el ID de WorkOS staging; el nuevo ID production
+    chocaba con el índice único de email. Se reasoció una cuenta al ID
+    production y se revocaron cuatro sesiones locales anteriores. La
+    comprobación posterior devolvió una coincidencia de cuenta por ID y email,
+    y cero sesiones legacy activas. Falta el login real de confirmación.
 - [ ] Probar conexión Gmail.
   - **Acción externa necesaria:** en Google Cloud Console > Google Auth
     Platform > Clients, abrir el cliente Web usado por `GOOGLE_CLIENT_ID` y

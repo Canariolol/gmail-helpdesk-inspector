@@ -2776,3 +2776,32 @@ correos, tokens ni secretos.
 **Qué sigue:** reintentar una vez el inicio de sesión y consultar el log
 estructurado de esa request. Con la etapa registrada se corrige sólo la capa
 afectada; Cloud Scheduler continúa pausado.
+
+## 2026-07-17 — Reasociación de cuenta migrada con WorkOS Production
+
+**Estado:** corrección de datos terminada; confirmación funcional de login
+pendiente.
+
+**Qué se hizo:** el siguiente callback registró la etapa `storage_account`.
+Una consulta de sólo lectura comprobó que el usuario autenticado en WorkOS
+Production no tenía cuenta por su nuevo ID, mientras una cuenta migrada ya
+ocupaba su email con el ID de WorkOS anterior. En una sola transacción se
+reasoció esa cuenta al nuevo ID y se revocaron sus cuatro sesiones locales
+anteriores.
+
+**Motivo:** WorkOS separa los IDs de usuario entre entornos. La cuenta migrada
+seguía identificada por el ID staging, y el índice único de email de
+`mira.records` rechazó crear una segunda cuenta para el mismo email. Revocar
+las sesiones previas evita que cookies heredadas sobrevivan al cambio de
+identidad.
+
+**Evidencia:** antes de la corrección, la validación devolvió cero coincidencias
+por ID WorkOS production y una por email; la transacción afectó una cuenta y
+cuatro sesiones. Después devolvió una coincidencia por ID y email, cero
+sesiones legacy activas y `/health` de `ghmi-api-00040-8mm` respondió HTTP 200.
+No se registraron emails, IDs, códigos OAuth, tokens ni secretos.
+
+**Qué sigue:** iniciar sesión nuevamente en Mira para crear una sesión local
+nueva. Si responde correctamente, continuar la validación PostgreSQL con
+conexión Gmail, análisis, borrado y auditoría; Cloud Scheduler permanece
+pausado.
