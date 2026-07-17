@@ -337,13 +337,22 @@ async fn auth_workos_callback(
         .get_account_by_workos_user_id(&auth.user.id)
         .await
         .map_err(|_| workos_callback_internal_error("storage_lookup"))?;
+    let account_email = auth.user.email.trim().to_lowercase();
+    let existing_account = match existing_account {
+        Some(account) => Some(account),
+        None => state
+            .storage
+            .get_account_by_email(&account_email)
+            .await
+            .map_err(|_| workos_callback_internal_error("storage_email_lookup"))?,
+    };
     let org_id = existing_account
         .as_ref()
         .map(|account| account.org_id.clone())
         .unwrap_or_else(|| Uuid::new_v4().to_string());
     let account = Account {
         workos_user_id: auth.user.id.clone(),
-        email: auth.user.email.trim().to_lowercase(),
+        email: account_email,
         name: auth.user.name.clone().or_else(|| {
             match (&auth.user.first_name, &auth.user.last_name) {
                 (Some(first), Some(last)) => Some(format!("{first} {last}")),
@@ -358,11 +367,22 @@ async fn auth_workos_callback(
             .unwrap_or(now),
         updated_at: now,
     };
-    state
-        .storage
-        .upsert_account(&account)
-        .await
-        .map_err(|_| workos_callback_internal_error("storage_account"))?;
+    if let Some(previous) = existing_account
+        .as_ref()
+        .filter(|previous| previous.workos_user_id != account.workos_user_id)
+    {
+        state
+            .storage
+            .rebind_account_workos_user_id(previous, &account, now)
+            .await
+            .map_err(|_| workos_callback_internal_error("storage_account_rebind"))?;
+    } else {
+        state
+            .storage
+            .upsert_account(&account)
+            .await
+            .map_err(|_| workos_callback_internal_error("storage_account"))?;
+    }
     let session = UserSession {
         id: Uuid::new_v4().to_string(),
         workos_user_id: Some(auth.user.id),

@@ -673,6 +673,23 @@ impl StorageRepository for FirestoreStorage {
         Ok(account)
     }
 
+    async fn rebind_account_workos_user_id(
+        &self,
+        previous: &Account,
+        account: &Account,
+        now: chrono::DateTime<Utc>,
+    ) -> anyhow::Result<()> {
+        if previous.workos_user_id == account.workos_user_id
+            || !previous.email.eq_ignore_ascii_case(&account.email)
+        {
+            anyhow::bail!("invalid WorkOS account rebind");
+        }
+        self.upsert_account(account).await?;
+        self.revoke_user_sessions(&account.email, now).await?;
+        self.delete(&format!("accounts/{}", previous.workos_user_id))
+            .await
+    }
+
     async fn upsert_user_session(&self, session: &UserSession) -> anyhow::Result<()> {
         self.put(&format!("users/{}", session.id), session).await
     }

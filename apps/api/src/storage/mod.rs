@@ -80,6 +80,12 @@ pub trait StorageRepository: Send + Sync {
         workos_user_id: &str,
     ) -> anyhow::Result<Option<Account>>;
     async fn get_account_by_email(&self, email: &str) -> anyhow::Result<Option<Account>>;
+    async fn rebind_account_workos_user_id(
+        &self,
+        previous: &Account,
+        account: &Account,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<()>;
     async fn upsert_user_session(&self, session: &UserSession) -> anyhow::Result<()>;
     async fn get_user_session(&self, id: &str) -> anyhow::Result<Option<UserSession>>;
     async fn upsert_gmail_connection(&self, connection: &GmailConnection) -> anyhow::Result<()>;
@@ -356,6 +362,40 @@ impl StorageRepository for MemoryStorage {
             .values()
             .find(|account| account.email.trim().eq_ignore_ascii_case(&normalized))
             .cloned())
+    }
+
+    async fn rebind_account_workos_user_id(
+        &self,
+        previous: &Account,
+        account: &Account,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<()> {
+        if previous.workos_user_id == account.workos_user_id
+            || !previous.email.eq_ignore_ascii_case(&account.email)
+        {
+            return Err(anyhow!("invalid WorkOS account rebind"));
+        }
+        let mut inner = self.inner.write().await;
+        let Some(stored) = inner.accounts.get(&previous.workos_user_id) else {
+            return Err(anyhow!("previous WorkOS account not found"));
+        };
+        if !stored.email.eq_ignore_ascii_case(&account.email) {
+            return Err(anyhow!("previous WorkOS account email mismatch"));
+        }
+        inner.accounts.remove(&previous.workos_user_id);
+        inner
+            .accounts
+            .insert(account.workos_user_id.clone(), account.clone());
+        for session in inner.sessions.values_mut() {
+            if session
+                .google_account_email
+                .eq_ignore_ascii_case(&account.email)
+            {
+                session.revoked_at = Some(now);
+                session.updated_at = now;
+            }
+        }
+        Ok(())
     }
 
     async fn upsert_user_session(&self, session: &UserSession) -> anyhow::Result<()> {
@@ -1446,6 +1486,75 @@ mod tests {
                 .unwrap()
                 .expect("scheduler credential remains available")
                 .refresh_token_encrypted
+                .is_some()
+        );
+        assert!(
+            storage
+                .get_user_session("other")
+                .await
+                .unwrap()
+                .unwrap()
+                .revoked_at
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn rebind_account_preserves_org_and_revokes_previous_sessions() {
+        let storage = MemoryStorage::default();
+        let now = Utc::now();
+        let previous = Account {
+            workos_user_id: "workos-staging".to_string(),
+            email: "owner@example.com".to_string(),
+            name: Some("Previous name".to_string()),
+            org_id: "org-preserved".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        let account = Account {
+            workos_user_id: "workos-production".to_string(),
+            name: Some("Current name".to_string()),
+            updated_at: now,
+            ..previous.clone()
+        };
+        storage.upsert_account(&previous).await.unwrap();
+        storage
+            .upsert_user_session(&session("owner", "owner@example.com", Some("r1"), 0))
+            .await
+            .unwrap();
+        storage
+            .upsert_user_session(&session("other", "other@example.com", Some("r2"), 0))
+            .await
+            .unwrap();
+
+        storage
+            .rebind_account_workos_user_id(&previous, &account, now)
+            .await
+            .unwrap();
+
+        assert!(
+            storage
+                .get_account_by_workos_user_id("workos-staging")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            storage
+                .get_account_by_workos_user_id("workos-production")
+                .await
+                .unwrap()
+                .unwrap()
+                .org_id,
+            "org-preserved"
+        );
+        assert!(
+            storage
+                .get_user_session("owner")
+                .await
+                .unwrap()
+                .unwrap()
+                .revoked_at
                 .is_some()
         );
         assert!(

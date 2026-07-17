@@ -222,6 +222,66 @@ impl StorageRepository for PostgresStorage {
             .transpose()
     }
 
+    async fn rebind_account_workos_user_id(
+        &self,
+        previous: &Account,
+        account: &Account,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<()> {
+        if previous.workos_user_id == account.workos_user_id
+            || !previous.email.eq_ignore_ascii_case(&account.email)
+        {
+            anyhow::bail!("invalid WorkOS account rebind");
+        }
+        let mut tx = self.pool.begin().await?;
+        let changed = sqlx::query(
+            "UPDATE mira.records SET id=$1, owner_email=$2, workos_user_id=$1, org_id=$3, \
+             sort_at=$4, data=$5, updated_at=now() \
+             WHERE kind='account' AND id=$6 AND workos_user_id=$6 AND owner_email=$2",
+        )
+        .bind(&account.workos_user_id)
+        .bind(normalize_email(&account.email))
+        .bind(&account.org_id)
+        .bind(account.updated_at)
+        .bind(serde_json::to_value(account).context("failed to serialize rebound account")?)
+        .bind(&previous.workos_user_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if changed != 1 {
+            anyhow::bail!("previous WorkOS account changed before rebind");
+        }
+
+        let sessions = sqlx::query_scalar::<_, Value>(
+            "SELECT data FROM mira.records WHERE kind='user_session' AND owner_email=$1 FOR UPDATE",
+        )
+        .bind(normalize_email(&account.email))
+        .fetch_all(&mut *tx)
+        .await?;
+        for value in sessions {
+            let mut session: UserSession = serde_json::from_value(value)
+                .context("invalid PostgreSQL user session during account rebind")?;
+            session.revoked_at = Some(now);
+            session.updated_at = now;
+            self.put_tx(
+                &mut tx,
+                "user_session",
+                &session.id,
+                RecordFields {
+                    owner_email: Some(&session.google_account_email),
+                    workos_user_id: session.workos_user_id.as_deref(),
+                    workos_session_id: session.workos_session_id.as_deref(),
+                    sort_at: Some(session.updated_at),
+                    ..Default::default()
+                },
+                &session,
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
     async fn upsert_user_session(&self, session: &UserSession) -> anyhow::Result<()> {
         self.put(
             "user_session",
