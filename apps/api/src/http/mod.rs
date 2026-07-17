@@ -325,15 +325,18 @@ async fn auth_workos_callback(
             "code": code,
         }))
         .send()
-        .await?
+        .await
+        .map_err(|_| workos_callback_internal_error("authenticate_request"))?
         .json_or_external_error("WorkOS authenticate")
-        .await?;
+        .await
+        .map_err(|_| workos_callback_internal_error("authenticate_response"))?;
 
     let now = Utc::now();
     let existing_account = state
         .storage
         .get_account_by_workos_user_id(&auth.user.id)
-        .await?;
+        .await
+        .map_err(|_| workos_callback_internal_error("storage_lookup"))?;
     let org_id = existing_account
         .as_ref()
         .map(|account| account.org_id.clone())
@@ -355,7 +358,11 @@ async fn auth_workos_callback(
             .unwrap_or(now),
         updated_at: now,
     };
-    state.storage.upsert_account(&account).await?;
+    state
+        .storage
+        .upsert_account(&account)
+        .await
+        .map_err(|_| workos_callback_internal_error("storage_account"))?;
     let session = UserSession {
         id: Uuid::new_v4().to_string(),
         workos_user_id: Some(auth.user.id),
@@ -371,7 +378,11 @@ async fn auth_workos_callback(
         created_at: now,
         updated_at: now,
     };
-    state.storage.upsert_user_session(&session).await?;
+    state
+        .storage
+        .upsert_user_session(&session)
+        .await
+        .map_err(|_| workos_callback_internal_error("storage_session"))?;
 
     let signed = sign_session_id(&session.id, &state.config.session_secret)?;
     let mut headers = HeaderMap::new();
@@ -397,6 +408,15 @@ async fn auth_workos_callback(
         HeaderValue::from_str(&state.config.web_base_url).unwrap(),
     );
     Ok((StatusCode::FOUND, headers))
+}
+
+fn workos_callback_internal_error(stage: &'static str) -> ApiError {
+    tracing::error!(
+        operation = "workos_login_callback",
+        stage,
+        "No se pudo completar el callback WorkOS"
+    );
+    ApiError::internal()
 }
 
 #[derive(Debug, Deserialize)]
