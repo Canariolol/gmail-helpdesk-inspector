@@ -1245,10 +1245,11 @@ habilitará acceso directo del frontend a tablas de negocio ni Supabase Auth.
     `ghmi-api-00031-6lx` conserva 100% de tráfico.
 - [x] Definir una ventana breve de escritura congelada para el cutover; no se
   aplicará dual-write, para no introducir dos fuentes de verdad.
-  - Decisión 2026-07-16: antes de la promoción, la persona responsable pausa
-    al único tester y Cloud Scheduler, se espera que terminen las requests en
-    curso, se ejecuta la instantánea final y sólo entonces se mueve el tráfico.
-    Scheduler se reanuda después de validar PostgreSQL o de volver a Firestore.
+  - Decisión 2026-07-16: antes de la promoción, la persona responsable pide
+    al único tester pausar el uso de Mira y pausa Cloud Scheduler; se espera
+    que terminen las requests en curso, se ejecuta la instantánea final y sólo
+    entonces se mueve el tráfico. Scheduler se reanuda después de validar
+    PostgreSQL o de volver a Firestore.
 - [x] Documentar rollback a Firestore antes de mover tráfico.
   - `docs/postgres-cutover-runbook.md` exige ventana de escritura congelada
     cuando existan usuarios, registra la revisión previa y prohíbe declarar un
@@ -1266,8 +1267,8 @@ habilitará acceso directo del frontend a tablas de negocio ni Supabase Auth.
   - Avance 2026-07-16: `GET /auth/workos/login` de la candidata devolvió 307
     con callback público `https://mira.ninfasolutions.com/auth/workos/callback`.
     La persona responsable ya registró en Google el origen JavaScript y la URI
-    `https://mira.ninfasolutions.com/gmail/connect/callback`; falta desplegar
-    esa URI en la nueva candidata y completar una sesión real y los flujos que
+    `https://mira.ninfasolutions.com/gmail/connect/callback`; la candidata
+    vigente ya usa esa URI. Falta completar una sesión real y los flujos que
     escriben datos.
 - [ ] Retirar Firestore del runtime sólo después de un periodo de observación y
   respaldo exportado.

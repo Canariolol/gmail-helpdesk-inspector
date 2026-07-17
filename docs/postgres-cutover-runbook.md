@@ -12,7 +12,7 @@ hacer cuando no haya escrituras de usuarios en curso.
 
 Para este cutover hay un tester recurrente, pero no usuarios externos ni cobros
 habilitados. La persona responsable autorizó una ventana breve de escritura
-congelada: pausar al tester, pausar Cloud Scheduler, esperar las requests en
+congelada: pedir al tester pausar el uso de Mira, pausar Cloud Scheduler, esperar las requests en
 curso, ejecutar la instantánea final y sólo entonces cambiar tráfico. Sin esa
 ventana, un rollback puede perder las escrituras que hayan ocurrido sólo en
 PostgreSQL.

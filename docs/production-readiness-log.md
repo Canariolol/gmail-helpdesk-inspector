@@ -2601,7 +2601,8 @@ Secret Manager.
 **Qué se hizo:** la persona responsable aceptó Supabase Free para el
 lanzamiento temprano —sin usuarios externos ni cobros— y retiró el plan de
 Supabase como bloqueo de esta etapa. También autorizó una ventana breve de
-escritura congelada antes del corte: pausar al tester y Cloud Scheduler,
+escritura congelada antes del corte: pedir al tester pausar el uso de Mira y
+pausar Cloud Scheduler,
 esperar requests en curso, tomar la instantánea final y mover tráfico sólo
 después. Se dejó explícito que `mira.records` sigue siendo el modelo inicial;
 normalizar entidades se posterga hasta que una consulta real lo justifique.
