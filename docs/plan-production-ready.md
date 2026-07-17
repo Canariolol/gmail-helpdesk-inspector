@@ -539,8 +539,13 @@ consulta de solo lectura:
     destino contiene el callback de Mira y el `WORKOS_CLIENT_ID` production.
     Se repitió en `ghmi-api-00037-vov` después del cambio Google y conserva el
     callback público de WorkOS.
-    El login completo se prueba al enviar tráfico controlado: la callback
-    pública aún llega al proxy web que sirve la revisión activa.
+    El login completo se prueba contra la revisión PostgreSQL ahora activa;
+    falta habilitar un método de acceso para la cuenta tester.
+  - Bloqueo 2026-07-16: AuthKit production muestra únicamente «Continuar con
+    SSO» y la consulta autenticada de User Management devolvió cero usuarios.
+    Se debe habilitar en el Dashboard de WorkOS Production un método para
+    usuarios individuales (Magic Auth recomendado para el tester, o Email +
+    Password) antes de crear/iniciar sesión con la cuenta de prueba.
 - [ ] Probar conexión Gmail.
   - **Acción externa necesaria:** en Google Cloud Console > Google Auth
     Platform > Clients, abrir el cliente Web usado por `GOOGLE_CLIENT_ID` y

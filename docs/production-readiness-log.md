@@ -2697,3 +2697,26 @@ inmediatos para `ghmi-api-00037-vov`.
 análisis, scheduler, borrado y auditoría. Si falla antes de aceptar una
 escritura, volver a `ghmi-api-00031-6lx` mediante el runbook; si pasa, reanudar
 Cloud Scheduler y mantener Firestore sólo como rollback durante observación.
+
+## 2026-07-16 — Bloqueo de acceso AuthKit en WorkOS Production
+
+**Estado:** diagnóstico terminado; no se modificó WorkOS, tráfico ni datos.
+
+**Qué se hizo:** se validó que Mira genera el redirect AuthKit de la aplicación
+production y retorna al callback público correcto. Al probarlo, la Hosted UI
+ofrece sólo «Continuar con SSO». Una consulta autenticada a User Management
+devolvió cero usuarios en el entorno production.
+
+**Motivo:** la aplicación WorkOS production tiene una base de usuarios propia;
+la cuenta tester usada antes pertenece al entorno anterior. Sin un método para
+usuarios individuales no puede registrarse ni iniciar sesión para validar el
+backend PostgreSQL.
+
+**Evidencia:** pantalla Hosted UI recibida por la persona tester, preflight
+WorkOS 307 correcto y consulta de usuarios production sin errores con total
+cero. No se registraron claves, correos ni tokens.
+
+**Qué sigue:** en WorkOS Dashboard, entorno Production, habilitar Magic Auth
+(recomendado: código de seis dígitos por correo) o Email + Password desde
+Authentication. Luego crear/iniciar sesión con la cuenta tester y continuar
+Gmail, análisis, scheduler, borrado y auditoría. Cloud Scheduler sigue pausado.
