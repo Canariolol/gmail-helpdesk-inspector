@@ -2688,9 +2688,10 @@ destino de rollback mientras Cloud Scheduler permanece pausado.
 PostgreSQL para validar una sesión real y el callback Gmail en el mismo origen
 que usa la persona tester.
 
-**Evidencia:** `GET /health` del servicio activo devolvió HTTP 200. El login
-WorkOS redirige al callback público de Mira y Cloud Logging no mostró eventos
-`ERROR` inmediatos para `ghmi-api-00037-vov`.
+**Evidencia:** `GET /health` del servicio activo y
+`https://mira.ninfasolutions.com` devolvieron HTTP 200. El login WorkOS
+redirige al callback público de Mira y Cloud Logging no mostró eventos `ERROR`
+inmediatos para `ghmi-api-00037-vov`.
 
 **Qué sigue:** completar con la cuenta tester login, conexión Gmail, un
 análisis, scheduler, borrado y auditoría. Si falla antes de aceptar una
