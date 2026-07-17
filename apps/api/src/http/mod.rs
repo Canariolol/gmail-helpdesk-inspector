@@ -43,8 +43,10 @@ use crate::{
     },
     auth::{
         GoogleTokenResponse, UserSession, clear_oauth_cookie, clear_session_cookie, decrypt_token,
-        encrypt_token, oauth_cookie, session_cookie, session_expires_at, session_is_active,
-        sign_session_id, verify_session_cookie,
+        encrypt_token, oauth_cookie,
+        refresh::{RefreshError, refresh_google_access_token},
+        session_cookie, session_expires_at, session_is_active, sign_session_id,
+        verify_session_cookie,
     },
     billing::{
         Account, BillingPlan, BillingPlanId, CheckoutSession, CheckoutSessionStatus,
@@ -2303,8 +2305,9 @@ async fn start_analysis_run(
     let connection = state
         .storage
         .get_gmail_connection(&session.google_account_email)
-        .await?;
-    require_gmail_connected(connection.as_ref())?;
+        .await?
+        .filter(|connection| gmail_connection_is_active(Some(connection)))
+        .ok_or_else(|| ApiError::forbidden("conecta Gmail antes de analizar"))?;
     let run = require_owned_run(&state, &id, &session).await?;
     if run.status != AnalysisStatus::Pending {
         return Err(ApiError::conflict(
@@ -2318,6 +2321,7 @@ async fn start_analysis_run(
         state.config.rate_limit.analysis_start_per_hour,
     )
     .await?;
+    let access_token = fresh_gmail_access_token(&state, &connection).await?;
     let run = state
         .storage
         .claim_pending_analysis_run(&run.id)
@@ -2326,10 +2330,6 @@ async fn start_analysis_run(
             ApiError::conflict("el análisis solo puede iniciarse cuando está pendiente")
         })?;
 
-    let access_token = decrypt_token(
-        &gmail_access_token(connection.as_ref())?,
-        &state.config.encryption_key,
-    )?;
     let worker_state = state.clone();
     let run_id = run.id.clone();
     tokio::spawn(async move {
@@ -3781,11 +3781,51 @@ async fn enforce_rate_limit(
     }
 }
 
-fn gmail_access_token(connection: Option<&GmailConnection>) -> Result<String, ApiError> {
-    connection
-        .filter(|connection| gmail_connection_is_active(Some(connection)))
-        .map(|connection| connection.access_token_encrypted.clone())
-        .ok_or_else(|| ApiError::forbidden("conecta Gmail antes de analizar"))
+async fn fresh_gmail_access_token(
+    state: &AppState,
+    connection: &GmailConnection,
+) -> Result<String, ApiError> {
+    let encrypted_refresh = connection
+        .refresh_token_encrypted
+        .as_deref()
+        .ok_or_else(|| {
+            ApiError::forbidden("la conexión con Gmail expiró; vuelve a conectar la casilla")
+        })?;
+    let refresh_token = decrypt_token(encrypted_refresh, &state.config.encryption_key)?;
+    let token = refresh_google_access_token(&state.http, &state.config.google, &refresh_token)
+        .await
+        .map_err(gmail_refresh_error)?;
+
+    let mut updated = connection.clone();
+    updated.access_token_encrypted =
+        encrypt_token(&token.access_token, &state.config.encryption_key)?;
+    if let Some(rotated) = token.refresh_token.as_deref() {
+        updated.refresh_token_encrypted =
+            Some(encrypt_token(rotated, &state.config.encryption_key)?);
+    }
+    updated.updated_at = Utc::now();
+    if state
+        .storage
+        .refresh_gmail_connection(connection, &updated)
+        .await?
+        != crate::storage::GmailConnectionRefresh::Updated
+    {
+        return Err(ApiError::conflict(
+            "la conexión Gmail cambió mientras se iniciaba el análisis; inténtalo nuevamente",
+        ));
+    }
+    Ok(token.access_token)
+}
+
+fn gmail_refresh_error(error: RefreshError) -> ApiError {
+    match error {
+        RefreshError::InvalidGrant => {
+            ApiError::forbidden("Google rechazó la conexión; vuelve a conectar la casilla")
+        }
+        RefreshError::Other(_) => ApiError::service_unavailable(
+            "no se pudo renovar la conexión con Gmail; inténtalo nuevamente",
+        ),
+    }
 }
 
 fn require_gmail_connected(connection: Option<&GmailConnection>) -> Result<(), ApiError> {
@@ -4729,6 +4769,67 @@ mod tests {
             analysis_failure_stage(&anyhow::anyhow!("provider body contains secret-token")),
             "unknown"
         );
+    }
+
+    #[test]
+    fn gmail_refresh_errors_are_safe_and_actionable() {
+        let rejected = gmail_refresh_error(RefreshError::InvalidGrant);
+        assert_eq!(rejected.status, StatusCode::FORBIDDEN);
+        assert!(rejected.message.contains("vuelve a conectar"));
+
+        let unavailable = gmail_refresh_error(RefreshError::Other(anyhow::anyhow!(
+            "provider body contains secret-token"
+        )));
+        assert_eq!(unavailable.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(!unavailable.message.contains("secret-token"));
+    }
+
+    #[tokio::test]
+    async fn start_analysis_requires_a_refresh_token_before_claiming_the_run() {
+        let fixture = seeded_app().await;
+        let now = Utc::now();
+        let mut pending = fixture
+            .storage
+            .get_analysis_run("run-alice")
+            .await
+            .unwrap()
+            .unwrap();
+        pending.status = AnalysisStatus::Pending;
+        pending.completed_at = None;
+        fixture.storage.update_analysis_run(&pending).await.unwrap();
+        fixture
+            .storage
+            .upsert_gmail_connection(&GmailConnection {
+                owner_email: "alice@example.com".to_string(),
+                gmail_account_email: "alice@example.com".to_string(),
+                access_token_encrypted: "current-access-token".to_string(),
+                refresh_token_encrypted: None,
+                connected_at: now,
+                updated_at: now,
+                revoked_at: None,
+            })
+            .await
+            .unwrap();
+
+        let response = fixture
+            .app
+            .oneshot(request(
+                Method::POST,
+                "/analysis-runs/run-alice/start",
+                Some(&fixture.alice_cookie),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let run = fixture
+            .storage
+            .get_analysis_run("run-alice")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.status, AnalysisStatus::Pending);
     }
 
     #[tokio::test]
