@@ -2192,7 +2192,7 @@ Usar esta tabla para mantener una visión ejecutiva:
 | Uptime y alertas | P0 | Activas |  | 2 uptime checks, canal email, políticas de 5xx, uptime y errores de aplicación; 3 métricas log-based (2026-07-18) | Falta confirmar el drill de notificación y borrar sus recursos temporales. |
 | Logs API | P0 | En progreso |  | Evento HTTP correlacionado en Cloud Logging de `ghmi-api-00033-xut` | API ya validó campos estructurados y redacción en candidata; faltan Bedrock y errores reales de proveedores. |
 | Consumo Bedrock | P1 | Listo local |  | Auditoría única `/audit/batch`; `scripts/check-all.sh` aprobado (166 Rust, 11 worker y build web) | Falta validación desplegada contra la referencia 2600/470. |
-| CI verde | P0 | Activo |  | PR #1 disparó la primera corrida remota; `main` protegida por el check `verify`; auditorías cargo/pip añadidas (2026-07-18) | Confirmar el resultado de la primera corrida remota. |
+| CI verde | P0 | Activo y verde |  | Primera corrida remota `success` en PR #1 (run 29656370625); `main` protegida por el check `verify`; auditorías cargo/pip incluidas (2026-07-18) |  |
 | Panel admin | P1 | Pendiente |  |  |  |
 | Hardening contenedores | P1 | En progreso |  | Builds Docker, salud y UID no-root de API/worker/web | Runtime separado, lockfile y usuarios no-root; faltan CSP, escaneo y límites operativos. |
 | Retención automática | P1 | Pendiente |  |  |  |
