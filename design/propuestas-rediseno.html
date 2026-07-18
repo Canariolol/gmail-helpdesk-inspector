@@ -1,0 +1,754 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mira Helpdesk · 3 finalistas · temas</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Archivo:wght@500;600;700;800&family=IBM+Plex+Mono:wght@500;600&family=Sora:wght@500;600;700&display=swap" rel="stylesheet">
+<style>
+/* ============ shell ============ */
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{font-family:Inter,system-ui,sans-serif;background:#141210;color:#efe9e2;line-height:1.55}
+.shell-head{position:sticky;top:0;z-index:50;background:rgba(20,18,16,.92);backdrop-filter:blur(10px);border-bottom:1px solid #2b2620;padding:14px 28px;display:flex;align-items:center;gap:22px;flex-wrap:wrap}
+.shell-head h1{font-size:15px;font-weight:600;letter-spacing:.2px;white-space:nowrap}
+.shell-head h1 span{color:#f97316}
+.tabs{display:flex;gap:6px;flex-wrap:wrap}
+.tab{border:1px solid #3a332b;background:transparent;color:#b8ada1;font:600 12.5px Inter,sans-serif;padding:8px 14px;border-radius:999px;cursor:pointer;transition:all .18s}
+.tab:hover{border-color:#f97316;color:#f9ece1}
+.tab.active{background:#f97316;border-color:#f97316;color:#1c130c}
+.tab:focus-visible{outline:2px solid #f97316;outline-offset:2px}
+.intro{max-width:860px;margin:44px auto 8px;padding:0 28px}
+.intro h2{font:600 26px/1.25 Inter,sans-serif;letter-spacing:-.02em;margin-bottom:12px}
+.intro p{color:#b8ada1;font-size:14.5px;max-width:66ch}
+.prop{display:none;padding:36px 0 90px}
+.prop.visible{display:block}
+.prop-meta{max-width:1080px;margin:0 auto 26px;padding:0 28px}
+.prop-kicker{font:600 11px Inter,sans-serif;letter-spacing:.18em;text-transform:uppercase;color:#f97316;margin-bottom:10px}
+.prop-meta h3{font:700 30px/1.15 Inter,sans-serif;letter-spacing:-.025em;margin-bottom:12px}
+.prop-meta > p{color:#c9bfb3;font-size:14.5px;max-width:72ch;margin-bottom:22px}
+.themes{display:flex;gap:10px;flex-wrap:wrap}
+.theme-btn{display:flex;align-items:center;gap:10px;border:1px solid #3a332b;background:#1c1915;color:#c9bfb3;font:600 12.5px Inter,sans-serif;padding:9px 14px;border-radius:12px;cursor:pointer;transition:all .15s}
+.theme-btn:hover{border-color:#6b5f50}
+.theme-btn.on{border-color:#f97316;color:#fff;background:#241d15}
+.theme-btn:focus-visible{outline:2px solid #f97316;outline-offset:2px}
+.theme-btn .dots{display:flex;gap:3px}
+.theme-btn .dots i{width:13px;height:13px;border-radius:50%;border:1px solid rgba(255,255,255,.25)}
+.theme-btn small{font:500 10px Inter,sans-serif;color:#8d8377;text-transform:uppercase;letter-spacing:.08em}
+.mock-label{max-width:1080px;margin:32px auto 12px;padding:0 28px;font:600 11px Inter,sans-serif;letter-spacing:.16em;text-transform:uppercase;color:#8d8377}
+.frame{max-width:1080px;margin:0 auto;padding:0 28px}
+.frame-in{border-radius:14px;overflow:hidden;box-shadow:0 20px 70px rgba(0,0,0,.5);border:1px solid rgba(255,255,255,.08)}
+.frame-bar{display:flex;align-items:center;gap:6px;padding:9px 14px;background:#221d18;border-bottom:1px solid rgba(255,255,255,.06)}
+.frame-bar b{width:9px;height:9px;border-radius:50%;background:#4a4138}
+.frame-bar span{margin-left:10px;font:500 10.5px "IBM Plex Mono",monospace;color:#7d7266}
+@media (prefers-reduced-motion: reduce){html{scroll-behavior:auto}.tab,.theme-btn{transition:none}}
+
+/* ============================================================
+   MÉTRICA SUIZA — tokens
+   ============================================================ */
+#pB{
+  --bg:#FAFAF8; --ink:#1A1A18; --muted:#6B6B66; --faint:#B4B4AC;
+  --line:#E4E4DE; --line-soft:#F0F0EB; --card:#FFFFFF;
+  --accent:#F25C05; --accent-ink:#FFFFFF; --bar:#E4E4DE;
+  --ok:#2E7D5B; --warn:#B8860B; --info:#4A5A8A;
+}
+#pB[data-theme="bosque"]{
+  --bg:#F8FAF6; --ink:#161A15; --muted:#67705F; --faint:#AAB3A2;
+  --line:#DFE5D8; --line-soft:#ECF0E6; --card:#FFFFFF;
+  --accent:#2F7D4F; --accent-ink:#FFFFFF; --bar:#DFE5D8;
+  --ok:#2F7D4F; --warn:#B8860B; --info:#4A5A8A;
+}
+#pB[data-theme="carbon"]{
+  --bg:#161614; --ink:#F0F0EA; --muted:#8F8F86; --faint:#5C5C54;
+  --line:#2C2C28; --line-soft:#222220; --card:#1D1D1A;
+  --accent:#F97316; --accent-ink:#1C130C; --bar:#2E2E29;
+  --ok:#5BBB8A; --warn:#D9A441; --info:#8FA1D9;
+}
+#pB[data-theme="petroleo"]{
+  --bg:#0D1B22; --ink:#E9F1F1; --muted:#7F9BA4; --faint:#46626D;
+  --line:#22363F; --line-soft:#16272E; --card:#122530;
+  --accent:#E3B341; --accent-ink:#161005; --bar:#1F3742;
+  --ok:#5BBB8A; --warn:#D9A441; --info:#8FA1D9;
+}
+#pB .land{background:var(--bg);color:var(--ink);font-family:Inter,sans-serif}
+#pB .l-nav{display:flex;align-items:center;justify-content:space-between;padding:0 40px;height:60px;border-bottom:1px solid var(--ink)}
+#pB .l-logo{font:800 15px Archivo,sans-serif;letter-spacing:.02em;display:flex;align-items:center;gap:8px}
+#pB .l-logo i{width:10px;height:10px;background:var(--accent);display:inline-block;font-style:normal}
+#pB .l-links{display:flex;gap:30px;font:500 13px Inter,sans-serif}
+#pB .l-links a{color:var(--muted);text-decoration:none}
+#pB .l-links a:hover{color:var(--ink)}
+#pB .btn{background:var(--ink);color:var(--bg);font:600 13px Inter,sans-serif;border:none;padding:10px 20px;cursor:pointer;text-decoration:none}
+#pB .btn:hover{background:var(--accent);color:var(--accent-ink)}
+#pB .l-hero{display:grid;grid-template-columns:1.15fr 1fr;border-bottom:1px solid var(--ink)}
+#pB .l-hl{padding:70px 40px;border-right:1px solid var(--ink)}
+#pB .l-eyebrow{font:600 10.5px "IBM Plex Mono",monospace;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);margin-bottom:26px}
+#pB .l-hero h1{font:700 52px/1.04 Archivo,sans-serif;letter-spacing:-.03em;margin-bottom:22px}
+#pB .l-hero h1 span{color:var(--accent)}
+#pB .l-hl p{font-size:15.5px;color:var(--muted);max-width:44ch;margin-bottom:30px}
+#pB .l-note{font:500 11.5px "IBM Plex Mono",monospace;color:var(--muted);margin-left:16px}
+#pB .l-stat{padding:70px 40px;display:flex;flex-direction:column;justify-content:center}
+#pB .l-stat b{font:700 96px/1 Archivo,sans-serif;letter-spacing:-.04em;font-variant-numeric:tabular-nums}
+#pB .l-stat b i{font-style:normal;color:var(--accent)}
+#pB .l-stat span{font:500 12px "IBM Plex Mono",monospace;color:var(--muted);margin-top:10px;text-transform:uppercase;letter-spacing:.1em}
+#pB .l-row{display:grid;grid-template-columns:repeat(4,1fr);border-bottom:1px solid var(--line)}
+#pB .l-c{padding:26px 40px;border-right:1px solid var(--line);font-size:13px;color:var(--muted)}
+#pB .l-c:last-child{border-right:none}
+#pB .l-c b{display:block;font:600 13.5px Inter,sans-serif;color:var(--ink);margin-bottom:5px}
+#pB .l-c b u{text-decoration:none;color:var(--accent);margin-right:8px;font-family:"IBM Plex Mono",monospace;font-weight:600}
+#pB .app{display:flex;background:var(--bg);color:var(--ink);font-family:Inter,sans-serif;min-height:600px}
+#pB .a-side{width:216px;border-right:1px solid var(--line)}
+#pB .a-brand{font:800 14px Archivo,sans-serif;padding:20px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px}
+#pB .a-brand i{width:9px;height:9px;background:var(--accent);font-style:normal}
+#pB .a-item{display:flex;align-items:center;justify-content:space-between;padding:11px 20px;font:500 13px Inter,sans-serif;color:var(--muted);cursor:pointer;border-bottom:1px solid var(--line-soft)}
+#pB .a-item.on{color:var(--ink);font-weight:600;box-shadow:inset 3px 0 0 var(--accent)}
+#pB .a-item:hover:not(.on){color:var(--ink)}
+#pB .a-item small{font:500 10px "IBM Plex Mono",monospace;color:var(--faint)}
+#pB .a-main{flex:1}
+#pB .a-top{display:flex;align-items:center;justify-content:space-between;padding:16px 28px;border-bottom:1px solid var(--line)}
+#pB .a-top h2{font:700 17px Archivo,sans-serif;letter-spacing:-.01em}
+#pB .a-filters{display:flex;align-items:stretch}
+#pB .pill{border:1px solid var(--line);border-right:none;background:var(--card);padding:8px 14px;font:500 12px "IBM Plex Mono",monospace;color:var(--ink)}
+#pB .pill:last-of-type{border-right:1px solid var(--line)}
+#pB .a-go{background:var(--accent);color:var(--accent-ink);border:none;font:600 12.5px Inter,sans-serif;padding:8px 18px;cursor:pointer}
+#pB .kpis{display:grid;grid-template-columns:repeat(5,1fr)}
+#pB .kpi{padding:22px 28px;border-right:1px solid var(--line);border-bottom:1px solid var(--line)}
+#pB .kpi:last-child{border-right:none}
+#pB .kpi span{font:500 10.5px "IBM Plex Mono",monospace;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);display:block;margin-bottom:8px}
+#pB .kpi b{font:700 30px Archivo,sans-serif;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+#pB .kpi.hot b{color:var(--accent)}
+#pB .kpi small{display:block;font:500 10.5px "IBM Plex Mono",monospace;color:var(--ok);margin-top:4px}
+#pB .grid2{display:grid;grid-template-columns:1.6fr 1fr}
+#pB .card{padding:22px 28px;border-right:1px solid var(--line)}
+#pB .card:last-child{border-right:none}
+#pB .card h4{font:700 13px Archivo,sans-serif;text-transform:uppercase;letter-spacing:.05em;margin-bottom:2px}
+#pB .card .sub{font:500 10.5px "IBM Plex Mono",monospace;color:var(--muted);margin-bottom:20px}
+#pB .bars{display:flex;align-items:flex-end;gap:12px;height:150px}
+#pB .bcol{flex:1;display:flex;flex-direction:column;align-items:center;gap:6px;height:100%;justify-content:flex-end}
+#pB .bar{width:100%;background:var(--bar)}
+#pB .bar.hi{background:var(--accent)}
+#pB .bcol span{font:500 10px "IBM Plex Mono",monospace;color:var(--faint)}
+#pB .rows .row{display:flex;justify-content:space-between;align-items:center;padding:11px 0;border-bottom:1px solid var(--line-soft);font-size:13px}
+#pB .rows .row div b{display:block;font-weight:600;font-size:12.5px}
+#pB .rows .row div span{font:500 10.5px "IBM Plex Mono",monospace;color:var(--faint)}
+#pB .chip{font:600 10px "IBM Plex Mono",monospace;text-transform:uppercase;letter-spacing:.06em;padding:4px 8px;border:1px solid}
+#pB .chip.ok{border-color:var(--ok);color:var(--ok)}
+#pB .chip.warn{border-color:var(--warn);color:var(--warn)}
+#pB .chip.info{border-color:var(--info);color:var(--info)}
+
+/* ============================================================
+   ÁMBAR NOCTURNO — tokens
+   El panel de trabajo se mantiene claro en los 4 temas (se
+   trabaja de día); lo que cambia es el hero, el sidebar y la
+   temperatura de los acentos.
+   ============================================================ */
+#pC{
+  --hero-bg:#171310; --hero-ink:#EDE4DA; --hero-muted:#A6988A; --hero-faint:#7d7060;
+  --g1:#FFB25C; --g2:#F97316; --btn-ink:#1C130C;
+  --glow:rgba(249,115,22,.32); --ring:rgba(249,115,22,.45); --eyebrow-line:rgba(255,178,92,.35);
+  --app-bg:#F6EFE7; --card:#FFFFFF; --ink:#2A2420; --muted2:#8a7c6d; --sub:#a3947f;
+  --side-bg:#1D1814; --side-ink:#F6EFE7; --side-muted:#A6988A; --side-line:rgba(255,255,255,.08);
+  --side-on-bg:rgba(249,115,22,.16); --side-on-ink:#FFB25C; --side-hover:#EDE4DA;
+  --accent-num:#E8620D; --bar-rest:#F2E2CE; --pill-line:#E5D8C7; --row-line:#F5EBDD;
+  --shadow:rgba(60,35,10,.06);
+}
+#pC[data-theme="vino"]{
+  --hero-bg:#1E1116; --hero-ink:#F4E7E6; --hero-muted:#AC9095; --hero-faint:#7d6066;
+  --g1:#FF8C69; --g2:#E8505B; --btn-ink:#230A0D;
+  --glow:rgba(232,80,91,.30); --ring:rgba(232,80,91,.45); --eyebrow-line:rgba(255,140,105,.35);
+  --app-bg:#F8F0EE; --card:#FFFFFF; --ink:#2B2124; --muted2:#8f7a7e; --sub:#a58a8f;
+  --side-bg:#251419; --side-ink:#F4E7E6; --side-muted:#AC9095; --side-line:rgba(255,255,255,.08);
+  --side-on-bg:rgba(232,80,91,.18); --side-on-ink:#FF9E8A; --side-hover:#F4E7E6;
+  --accent-num:#D8434E; --bar-rest:#F3DEDA; --pill-line:#E8D3D0; --row-line:#F5E4E1;
+  --shadow:rgba(60,15,25,.06);
+}
+#pC[data-theme="amanecer"]{
+  --hero-bg:#FBF3E9; --hero-ink:#2A2016; --hero-muted:#8A7A68; --hero-faint:#B3A38F;
+  --g1:#FFB25C; --g2:#F97316; --btn-ink:#1C130C;
+  --glow:rgba(249,115,22,.16); --ring:rgba(249,115,22,.45); --eyebrow-line:rgba(200,120,40,.4);
+  --app-bg:#F6EFE7; --card:#FFFFFF; --ink:#2A2420; --muted2:#8a7c6d; --sub:#a3947f;
+  --side-bg:#FFF8EF; --side-ink:#2A2420; --side-muted:#8A7A68; --side-line:#EFE2D2;
+  --side-on-bg:#F9E3CC; --side-on-ink:#B14A12; --side-hover:#2A2420;
+  --accent-num:#E8620D; --bar-rest:#F2E2CE; --pill-line:#E5D8C7; --row-line:#F5EBDD;
+  --shadow:rgba(60,35,10,.06);
+}
+#pC[data-theme="glaciar"]{
+  --hero-bg:#F3F7FA; --hero-ink:#17202A; --hero-muted:#74828E; --hero-faint:#A2AFBA;
+  --g1:#63A8FF; --g2:#2E6FE8; --btn-ink:#FFFFFF;
+  --glow:rgba(46,111,232,.14); --ring:rgba(46,111,232,.45); --eyebrow-line:rgba(46,111,232,.35);
+  --app-bg:#F2F6F9; --card:#FFFFFF; --ink:#1B2430; --muted2:#75828e; --sub:#93a0ab;
+  --side-bg:#FFFFFF; --side-ink:#1B2430; --side-muted:#74828E; --side-line:#E3EAF0;
+  --side-on-bg:#DEEAFB; --side-on-ink:#2E6FE8; --side-hover:#1B2430;
+  --accent-num:#2E6FE8; --bar-rest:#DEE7EF; --pill-line:#DCE5EC; --row-line:#EBF1F5;
+  --shadow:rgba(20,40,70,.06);
+}
+#pC .land{background:var(--hero-bg);color:var(--hero-ink);font-family:Inter,sans-serif}
+#pC .l-nav{display:flex;align-items:center;justify-content:space-between;padding:20px 44px}
+#pC .l-logo{display:flex;align-items:center;gap:10px;font:700 16px Sora,sans-serif;color:var(--hero-ink)}
+#pC .l-logo img{width:28px;height:28px;border-radius:50%;object-fit:cover;object-position:top;box-shadow:0 0 0 2px var(--ring)}
+#pC .l-links{display:flex;gap:28px;font:500 13.5px Inter,sans-serif}
+#pC .l-links a{color:var(--hero-muted);text-decoration:none}
+#pC .l-links a:hover{color:var(--hero-ink)}
+#pC .btn{background:linear-gradient(135deg,var(--g1),var(--g2));color:var(--btn-ink);font:700 13.5px Inter,sans-serif;border:none;padding:11px 22px;border-radius:10px;cursor:pointer;text-decoration:none}
+#pC .btn:hover{filter:brightness(1.08)}
+#pC .ghost{font:600 13.5px Inter,sans-serif;color:var(--hero-ink);text-decoration:none;margin-right:14px}
+#pC .l-hero{text-align:center;padding:84px 44px 66px;position:relative;overflow:hidden}
+#pC .l-hero::before{content:"";position:absolute;left:50%;bottom:-160px;transform:translateX(-50%);width:720px;height:320px;background:radial-gradient(ellipse at center,var(--glow),transparent 65%);pointer-events:none}
+#pC .l-eyebrow{display:inline-block;font:600 11px Sora,sans-serif;letter-spacing:.16em;text-transform:uppercase;color:var(--accent-num);border:1px solid var(--eyebrow-line);border-radius:999px;padding:7px 16px;margin-bottom:28px}
+#pC .l-hero h1{font:600 54px/1.08 Sora,sans-serif;letter-spacing:-.03em;max-width:19ch;margin:0 auto 22px}
+#pC .l-hero h1 span{background:linear-gradient(120deg,var(--g1),var(--g2));-webkit-background-clip:text;background-clip:text;color:transparent}
+#pC[data-theme="amanecer"] .l-hero h1 span,#pC[data-theme="glaciar"] .l-hero h1 span{background:linear-gradient(120deg,var(--g2),var(--g2));-webkit-background-clip:text;background-clip:text}
+#pC .l-hero p{color:var(--hero-muted);font-size:16px;max-width:52ch;margin:0 auto 34px}
+#pC .l-note{display:block;margin-top:16px;font-size:12.5px;color:var(--hero-faint)}
+#pC .l-horizon{height:1px;background:linear-gradient(90deg,transparent,var(--g2) 30%,var(--g1) 50%,var(--g2) 70%,transparent);position:relative;z-index:1}
+#pC .l-panelpeek{background:var(--app-bg);color:var(--ink);padding:34px 44px 40px}
+#pC .lp-kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;max-width:900px;margin:0 auto}
+#pC .lp-k{background:var(--card);border-radius:14px;padding:18px;box-shadow:0 6px 24px var(--shadow)}
+#pC .lp-k span{font-size:11.5px;color:var(--muted2);display:block;margin-bottom:6px}
+#pC .lp-k b{font:700 26px Sora,sans-serif;letter-spacing:-.02em}
+#pC .lp-k.hot b{color:var(--accent-num)}
+#pC .lp-k small{font-size:10.5px;color:#3D7A5C;font-weight:700}
+#pC .app{display:flex;background:var(--app-bg);color:var(--ink);font-family:Inter,sans-serif;min-height:600px}
+#pC .a-side{width:220px;background:var(--side-bg);color:var(--side-muted);padding:20px 12px;display:flex;flex-direction:column;gap:2px;border-right:1px solid var(--side-line)}
+#pC .a-brand{display:flex;align-items:center;gap:10px;font:700 15px Sora,sans-serif;color:var(--side-ink);padding:4px 12px 20px}
+#pC .a-brand img{width:26px;height:26px;border-radius:50%;object-fit:cover;object-position:top}
+#pC .a-item{display:flex;align-items:center;gap:11px;padding:10px 12px;border-radius:9px;font:500 13px Inter,sans-serif;color:var(--side-muted);cursor:pointer}
+#pC .a-item svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.7}
+#pC .a-item.on{background:var(--side-on-bg);color:var(--side-on-ink)}
+#pC .a-item:hover:not(.on){color:var(--side-hover)}
+#pC .a-user{margin-top:auto;padding:14px 12px;border-top:1px solid var(--side-line);font-size:11.5px;color:var(--side-muted)}
+#pC .a-user b{display:block;color:var(--side-ink);font-size:12.5px}
+#pC .a-main{flex:1;padding:26px 30px}
+#pC .a-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:22px}
+#pC .a-top h2{font:600 20px Sora,sans-serif;letter-spacing:-.01em}
+#pC .a-filters{display:flex;gap:8px;align-items:center}
+#pC .pill{border:1px solid var(--pill-line);background:var(--card);border-radius:9px;padding:8px 13px;font:500 12.5px Inter,sans-serif;color:var(--ink)}
+#pC .a-go{background:linear-gradient(135deg,var(--g1),var(--g2));border:none;border-radius:9px;color:var(--btn-ink);font:700 12.5px Inter,sans-serif;padding:9px 18px;cursor:pointer}
+#pC .kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:14px}
+#pC .kpi{background:var(--card);border-radius:13px;padding:16px;box-shadow:0 4px 18px var(--shadow)}
+#pC .kpi span{font-size:11px;color:var(--muted2);display:block;margin-bottom:7px}
+#pC .kpi b{font:700 25px Sora,sans-serif;letter-spacing:-.02em}
+#pC .kpi.hot b{color:var(--accent-num)}
+#pC .kpi small{font-size:10.5px;color:#3D7A5C;font-weight:700}
+#pC .grid2{display:grid;grid-template-columns:1.6fr 1fr;gap:12px}
+#pC .card{background:var(--card);border-radius:13px;padding:18px 20px;box-shadow:0 4px 18px var(--shadow)}
+#pC .card h4{font:600 13.5px Sora,sans-serif;margin-bottom:3px}
+#pC .card .sub{font-size:11.5px;color:var(--sub);margin-bottom:16px}
+#pC .bars{display:flex;align-items:flex-end;gap:13px;height:148px;padding-top:6px}
+#pC .bcol{flex:1;display:flex;flex-direction:column;align-items:center;gap:7px;height:100%;justify-content:flex-end}
+#pC .bar{width:24px;background:var(--bar-rest);border-radius:4px 4px 0 0;position:relative}
+#pC .bar.hi{background:linear-gradient(180deg,var(--g1),var(--g2))}
+#pC .bar.hi::after{content:attr(data-v);position:absolute;top:-20px;left:50%;transform:translateX(-50%);font:700 11px Inter,sans-serif;color:var(--accent-num)}
+#pC .bcol span{font-size:10.5px;color:var(--sub)}
+#pC .rows .row{display:flex;justify-content:space-between;align-items:center;padding:11px 0;border-bottom:1px solid var(--row-line);font-size:13px}
+#pC .rows .row:last-child{border-bottom:none}
+#pC .rows .row div b{display:block;font-weight:600;font-size:12.5px}
+#pC .rows .row div span{font-size:11px;color:var(--sub)}
+#pC .chip{font:700 10.5px Inter,sans-serif;padding:4px 10px;border-radius:999px}
+#pC .chip.ok{color:#1F6B45;background:#DFF2E6}
+#pC .chip.warn{color:#9A6206;background:#FBEFD5}
+#pC .chip.info{color:#44549A;background:#E4E9F8}
+
+/* ============================================================
+   CADENCIA — mezcla: ritmo suizo + calidez ámbar.
+   Sin grilla dura y casi sin cards: los elementos viven sobre
+   el fondo, separados por filetes suaves y aire.
+   ============================================================ */
+#pM{
+  --bg:#F7F3EC; --ink:#26211B; --muted:#7C7062; --faint:#AFA394;
+  --line:#E7DCCC; --surface:#FFFFFF; --surface-line:#E7DCCC;
+  --accent:#F2670C; --accent2:#FFAE5F; --accent-ink:#FFFFFF;
+  --bar-rest:#EADDC9; --ok:#2E7D5B; --warn:#B8860B; --info:#4A5A8A;
+  --side-bg:#26211B; --side-ink:#F3ECE1; --side-muted:#A79A89;
+  --side-line:rgba(255,255,255,.09); --side-on:#FFAE5F;
+}
+#pM[data-theme="niebla"]{
+  --bg:#F4F6F5; --ink:#1B211F; --muted:#6E7B76; --faint:#A3AFAA;
+  --line:#DDE4E0; --surface:#FFFFFF; --surface-line:#DDE4E0;
+  --accent:#2F7D6A; --accent2:#57A98F; --accent-ink:#FFFFFF;
+  --bar-rest:#D8E2DD; --ok:#2F7D6A; --warn:#B8860B; --info:#4A5A8A;
+  --side-bg:#1C2622; --side-ink:#EAF2EE; --side-muted:#8FA39C;
+  --side-line:rgba(255,255,255,.08); --side-on:#57A98F;
+}
+#pM[data-theme="grafito"]{
+  --bg:#1A1816; --ink:#F1EBE3; --muted:#9C9184; --faint:#635B51;
+  --line:#2E2A25; --surface:#242019; --surface-line:#37312A;
+  --accent:#F98A3C; --accent2:#FFB25C; --accent-ink:#201306;
+  --bar-rest:#322C25; --ok:#5BBB8A; --warn:#D9A441; --info:#8FA1D9;
+  --side-bg:#232019; --side-ink:#F1EBE3; --side-muted:#9C9184;
+  --side-line:rgba(255,255,255,.07); --side-on:#FFB25C;
+}
+#pM[data-theme="musgo"]{
+  --bg:#141A15; --ink:#EAF1EA; --muted:#8FA394; --faint:#55655A;
+  --line:#263229; --surface:#1B241E; --surface-line:#2E3D33;
+  --accent:#5DB87A; --accent2:#8FD694; --accent-ink:#0D160F;
+  --bar-rest:#2A3A2F; --ok:#5DB87A; --warn:#D9A441; --info:#8FA1D9;
+  --side-bg:#1B2620; --side-ink:#EAF1EA; --side-muted:#8FA394;
+  --side-line:rgba(255,255,255,.07); --side-on:#8FD694;
+}
+#pM[data-theme="vino"]{
+  --bg:#20131A; --ink:#F4E7EA; --muted:#A8909A; --faint:#6B5560;
+  --line:#33222B; --surface:#2A1B23; --surface-line:#3D2933;
+  --accent:#E8505B; --accent2:#FF8C69; --accent-ink:#2A0C10;
+  --bar-rest:#38242E; --ok:#5BBB8A; --warn:#D9A441; --info:#8FA1D9;
+  --side-bg:#2B1A23; --side-ink:#F4E7EA; --side-muted:#A8909A;
+  --side-line:rgba(255,255,255,.07); --side-on:#FF8C69;
+}
+#pM .land{background:var(--bg);color:var(--ink);font-family:Inter,sans-serif}
+#pM .l-nav{display:flex;align-items:center;justify-content:space-between;padding:22px 46px}
+#pM .l-logo{display:flex;align-items:center;gap:10px;font:700 16px Sora,sans-serif;color:var(--ink)}
+#pM .l-logo img{width:28px;height:28px;border-radius:50%;object-fit:cover;object-position:top}
+#pM .l-links{display:flex;gap:28px;font:500 13.5px Inter,sans-serif}
+#pM .l-links a{color:var(--muted);text-decoration:none}
+#pM .l-links a:hover{color:var(--ink)}
+#pM .btn{background:var(--accent);color:var(--accent-ink);font:700 13.5px Inter,sans-serif;border:none;padding:11px 22px;border-radius:10px;cursor:pointer;text-decoration:none}
+#pM .btn:hover{filter:brightness(1.07)}
+#pM .ghost{font:600 13.5px Inter,sans-serif;color:var(--ink);text-decoration:none;margin-right:14px}
+#pM .l-hero{display:grid;grid-template-columns:1.25fr 1fr;gap:56px;padding:74px 46px 60px;align-items:center;max-width:1030px;margin:0 auto}
+#pM .l-eyebrow{font:600 10.5px "IBM Plex Mono",monospace;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);margin-bottom:24px}
+#pM .l-hero h1{font:600 48px/1.1 Sora,sans-serif;letter-spacing:-.028em;margin-bottom:20px}
+#pM .l-hero h1 span{color:var(--accent)}
+#pM .l-hero p{font-size:15.5px;color:var(--muted);max-width:46ch;margin-bottom:30px}
+#pM .l-note{font:500 11.5px "IBM Plex Mono",monospace;color:var(--faint);margin-left:16px}
+#pM .l-stat b{display:block;font:600 88px/1 Sora,sans-serif;letter-spacing:-.04em;font-variant-numeric:tabular-nums}
+#pM .l-stat b i{font-style:normal;color:var(--accent)}
+#pM .l-pulse{width:150px;height:4px;border-radius:99px;background:linear-gradient(90deg,var(--accent),var(--accent2));margin:16px 0 12px}
+#pM .l-stat span{font:500 11.5px "IBM Plex Mono",monospace;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;display:block;margin-bottom:22px}
+#pM .l-spark{display:block}
+#pM .l-spark polyline{fill:none;stroke:var(--accent);stroke-width:2.5;stroke-linecap:round;stroke-linejoin:round}
+#pM .l-spark line{stroke:var(--line)}
+#pM .l-steps{display:grid;grid-template-columns:repeat(3,1fr);gap:0;max-width:1030px;margin:0 auto;padding:34px 46px 56px;border-top:1px solid var(--line)}
+#pM .l-s{padding:0 30px;border-left:1px solid var(--line);font-size:13px;color:var(--muted)}
+#pM .l-s:first-child{border-left:none;padding-left:0}
+#pM .l-s u{display:block;text-decoration:none;font:600 11px "IBM Plex Mono",monospace;color:var(--accent);margin-bottom:10px}
+#pM .l-s b{display:block;font:600 15px Sora,sans-serif;color:var(--ink);margin-bottom:6px;letter-spacing:-.01em}
+#pM .app{display:flex;background:var(--bg);color:var(--ink);font-family:Inter,sans-serif;min-height:600px}
+#pM .a-side{width:212px;padding:22px 14px;display:flex;flex-direction:column;gap:2px;background:var(--side-bg);color:var(--side-muted)}
+#pM .a-brand{display:flex;align-items:center;gap:10px;font:700 15px Sora,sans-serif;padding:4px 12px 22px;color:var(--side-ink)}
+#pM .a-brand img{width:26px;height:26px;border-radius:50%;object-fit:cover;object-position:top}
+#pM .a-item{display:flex;align-items:center;gap:11px;padding:9px 12px;border-radius:10px;font:500 13px Inter,sans-serif;color:var(--side-muted);cursor:pointer}
+#pM .a-item svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.7}
+#pM .a-item.on{color:var(--side-on);font-weight:600;position:relative}
+#pM .a-item.on::before{content:"";position:absolute;left:-2px;top:9px;bottom:9px;width:3px;border-radius:99px;background:linear-gradient(180deg,var(--accent),var(--accent2))}
+#pM .a-item:hover:not(.on){color:var(--side-ink)}
+#pM .a-user{margin-top:auto;padding:14px 12px;border-top:1px solid var(--side-line);font-size:11.5px;color:var(--side-muted)}
+#pM .a-user b{display:block;color:var(--side-ink);font-size:12.5px}
+#pM .a-main{flex:1;padding:28px 34px}
+#pM .a-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:30px}
+#pM .a-top h2{font:600 20px Sora,sans-serif;letter-spacing:-.01em}
+#pM .a-filters{display:flex;gap:8px;align-items:center}
+#pM .pill{border:1px solid var(--surface-line);background:var(--surface);border-radius:10px;padding:8px 13px;font:500 12px "IBM Plex Mono",monospace;color:var(--ink)}
+#pM .a-go{background:var(--accent);border:none;border-radius:10px;color:var(--accent-ink);font:700 12.5px Inter,sans-serif;padding:9px 18px;cursor:pointer}
+#pM .kpis{display:flex;margin-bottom:36px}
+#pM .kpi{flex:1;padding:0 26px;border-left:1px solid var(--line)}
+#pM .kpi:first-child{border-left:none;padding-left:0}
+#pM .kpi span{font:500 10.5px "IBM Plex Mono",monospace;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);display:block;margin-bottom:10px}
+#pM .kpi b{font:600 30px Sora,sans-serif;letter-spacing:-.025em;font-variant-numeric:tabular-nums}
+#pM .kpi.hot b{color:var(--accent)}
+#pM .kpi.hot .pulse{width:44px;height:3px;border-radius:99px;background:linear-gradient(90deg,var(--accent),var(--accent2));margin-top:8px}
+#pM .kpi small{display:block;font:500 10.5px "IBM Plex Mono",monospace;color:var(--ok);margin-top:6px}
+#pM .grid2{display:grid;grid-template-columns:1.55fr 1fr;gap:44px}
+#pM .blk h4{font:600 14px Sora,sans-serif;margin-bottom:2px;letter-spacing:-.01em}
+#pM .blk .sub{font:500 10.5px "IBM Plex Mono",monospace;color:var(--faint);margin-bottom:20px}
+#pM .bars{display:flex;align-items:flex-end;gap:14px;height:150px;border-bottom:1px solid var(--line);padding-bottom:0}
+#pM .bcol{flex:1;display:flex;flex-direction:column;align-items:center;gap:0;height:100%;justify-content:flex-end}
+#pM .bar{width:26px;background:var(--bar-rest);border-radius:5px 5px 0 0;position:relative}
+#pM .bar.hi{background:linear-gradient(180deg,var(--accent2),var(--accent))}
+#pM .bar.hi::after{content:attr(data-v);position:absolute;top:-20px;left:50%;transform:translateX(-50%);font:600 11px "IBM Plex Mono",monospace;color:var(--accent)}
+#pM .blabels{display:flex;gap:14px;margin-top:8px}
+#pM .blabels span{flex:1;text-align:center;font:500 10px "IBM Plex Mono",monospace;color:var(--faint)}
+#pM .rows .row{display:flex;justify-content:space-between;align-items:center;padding:12px 0;border-bottom:1px solid var(--line);font-size:13px}
+#pM .rows .row:last-child{border-bottom:none}
+#pM .rows .row div b{display:block;font-weight:600;font-size:12.5px}
+#pM .rows .row div span{font:500 10.5px "IBM Plex Mono",monospace;color:var(--faint)}
+#pM .chip{font:600 10px "IBM Plex Mono",monospace;text-transform:uppercase;letter-spacing:.05em;padding:4px 11px;border-radius:999px;border:1px solid}
+#pM .chip.ok{border-color:var(--ok);color:var(--ok)}
+#pM .chip.warn{border-color:var(--warn);color:var(--warn)}
+#pM .chip.info{border-color:var(--info);color:var(--info)}
+
+/* responsive floors */
+@media (max-width:900px){
+  #pB .l-hero{grid-template-columns:1fr}
+  #pB .l-hl{border-right:none;border-bottom:1px solid var(--ink)}
+  #pB .l-row,#pB .kpis{grid-template-columns:repeat(2,1fr)}
+  #pC .kpis{grid-template-columns:repeat(2,1fr)}
+  #pC .lp-kpis{grid-template-columns:repeat(2,1fr)}
+  #pB .grid2,#pC .grid2,#pM .grid2{grid-template-columns:1fr}
+  #pB .app,#pC .app,#pM .app{flex-direction:column}
+  #pB .a-side,#pC .a-side,#pM .a-side{width:100%}
+  #pM .l-hero{grid-template-columns:1fr;gap:34px}
+  #pM .l-steps{grid-template-columns:1fr}
+  #pM .l-s{border-left:none;padding:14px 0}
+  #pM .kpis{flex-wrap:wrap;gap:18px}
+  #pM .kpi{flex:1 1 40%;border-left:none;padding:0}
+  #pM .a-main{border-left:none}
+}
+</style>
+</head>
+<body>
+
+<header class="shell-head">
+  <h1><span>Mira</span> · 3 finalistas · exploración de paletas</h1>
+  <nav class="tabs" role="tablist" aria-label="Propuestas">
+    <button class="tab active" data-t="pB" role="tab">Métrica Suiza</button>
+    <button class="tab" data-t="pC" role="tab">Ámbar Nocturno</button>
+    <button class="tab" data-t="pM" role="tab">Cadencia (mezcla)</button>
+  </nav>
+</header>
+
+<div class="intro">
+  <h2>Tres finalistas, cuatro paletas cada uno</h2>
+  <p>Cada diseño mantiene su estructura y tipografías; lo que cambia entre temas es solo el sistema de color (2 claros y 2 oscuros por diseño, incluyendo el original). "Cadencia" es la mezcla: el ritmo de Suiza sin su rigidez, la calidez de Ámbar sin sus cards. Cambia de tema con los botones y de diseño con las pestañas o las flechas ← →.</p>
+</div>
+
+<!-- ═══════════════════ MÉTRICA SUIZA ═══════════════════ -->
+<section class="prop visible" id="pB">
+  <div class="prop-meta">
+    <div class="prop-kicker">Finalista 1 · la más sobria</div>
+    <h3>Métrica Suiza</h3>
+    <p>Estilo internacional al servicio del dato: grilla visible, filetes de un pixel, Archivo + Inter + IBM Plex Mono y números tabulares. El acento es puramente semántico: marca el dato importante y la acción primaria, nada más.</p>
+    <div class="themes" data-for="pB">
+      <button class="theme-btn on" data-theme="">
+        <span class="dots"><i style="background:#FAFAF8"></i><i style="background:#1A1A18"></i><i style="background:#F25C05"></i></span>
+        Papel <small>claro · original</small>
+      </button>
+      <button class="theme-btn" data-theme="bosque">
+        <span class="dots"><i style="background:#F8FAF6"></i><i style="background:#161A15"></i><i style="background:#2F7D4F"></i></span>
+        Bosque <small>claro</small>
+      </button>
+      <button class="theme-btn" data-theme="carbon">
+        <span class="dots"><i style="background:#161614"></i><i style="background:#F0F0EA"></i><i style="background:#F97316"></i></span>
+        Carbón <small>oscuro</small>
+      </button>
+      <button class="theme-btn" data-theme="petroleo">
+        <span class="dots"><i style="background:#101619"></i><i style="background:#E9F1F1"></i><i style="background:#E3B341"></i></span>
+        Petróleo <small>oscuro</small>
+      </button>
+    </div>
+  </div>
+
+  <div class="mock-label">Landing</div>
+  <div class="frame"><div class="frame-in"><div class="frame-bar"><b></b><b></b><b></b><span>mira.cl</span></div>
+  <div class="land">
+    <nav class="l-nav">
+      <span class="l-logo"><i></i>MIRA</span>
+      <span class="l-links"><a href="#">Producto</a><a href="#">Precios</a><a href="#">Nosotros</a></span>
+      <a href="#" class="btn">Crear cuenta</a>
+    </nav>
+    <div class="l-hero">
+      <div class="l-hl">
+        <div class="l-eyebrow">/ Métricas de soporte por correo</div>
+        <h1>Tu casilla responde.<br><span>¿Cuánto, y en cuánto?</span></h1>
+        <p>Mira lee tu casilla de Gmail con acceso de solo lectura y entrega métricas de atención auditables: cada número lleva al hilo que lo originó.</p>
+        <a href="#" class="btn">Crear cuenta</a><span class="l-note">read-only · sin instalación</span>
+      </div>
+      <div class="l-stat"><b>91<i>%</i></b><span>solicitudes respondidas / semana</span></div>
+    </div>
+    <div class="l-row">
+      <div class="l-c"><b><u>01</u>Conecta tu correo</b>Autorización Google de solo lectura, en un par de clics.</div>
+      <div class="l-c"><b><u>02</u>Define qué cuenta</b>Tú decides qué es una solicitud y qué se ignora.</div>
+      <div class="l-c"><b><u>03</u>Métricas automáticas</b>KPIs diarios en tu correo, sin entrar a la app.</div>
+      <div class="l-c"><b><u>—</u>Nada de cajas negras</b>Si un número no cuadra, lo abres y ves los hilos.</div>
+    </div>
+  </div>
+  </div></div>
+
+  <div class="mock-label">Panel interno</div>
+  <div class="frame"><div class="frame-in"><div class="frame-bar"><b></b><b></b><b></b><span>app.mira.cl</span></div>
+  <div class="app">
+    <aside class="a-side">
+      <div class="a-brand"><i></i>MIRA</div>
+      <div class="a-item on">Resumen<small>R</small></div>
+      <div class="a-item">Hilos<small>H</small></div>
+      <div class="a-item">Revisión manual<small>M</small></div>
+      <div class="a-item">Análisis<small>A</small></div>
+      <div class="a-item">Reportes<small>P</small></div>
+      <div class="a-item">Configuración<small>C</small></div>
+    </aside>
+    <main class="a-main">
+      <div class="a-top">
+        <h2>Resumen</h2>
+        <div class="a-filters"><span class="pill">2026-07-17</span><span class="pill">00:00–23:59</span><button class="a-go">Analizar</button></div>
+      </div>
+      <div class="kpis">
+        <div class="kpi"><span>Analizados</span><b>428</b></div>
+        <div class="kpi hot"><span>Válidas</span><b>173</b><small>+12% vs sem. ant.</small></div>
+        <div class="kpi"><span>Respondidas</span><b>91%</b></div>
+        <div class="kpi"><span>Sin respuesta</span><b>14</b></div>
+        <div class="kpi"><span>1ª respuesta</span><b>42m</b><small>−6 min</small></div>
+      </div>
+      <div class="grid2">
+        <div class="card">
+          <h4>Respondidas</h4><div class="sub">7 días · unidad: solicitudes</div>
+          <div class="bars">
+            <div class="bcol"><div class="bar" style="height:58%"></div><span>LU</span></div>
+            <div class="bcol"><div class="bar" style="height:52%"></div><span>MA</span></div>
+            <div class="bcol"><div class="bar hi" style="height:82%"></div><span>MI</span></div>
+            <div class="bcol"><div class="bar" style="height:64%"></div><span>JU</span></div>
+            <div class="bcol"><div class="bar" style="height:48%"></div><span>VI</span></div>
+            <div class="bcol"><div class="bar" style="height:26%"></div><span>SA</span></div>
+            <div class="bcol"><div class="bar" style="height:20%"></div><span>DO</span></div>
+          </div>
+        </div>
+        <div class="card rows">
+          <h4>Hilos recientes</h4><div class="sub">clasificación IA</div>
+          <div class="row"><div><b>Reembolso pedido #4821</b><span>2026-06-15 09:12</span></div><span class="chip ok">Válida</span></div>
+          <div class="row"><div><b>No puedo acceder a mi cuenta</b><span>2026-06-14 16:40</span></div><span class="chip ok">Válida</span></div>
+          <div class="row"><div><b>Cotización 50 licencias</b><span>2026-06-13 11:05</span></div><span class="chip warn">Ambigua</span></div>
+          <div class="row"><div><b>Newsletter junio</b><span>2026-06-16 08:30</span></div><span class="chip info">Boletín</span></div>
+        </div>
+      </div>
+    </main>
+  </div>
+  </div></div>
+</section>
+
+<!-- ═══════════════════ ÁMBAR NOCTURNO ═══════════════════ -->
+<section class="prop" id="pC">
+  <div class="prop-meta">
+    <div class="prop-kicker">Finalista 2 · contraste dramático</div>
+    <h3>Ámbar Nocturno</h3>
+    <p>El hero marca el carácter (con su "horizonte" de luz como firma) y el panel de trabajo se mantiene claro en los cuatro temas; entre temas cambian la temperatura del hero, el sidebar y los acentos. Sora + Inter en todos.</p>
+    <div class="themes" data-for="pC">
+      <button class="theme-btn on" data-theme="">
+        <span class="dots"><i style="background:#171310"></i><i style="background:#F6EFE7"></i><i style="background:#F97316"></i></span>
+        Ámbar <small>oscuro · original</small>
+      </button>
+      <button class="theme-btn" data-theme="vino">
+        <span class="dots"><i style="background:#1E1116"></i><i style="background:#F8F0EE"></i><i style="background:#E8505B"></i></span>
+        Vino <small>oscuro</small>
+      </button>
+      <button class="theme-btn" data-theme="amanecer">
+        <span class="dots"><i style="background:#FBF3E9"></i><i style="background:#FFF8EF"></i><i style="background:#F97316"></i></span>
+        Amanecer <small>claro</small>
+      </button>
+      <button class="theme-btn" data-theme="glaciar">
+        <span class="dots"><i style="background:#F3F7FA"></i><i style="background:#FFFFFF"></i><i style="background:#2E6FE8"></i></span>
+        Glaciar <small>claro</small>
+      </button>
+    </div>
+  </div>
+
+  <div class="mock-label">Landing</div>
+  <div class="frame"><div class="frame-in"><div class="frame-bar"><b></b><b></b><b></b><span>mira.cl</span></div>
+  <div class="land">
+    <nav class="l-nav">
+      <span class="l-logo"><img src="../logo.png" alt=""> Mira</span>
+      <span class="l-links"><a href="#">Producto</a><a href="#">Precios</a><a href="#">Nosotros</a></span>
+      <span><a href="#" class="ghost">Ingresar</a><a href="#" class="btn">Crear cuenta</a></span>
+    </nav>
+    <div class="l-hero">
+      <div class="l-eyebrow">Solo lectura. Punto.</div>
+      <h1>¿Cuántas respondiste <span>de verdad?</span></h1>
+      <p>Convierte tu casilla de Gmail en métricas de atención auditables. Mira no envía, no borra y no toca tu bandeja: la mide en silencio.</p>
+      <a href="#" class="btn">Crear cuenta →</a>
+      <span class="l-note">Sin tarjeta · configuración en 3 pasos</span>
+    </div>
+    <div class="l-horizon"></div>
+    <div class="l-panelpeek">
+      <div class="lp-kpis">
+        <div class="lp-k"><span>Analizados</span><b>428</b></div>
+        <div class="lp-k hot"><span>Solicitudes válidas</span><b>173</b> <small>▲ 12%</small></div>
+        <div class="lp-k"><span>Respondidas</span><b>91%</b></div>
+        <div class="lp-k"><span>1ª respuesta</span><b>42 min</b></div>
+      </div>
+    </div>
+  </div>
+  </div></div>
+
+  <div class="mock-label">Panel interno</div>
+  <div class="frame"><div class="frame-in"><div class="frame-bar"><b></b><b></b><b></b><span>app.mira.cl</span></div>
+  <div class="app">
+    <aside class="a-side">
+      <div class="a-brand"><img src="../logo.png" alt=""> Mira</div>
+      <div class="a-item on"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>Resumen</div>
+      <div class="a-item"><svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>Hilos</div>
+      <div class="a-item"><svg viewBox="0 0 24 24"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>Revisión manual</div>
+      <div class="a-item"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>Análisis</div>
+      <div class="a-item"><svg viewBox="0 0 24 24"><path d="M3 20h18"/><path d="M6 16v-5"/><path d="M11 16V8"/><path d="M16 16v-8"/><path d="M21 16V4"/></svg>Reportes</div>
+      <div class="a-item"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.4-2.3 1a7 7 0 0 0-2-1.2L14 3h-4l-.5 2.7a7 7 0 0 0-2 1.2l-2.4-1-2 3.4 2 1.5a7 7 0 0 0 0 2.4l-2 1.5 2 3.4 2.4-1a7 7 0 0 0 2 1.2L10 21h4l.5-2.7a7 7 0 0 0 2-1.2l2.4 1 2-3.4-2-1.5c.06-.4.1-.8.1-1.2z"/></svg>Configuración</div>
+      <div class="a-user"><b>Diseño Review</b>Plan Pro · activo</div>
+    </aside>
+    <main class="a-main">
+      <div class="a-top">
+        <h2>Resumen</h2>
+        <div class="a-filters"><span class="pill">17 jul</span><span class="pill">00:00 → 23:59</span><button class="a-go">✦ Analizar</button></div>
+      </div>
+      <div class="kpis">
+        <div class="kpi"><span>Analizados</span><b>428</b></div>
+        <div class="kpi hot"><span>Válidas</span><b>173</b> <small>▲ 12%</small></div>
+        <div class="kpi"><span>Respondidas</span><b>91%</b></div>
+        <div class="kpi"><span>Sin respuesta</span><b>14</b></div>
+        <div class="kpi"><span>1ª respuesta</span><b>42 min</b> <small>▼ 6 min</small></div>
+      </div>
+      <div class="grid2">
+        <div class="card">
+          <h4>Solicitudes respondidas</h4><div class="sub">Últimos 7 días</div>
+          <div class="bars">
+            <div class="bcol"><div class="bar" style="height:58%"></div><span>Lun</span></div>
+            <div class="bcol"><div class="bar" style="height:52%"></div><span>Mar</span></div>
+            <div class="bcol"><div class="bar hi" data-v="34" style="height:82%"></div><span>Mié</span></div>
+            <div class="bcol"><div class="bar" style="height:64%"></div><span>Jue</span></div>
+            <div class="bcol"><div class="bar" style="height:48%"></div><span>Vie</span></div>
+            <div class="bcol"><div class="bar" style="height:26%"></div><span>Sáb</span></div>
+            <div class="bcol"><div class="bar" style="height:20%"></div><span>Dom</span></div>
+          </div>
+        </div>
+        <div class="card rows">
+          <h4>Últimos hilos</h4><div class="sub">Clasificación automática</div>
+          <div class="row"><div><b>Reembolso pedido #4821</b><span>15/06 · 09:12</span></div><span class="chip ok">Válida</span></div>
+          <div class="row"><div><b>No puedo acceder a mi cuenta</b><span>14/06 · 16:40</span></div><span class="chip ok">Válida</span></div>
+          <div class="row"><div><b>Cotización 50 licencias</b><span>13/06 · 11:05</span></div><span class="chip warn">Ambigua</span></div>
+          <div class="row"><div><b>Newsletter junio</b><span>16/06 · 08:30</span></div><span class="chip info">Boletín</span></div>
+        </div>
+      </div>
+    </main>
+  </div>
+  </div></div>
+</section>
+
+<!-- ═══════════════════ CADENCIA (MEZCLA) ═══════════════════ -->
+<section class="prop" id="pM">
+  <div class="prop-meta">
+    <div class="prop-kicker">Finalista 3 · la mezcla</div>
+    <h3>Cadencia</h3>
+    <p>El ritmo tipográfico de Suiza (datos en mono, etiquetas en mayúsculas, filetes finos) con la calidez y las curvas de Ámbar (Sora, gradientes como acento, radios suaves). Casi sin cards: los KPIs, el gráfico y las listas viven directamente sobre el fondo, separados por aire y líneas suaves. La firma es el "pulso": una barrita de gradiente redondeada que subraya el dato protagonista. El sidebar del panel tiene su propio color (herencia de Ámbar), haciendo de ancla de marca frente al área de trabajo.</p>
+    <div class="themes" data-for="pM">
+      <button class="theme-btn on" data-theme="">
+        <span class="dots"><i style="background:#F7F3EC"></i><i style="background:#26211B"></i><i style="background:#F2670C"></i></span>
+        Arena <small>claro · original</small>
+      </button>
+      <button class="theme-btn" data-theme="niebla">
+        <span class="dots"><i style="background:#F4F6F5"></i><i style="background:#1B211F"></i><i style="background:#2F7D6A"></i></span>
+        Niebla <small>claro</small>
+      </button>
+      <button class="theme-btn" data-theme="grafito">
+        <span class="dots"><i style="background:#1A1816"></i><i style="background:#F1EBE3"></i><i style="background:#F98A3C"></i></span>
+        Grafito <small>oscuro</small>
+      </button>
+      <button class="theme-btn" data-theme="musgo">
+        <span class="dots"><i style="background:#141A15"></i><i style="background:#EAF1EA"></i><i style="background:#5DB87A"></i></span>
+        Musgo <small>oscuro</small>
+      </button>
+      <button class="theme-btn" data-theme="vino">
+        <span class="dots"><i style="background:#20131A"></i><i style="background:#F4E7EA"></i><i style="background:#E8505B"></i></span>
+        Vino <small>oscuro</small>
+      </button>
+    </div>
+  </div>
+
+  <div class="mock-label">Landing</div>
+  <div class="frame"><div class="frame-in"><div class="frame-bar"><b></b><b></b><b></b><span>mira.cl</span></div>
+  <div class="land">
+    <nav class="l-nav">
+      <span class="l-logo"><img src="../logo.png" alt=""> Mira</span>
+      <span class="l-links"><a href="#">Producto</a><a href="#">Precios</a><a href="#">Nosotros</a></span>
+      <span><a href="#" class="ghost">Ingresar</a><a href="#" class="btn">Crear cuenta</a></span>
+    </nav>
+    <div class="l-hero">
+      <div>
+        <div class="l-eyebrow">/ Solo lectura. Punto.</div>
+        <h1>¿Cuántas respondiste <span>de verdad?</span></h1>
+        <p>Mira lee tu casilla de Gmail — solo lectura — y convierte tu soporte por correo en métricas auditables. Cada número lleva al hilo que lo originó.</p>
+        <a href="#" class="btn">Crear cuenta →</a><span class="l-note">sin tarjeta · 3 pasos</span>
+      </div>
+      <div class="l-stat">
+        <b>91<i>%</i></b>
+        <div class="l-pulse"></div>
+        <span>solicitudes respondidas / semana</span>
+        <svg class="l-spark" width="240" height="56" viewBox="0 0 240 56" aria-hidden="true">
+          <line x1="0" y1="55" x2="240" y2="55" stroke-width="1"/>
+          <polyline points="4,30 42,34 80,10 118,22 156,36 194,44 236,18"/>
+        </svg>
+      </div>
+    </div>
+    <div class="l-steps">
+      <div class="l-s"><u>01</u><b>Conecta tu correo</b>Autorización Google de solo lectura, en un par de clics.</div>
+      <div class="l-s"><u>02</u><b>Define qué cuenta</b>Tú decides qué es una solicitud válida y qué se ignora.</div>
+      <div class="l-s"><u>03</u><b>Métricas automáticas</b>KPIs recurrentes en tu correo, sin entrar a la app.</div>
+    </div>
+  </div>
+  </div></div>
+
+  <div class="mock-label">Panel interno</div>
+  <div class="frame"><div class="frame-in"><div class="frame-bar"><b></b><b></b><b></b><span>app.mira.cl</span></div>
+  <div class="app">
+    <aside class="a-side">
+      <div class="a-brand"><img src="../logo.png" alt=""> Mira</div>
+      <div class="a-item on"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>Resumen</div>
+      <div class="a-item"><svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>Hilos</div>
+      <div class="a-item"><svg viewBox="0 0 24 24"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>Revisión manual</div>
+      <div class="a-item"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>Análisis</div>
+      <div class="a-item"><svg viewBox="0 0 24 24"><path d="M3 20h18"/><path d="M6 16v-5"/><path d="M11 16V8"/><path d="M16 16v-8"/><path d="M21 16V4"/></svg>Reportes</div>
+      <div class="a-item"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.4-2.3 1a7 7 0 0 0-2-1.2L14 3h-4l-.5 2.7a7 7 0 0 0-2 1.2l-2.4-1-2 3.4 2 1.5a7 7 0 0 0 0 2.4l-2 1.5 2 3.4 2.4-1a7 7 0 0 0 2 1.2L10 21h4l.5-2.7a7 7 0 0 0 2-1.2l2.4 1 2-3.4-2-1.5c.06-.4.1-.8.1-1.2z"/></svg>Configuración</div>
+      <div class="a-user"><b>Diseño Review</b>Plan Pro · activo</div>
+    </aside>
+    <main class="a-main">
+      <div class="a-top">
+        <h2>Resumen</h2>
+        <div class="a-filters"><span class="pill">2026-07-17</span><span class="pill">00:00–23:59</span><button class="a-go">✦ Analizar</button></div>
+      </div>
+      <div class="kpis">
+        <div class="kpi"><span>Analizados</span><b>428</b></div>
+        <div class="kpi hot"><span>Válidas</span><b>173</b><div class="pulse"></div><small>+12% vs sem. ant.</small></div>
+        <div class="kpi"><span>Respondidas</span><b>91%</b></div>
+        <div class="kpi"><span>Sin respuesta</span><b>14</b></div>
+        <div class="kpi"><span>1ª respuesta</span><b>42m</b><small>−6 min</small></div>
+      </div>
+      <div class="grid2">
+        <div class="blk">
+          <h4>Solicitudes respondidas</h4><div class="sub">últimos 7 días</div>
+          <div class="bars">
+            <div class="bcol"><div class="bar" style="height:58%"></div></div>
+            <div class="bcol"><div class="bar" style="height:52%"></div></div>
+            <div class="bcol"><div class="bar hi" data-v="34" style="height:82%"></div></div>
+            <div class="bcol"><div class="bar" style="height:64%"></div></div>
+            <div class="bcol"><div class="bar" style="height:48%"></div></div>
+            <div class="bcol"><div class="bar" style="height:26%"></div></div>
+            <div class="bcol"><div class="bar" style="height:20%"></div></div>
+          </div>
+          <div class="blabels"><span>LU</span><span>MA</span><span>MI</span><span>JU</span><span>VI</span><span>SA</span><span>DO</span></div>
+        </div>
+        <div class="blk rows">
+          <h4>Últimos hilos</h4><div class="sub">clasificación automática</div>
+          <div class="row"><div><b>Reembolso pedido #4821</b><span>15/06 · 09:12</span></div><span class="chip ok">Válida</span></div>
+          <div class="row"><div><b>No puedo acceder a mi cuenta</b><span>14/06 · 16:40</span></div><span class="chip ok">Válida</span></div>
+          <div class="row"><div><b>Cotización 50 licencias</b><span>13/06 · 11:05</span></div><span class="chip warn">Ambigua</span></div>
+          <div class="row"><div><b>Newsletter junio</b><span>16/06 · 08:30</span></div><span class="chip info">Boletín</span></div>
+        </div>
+      </div>
+    </main>
+  </div>
+  </div></div>
+</section>
+
+<script>
+const tabs = document.querySelectorAll('.tab');
+const props = document.querySelectorAll('.prop');
+const order = ['pB','pC','pM'];
+function show(id){
+  tabs.forEach(t => t.classList.toggle('active', t.dataset.t === id));
+  props.forEach(p => p.classList.toggle('visible', p.id === id));
+  window.scrollTo({top:0});
+}
+tabs.forEach(t => t.addEventListener('click', () => show(t.dataset.t)));
+document.addEventListener('keydown', e => {
+  if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+  const cur = order.indexOf(document.querySelector('.prop.visible').id);
+  const next = e.key === 'ArrowRight' ? Math.min(cur+1, order.length-1) : Math.max(cur-1, 0);
+  show(order[next]);
+});
+document.querySelectorAll('.themes').forEach(group => {
+  const section = document.getElementById(group.dataset.for);
+  group.querySelectorAll('.theme-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      group.querySelectorAll('.theme-btn').forEach(b => b.classList.toggle('on', b === btn));
+      if (btn.dataset.theme) section.dataset.theme = btn.dataset.theme;
+      else delete section.dataset.theme;
+    });
+  });
+});
+</script>
+</body>
+</html>

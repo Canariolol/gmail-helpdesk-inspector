@@ -1,10 +1,9 @@
 /* ==========================================================================
    Landing — base compartida por las 3 variantes (.lp)
-   Reusa los tokens de tokens.css. Define una fuente display propia.
+   Reusa los tokens de tokens.css (incluida --font-display del contrato).
    ========================================================================== */
 
 .lp {
-  --font-display: "Fraunces", Georgia, "Times New Roman", serif;
   min-height: 100vh;
   font-family: var(--font-sans);
   color: var(--text);
