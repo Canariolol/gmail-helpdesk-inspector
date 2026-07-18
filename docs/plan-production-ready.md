@@ -331,10 +331,14 @@ Prioridad: **P0**
   - Estado 2026-07-17: la revisión activa no declara `APP_ENV`, por lo que el
     backend usa `development` por defecto. No se debe declarar un lanzamiento
     pagado como production-ready mientras siga así.
-  - Bloqueo conocido: el modo `production` exige las dos credenciales de
-    Mercado Pago; pagos permanece explícitamente diferido. Falta decidir si se
-    habilita producción sin billing o si Mira continúa como despliegue técnico
-    controlado hasta retomar pagos.
+  - Desbloqueo 2026-07-18: decisión tomada y aplicada en código. `production`
+    ya no exige credenciales de Mercado Pago mientras pagos siga diferido:
+    sigue exigiendo `BILLING_ENFORCEMENT_ENABLED=true` (cuotas Free para
+    cuentas sin suscripción), rechaza un access token sin secreto de webhook y
+    el webhook de Mercado Pago rechaza payloads sin firma en producción aunque
+    no haya secreto configurado. Falta desplegar la candidata con
+    `APP_ENV=production` y hacer el smoke test:
+    `API_DEPLOY_EXTRA_ARGS="--update-env-vars APP_ENV=production" scripts/redeploy-gcp.sh --no-traffic api`.
 - [x] Configurar explícitamente `BILLING_ENFORCEMENT_ENABLED=true`.
 - [ ] Configurar `MERCADOPAGO_ACCESS_TOKEN` mediante Secret Manager.
 - [ ] Configurar `MERCADOPAGO_WEBHOOK_SECRET` mediante Secret Manager.
@@ -610,7 +614,15 @@ consulta de solo lectura:
     una ejecución nueva que terminó correctamente. El 409 de la ejecución
     anterior queda documentado como incidente resuelto; no se reintenta ese
     registro fallido.
-- [ ] Probar scheduler manualmente.
+- [x] Probar scheduler manualmente.
+  - Evidencia 2026-07-18: el primer disparo devolvió 404 porque la revisión
+    PostgreSQL había perdido `CRON_SECRET` y `RESEND_API_KEY` en algún
+    redeploy. Se otorgó acceso a nivel de secreto a
+    `ghmi-api-postgres-runtime` y `ghmi-api-00049-2qb` restauró ambas
+    referencias; el redisparo devolvió 200 (0,15 s: sin análisis pendiente en
+    sábado). Cloud Scheduler quedó reanudado; la primera ejecución completa
+    contra PostgreSQL será el lunes 08:00 America/Santiago, vigilada por las
+    alertas nuevas.
 - [x] Enviar tráfico progresivamente para el uso controlado actual.
   - 0% → pruebas internas.
   - 10% → smoke test.
@@ -696,7 +708,8 @@ Las sesiones antiguas sin `expires_at` requieren iniciar sesión otra vez al des
 - [x] Confirmar `Secure`.
 - [x] Confirmar `SameSite` acorde a la arquitectura final.
   - Decisión: `Lax` para sesión y estado OAuth bajo el proxy mismo-origen; los callbacks OAuth son redirects GET de nivel superior.
-  - La revisión desplegada aún conserva `APP_COOKIE_SAMESITE=None` y requiere ese cambio de configuración más un smoke test antes de darlo por aplicado en producción.
+  - Aplicado: la revisión activa `ghmi-api-00047-mhf` declara
+    `APP_COOKIE_SAMESITE=Lax` (consulta de solo lectura 2026-07-18).
 - [x] Preferir mismo origen mediante proxy para evitar cookies third-party.
 - [x] Definir `Domain` solo si es estrictamente necesario.
   - Decisión actual: no se emite atributo `Domain`; web entrega la cookie bajo
@@ -714,7 +727,9 @@ Las sesiones antiguas sin `expires_at` requieren iniciar sesión otra vez al des
   - `ghmi-web` proxya `/auth`, `/gmail`, `/me`, `/analysis-runs`, `/threads` y rutas afines a API bajo el mismo origen. Los webhooks directos no usan cookie de usuario y validan su propio secreto/firma.
 - [x] Validar `Origin` en requests mutables.
 - [x] Rechazar orígenes desconocidos.
-- [ ] Evaluar token CSRF si se conserva `SameSite=None`.
+- [x] Evaluar token CSRF si se conserva `SameSite=None`.
+  - No aplica: la revisión activa usa `SameSite=Lax` y el middleware valida
+    `Origin` en mutaciones.
 - [x] Probar un POST desde un origen externo.
 - [x] Asegurar las mutaciones no relacionadas con pagos:
   - Logout individual y global.
@@ -1464,20 +1479,41 @@ Decisión inicial recomendada:
 
 ## 11.2 Uptime checks
 
-- [ ] Uptime check para web.
-- [ ] Uptime check para API `/health`.
+- [x] Uptime check para web.
+  - Evidencia 2026-07-18: `mira-web-KmYdD-H9gvk` sobre
+    `https://mira.ninfasolutions.com/` cada 10 minutos; el endpoint respondió
+    200 antes de crearlo.
+- [x] Uptime check para API `/health`.
+  - Evidencia 2026-07-18: `ghmi-api-health-M3V3H5HuYcs` sobre `/health` del
+    origen `run.app`, cada 10 minutos.
 - [ ] Considerar un readiness interno que verifique Firestore.
-- [ ] No incluir dependencias costosas en cada liveness check.
-- [ ] Configurar frecuencia.
-- [ ] Configurar múltiples regiones.
-- [ ] Crear canal de notificación.
+- [x] No incluir dependencias costosas en cada liveness check.
+  - `/health` no consulta proveedores externos.
+- [x] Configurar frecuencia.
+  - 10 minutos: equilibrio entre detección y coste de despertar la instancia.
+- [x] Configurar múltiples regiones.
+  - Los uptime checks de Cloud Monitoring sondean desde varias regiones por
+    defecto; no se restringió la lista.
+- [x] Crear canal de notificación.
+  - Email `teamgerencia.west@west-ingenieria.cl`
+    (`notificationChannels/3109576765012899242`).
 - [ ] Probar alerta provocando una condición controlada.
+  - Drill en curso 2026-07-18: check `mira-alert-drill-fCXQyvAs_QY` apunta a
+    una ruta 404 a propósito con una política dedicada; falta confirmar la
+    notificación recibida y eliminar ambos.
 
 ## 11.3 Alertas técnicas
 
-- [ ] Tasa de 5xx en API.
-- [ ] Tasa de 5xx en web/proxy.
-- [ ] Errores del worker.
+- [x] Tasa de 5xx en API.
+  - Política «Mira: respuestas 5xx en API o web»: más de 2 respuestas 5xx en
+    10 minutos por servicio (2026-07-18).
+- [x] Tasa de 5xx en web/proxy.
+  - Cubierta por la misma política (agrupa por servicio).
+- [x] Errores del worker.
+  - Política log-based «Mira: errores de aplicación en API o worker»:
+    `jsonPayload.level="ERROR"` en `ghmi-api` (tracing no emite `severity`)
+    y `severity>=ERROR` en `ghmi-ai-worker`; notificación limitada a una cada
+    30 minutos.
 - [ ] Latencia p95 API.
 - [ ] Latencia del worker.
 - [ ] Instancias reiniciándose.
@@ -1494,16 +1530,26 @@ Crear métricas basadas en logs para:
 - [ ] `payment_webhook_failed`.
 - [ ] `payment_reconciliation_mismatch`.
 - [ ] `checkout_stuck`.
-- [ ] `analysis_failed`.
+- [x] `analysis_failed`.
+  - Métrica `mira_analysis_failed` (level ERROR + operation `analysis_run`);
+    cubre fallos de ejecuciones manuales y programadas, que comparten
+    `mark_run_failed`. La alerta llega por la política log-based general.
 - [ ] `scheduled_analysis_failed`.
+  - Parcial: el fallo de la ejecución cae en `analysis_run`; falta un log
+    ERROR dedicado que lo distinga (pendiente en higiene de logs).
 - [ ] `scheduled_analysis_missed`.
 - [ ] `gmail_refresh_invalid_grant`.
-- [ ] `resend_delivery_failed`.
-- [ ] `ai_worker_failed`.
+  - Los errores de refresh que se registran como ERROR disparan la política
+    log-based general; falta una métrica dedicada.
+- [x] `resend_delivery_failed`.
+  - Métrica `mira_report_delivery_failed` (operation `report_delivery`).
+- [x] `ai_worker_failed`.
+  - La política log-based general cubre `severity>=ERROR` del worker.
 - [ ] `bedrock_failed`.
+  - Cubierto de forma general por la política del worker; sin métrica propia.
 - [x] `data_deletion_failed`.
-  - La API emite el código al fallar un borrado, con hash de propietario y el
-    `request_id` del span; falta conectar una alerta en Cloud Monitoring.
+  - Métrica `mira_data_deletion_failed` (operation `analysis_data_deletion`)
+    y alerta mediante la política log-based general (2026-07-18).
 - [ ] `retention_job_failed`.
 
 ## 11.5 Dashboard operativo en Cloud Monitoring
@@ -1916,7 +1962,10 @@ Prioridad: **P0**
 - [x] Borrado solicitado.
 - [x] Incidente de seguridad.
 - [x] Rollback.
-- [ ] Restauración de datos.
+- [x] Restauración de datos.
+  - `scripts/backup-postgres.sh` + runbook «Respaldo y restauración PostgreSQL
+    (Supabase)»; drill local completo 2026-07-18. Falta que la persona
+    responsable ejecute el primer respaldo real contra Supabase.
 
 Evidencia: `docs/operational-runbooks.md`. Los runbooks de pago permanecen
 diferidos junto con el incidente actual de Mercado Pago.
@@ -2127,7 +2176,7 @@ Usar esta tabla para mantener una visión ejecutiva:
 | Privacidad y términos | P0 | En progreso |  | `docs/privacy.md`; Configuración y Ayuda | El copy técnico refleja el comportamiento actual; faltan política y términos aprobados/publicables. |
 | Landing/copy público | P1 | Listo local |  | `npm --prefix apps/web run build` | Sin lenguaje de beta; el copy de IA refleja el opt-out real. Onboarding, ayuda y documentos legales continúan aparte. |
 | PITR Firestore | P0 | Habilitado |  | Firestore `(default)`: PITR y delete protection habilitados (2026-07-15) | Falta prueba de restauración controlada. |
-| Uptime y alertas | P0 | Pendiente |  |  |  |
+| Uptime y alertas | P0 | Activas |  | 2 uptime checks, canal email, políticas de 5xx, uptime y errores de aplicación; 3 métricas log-based (2026-07-18) | Falta confirmar el drill de notificación y borrar sus recursos temporales. |
 | Logs API | P0 | En progreso |  | Evento HTTP correlacionado en Cloud Logging de `ghmi-api-00033-xut` | API ya validó campos estructurados y redacción en candidata; faltan Bedrock y errores reales de proveedores. |
 | Consumo Bedrock | P1 | Listo local |  | Auditoría única `/audit/batch`; `scripts/check-all.sh` aprobado (166 Rust, 11 worker y build web) | Falta validación desplegada contra la referencia 2600/470. |
 | CI verde | P0 | Configurado local |  | `.github/workflows/ci.yml`; `scripts/check-all.sh` — 167 Rust, 10 worker, build web y scan de secretos | Corre en PR y `main`, reutiliza el gate y el lockfile. Falta primera ejecución remota y protección de rama. |

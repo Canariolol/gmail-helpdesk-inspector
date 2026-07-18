@@ -2923,3 +2923,126 @@ tráfico y cuyo `/health` responde HTTP 200. Cloud Scheduler continúa `PAUSED`.
 análisis y auditoría, scheduler y una entrega real del webhook WorkOS. El modo
 `APP_ENV=production` queda pendiente mientras pagos siga diferido, por lo que
 no se declara un lanzamiento pagado como production-ready.
+
+## 2026-07-18 — Modo production sin credenciales de Mercado Pago
+
+**Estado:** implementado y validado localmente; despliegue de la candidata
+pendiente de autorización.
+
+**Qué se hizo:** se decidió habilitar `APP_ENV=production` mientras pagos sigue
+diferido. La validación de arranque ya no exige `MERCADOPAGO_ACCESS_TOKEN` ni
+`MERCADOPAGO_WEBHOOK_SECRET` en producción; en su lugar exige
+`BILLING_ENFORCEMENT_ENABLED=true` (las cuentas sin suscripción operan con las
+cuotas del plan Free y el checkout responde 503) y rechaza la configuración a
+medias de un access token sin secreto de webhook. Además, el webhook de
+Mercado Pago ahora rechaza payloads sin firma cuando `APP_ENV` es producción,
+aunque no exista secreto configurado; antes los aceptaba silenciosamente.
+`scripts/redeploy-gcp.sh` acepta `API_DEPLOY_EXTRA_ARGS` para añadir
+argumentos gcloud al deploy de la API, y `main.rs` reutiliza el mismo chequeo
+de entorno production (`prod`/`production`) que el resto de la configuración.
+
+**Motivo:** la revisión activa corre como `development` y por tanto sin las
+validaciones de arranque de producción (HTTPS, secretos no default, storage,
+cookies). El único bloqueo era el acople entre el modo production y las
+credenciales de la pasarela, que seguirá diferida.
+
+**Evidencia:** 169 pruebas Rust en verde, Clippy sin warnings y `bash -n` del
+script. Consulta de solo lectura a `ghmi-api-00047-mhf`: `APP_STORAGE=postgres`,
+`APP_COOKIE_SAMESITE=Lax` ya aplicado (el plan tenía una nota obsoleta),
+`APP_COOKIE_SECURE=true`, URLs HTTPS con orígenes correctos,
+`BILLING_ENFORCEMENT_ENABLED=true`, `maxScale=1` y sin `APP_ENV` declarado.
+
+**Qué sigue:** desplegar la candidata con
+`API_DEPLOY_EXTRA_ARGS="--update-env-vars APP_ENV=production" scripts/redeploy-gcp.sh --no-traffic api`,
+verificar `/health` y login en la URL del tag `candidate`, y recién entonces
+mover tráfico. La configuración desplegada actual pasa todas las validaciones
+nuevas, por lo que no se espera un fallo de arranque.
+
+## 2026-07-18 — Respaldo PostgreSQL manual con restauración probada
+
+**Estado:** script y runbook listos; primer respaldo real pendiente de la
+persona responsable.
+
+**Qué se hizo:** la fuente de verdad ya es Supabase Free, que no tiene PITR, y
+el checklist de respaldo del plan apuntaba solamente a Firestore. Se creó
+`scripts/backup-postgres.sh` (pg_dump del schema `mira` en formato custom,
+verificación de integridad con `pg_restore --list`, comprobación de que el
+dump contiene `mira.records` y `mira.schema_migrations`, y rotación por
+`BACKUP_KEEP`, 14 por defecto). El destino `backups/` quedó en `.gitignore`.
+La entrada cron queda documentada en el script y desactivada por decisión de
+la persona responsable, que ejecutará los respaldos desde su equipo. Se añadió
+el runbook «Respaldo y restauración PostgreSQL (Supabase)» con el drill local
+y el procedimiento de recuperación real hacia Supabase.
+
+**Motivo:** «respaldo y recuperación probados» es criterio de
+production-ready y no se cumplía para la base activa; una restauración jamás
+ensayada no cuenta como recuperación.
+
+**Evidencia:** drill local 2026-07-18 contra PostgreSQL 17 en Docker con la
+migración real `0001_mira_records`: respaldo de 500 registros sintéticos más
+la tabla de migraciones, restauración a base limpia con 500/1/10
+(records/migraciones/índices) y rotación que conservó exactamente 3 dumps con
+`BACKUP_KEEP=3`. Sin datos ni secretos reales involucrados.
+
+**Qué sigue:** ejecutar el primer respaldo real con la URL de
+`mira-postgres-url` desde el equipo de la persona responsable y registrar
+conteos por `kind`. Reevaluar el cron y el destino externo (GCS o plan Pro de
+Supabase) antes de ampliar usuarios.
+
+## 2026-07-18 — Observabilidad mínima activa en Cloud Monitoring
+
+**Estado:** recursos creados y verificados; drill de notificación en curso.
+
+**Qué se hizo:** se crearon el canal de notificación por correo
+(`teamgerencia.west@west-ingenieria.cl`), dos uptime checks cada 10 minutos
+(`mira-web-KmYdD-H9gvk` sobre `https://mira.ninfasolutions.com/` y
+`ghmi-api-health-M3V3H5HuYcs` sobre `/health` del origen `run.app`), y cuatro
+políticas de alerta: fallo de uptime web, fallo de uptime API, más de 2
+respuestas 5xx en 10 minutos en `ghmi-api`/`ghmi-web`, y una política
+log-based de errores de aplicación. Se detectó que la API emite `level` y no
+`severity` en su JSON, por lo que `severity>=ERROR` no captura sus errores; la
+política usa `jsonPayload.level="ERROR"` para la API y `severity>=ERROR` para
+el worker, que sí emite `severity`. Se crearon además las métricas log-based
+`mira_analysis_failed`, `mira_report_delivery_failed` y
+`mira_data_deletion_failed`.
+
+**Motivo:** «alguien recibe alertas cuando falla» era un criterio
+production-ready completamente abierto; ninguna alerta ni uptime check
+existía.
+
+**Evidencia:** IDs de recursos en el checklist 11.2–11.4; ambos endpoints
+respondieron 200 antes de crear los checks. El coste del uptime check asume
+despertar la instancia hasta 6 veces/hora por endpoint.
+
+**Qué sigue:** confirmar la llegada del correo del drill (check
+`mira-alert-drill-fCXQyvAs_QY` contra una ruta 404 deliberada con política
+propia), eliminar ambos recursos temporales y registrar el resultado. Añadir
+un log ERROR dedicado para `scheduled_analysis_failed` y mapear `level` a
+`severity` en la higiene de logs pendiente.
+
+## 2026-07-18 — Scheduler reanudado; secretos perdidos restaurados
+
+**Estado:** endpoint validado con 200; primera ejecución programada completa
+pendiente para el lunes.
+
+**Qué se hizo:** al reanudar `ghmi-daily-report` y dispararlo manualmente, el
+endpoint `/internal/scheduled-analysis` devolvió 404 en 3 ms. La causa fue de
+configuración, no de código: la revisión activa PostgreSQL no referenciaba
+`CRON_SECRET` ni `RESEND_API_KEY` (se perdieron en la cadena de redeploys del
+cutover; sin `CRON_SECRET`, el disparo externo se apaga y responde 404 a
+propósito). Se otorgó `roles/secretmanager.secretAccessor` a nivel de cada
+secreto (`cron-secret`, `resend-api-key`) a la identidad dedicada
+`ghmi-api-postgres-runtime` y se creó `ghmi-api-00049-2qb` restaurando ambas
+referencias. El redisparo devolvió 200 en 0,15 s (sábado: sin análisis
+pendiente), `/health` respondió 200 y los logs de arranque no muestran
+errores.
+
+**Incidencia de seguridad menor:** al inspeccionar el job de Cloud Scheduler
+durante el diagnóstico se imprimió el valor del header `x-cron-secret` en la
+sesión de trabajo local. Recomendación: rotar `cron-secret` (nueva versión en
+Secret Manager + actualizar el header del job + nueva revisión); queda a
+decisión de la persona responsable conforme a su política de secretos.
+
+**Qué sigue:** observar la ejecución programada del lunes 08:00
+America/Santiago (las alertas nuevas cubren fallos) y verificar la entrega del
+reporte por Resend.

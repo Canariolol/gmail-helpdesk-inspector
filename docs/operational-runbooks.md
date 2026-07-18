@@ -185,6 +185,69 @@ para una base temporal, clona el punto de recuperación a una base nueva.
    el coste observado. Una restauración in-place de `(default)` requiere un
    procedimiento de incidente separado y aprobación explícita.
 
+## Respaldo y restauración PostgreSQL (Supabase)
+
+Desde el cutover, la fuente de verdad es el schema `mira` en Supabase (plan
+Free: sin PITR gestionado). El respaldo es manual desde el equipo de la persona
+responsable con `scripts/backup-postgres.sh`; los dumps quedan en `backups/`
+(fuera de Git) y rotan a los últimos 14.
+
+**Respaldar** (la URL es la de Secret Manager `mira-postgres-url`; no dejarla
+en el historial de shell ni en archivos versionados):
+
+```bash
+POSTGRES_DATABASE_URL="$(gcloud secrets versions access latest --secret=mira-postgres-url)" \
+  scripts/backup-postgres.sh
+```
+
+El script verifica la integridad del dump (`pg_restore --list`) y que
+contenga `mira.records` y `mira.schema_migrations`; si falla, el respaldo no
+es válido.
+
+**Restaurar (drill o recuperación a base limpia):**
+
+1. Levantar un PostgreSQL desechable o usar una base vacía. Para un drill
+   local:
+
+   ```bash
+   docker run -d --rm --name mira-restore -e POSTGRES_PASSWORD=test -p 55432:5432 postgres:17-alpine
+   psql "postgresql://postgres:test@127.0.0.1:55432/postgres" \
+     -c "CREATE ROLE anon NOLOGIN" -c "CREATE ROLE authenticated NOLOGIN" -c "CREATE ROLE service_role NOLOGIN"
+   ```
+
+   (Los roles sólo son necesarios porque la migración los referencia; en
+   Supabase ya existen.)
+
+2. Restaurar el dump más reciente:
+
+   ```bash
+   pg_restore --no-owner --no-acl \
+     -d "postgresql://postgres:test@127.0.0.1:55432/postgres" \
+     backups/postgres/mira-<fecha>.dump
+   ```
+
+3. Verificar conteos contra los del momento del respaldo:
+
+   ```bash
+   psql "postgresql://postgres:test@127.0.0.1:55432/postgres" -tA \
+     -c "SELECT kind, count(*) FROM mira.records GROUP BY kind ORDER BY kind"
+   ```
+
+4. Registrar en la bitácora fecha, dump usado, conteos y duración. No copiar
+   contenido de correos al registro.
+
+**Recuperación real hacia Supabase:** restaurar sobre una base/proyecto nuevo
+de Supabase, nunca in-place sobre el proyecto activo con la API sirviendo
+tráfico. Pausar Cloud Scheduler y detener el tráfico de `ghmi-api` antes de
+reemplazar datos; después apuntar `mira-postgres-url` (nueva versión del
+secreto) a la base restaurada y desplegar. Requiere autorización operativa
+explícita.
+
+Evidencia del drill 2026-07-18: ciclo completo backup→restore contra
+PostgreSQL 17 local con la migración real, 500 registros sintéticos y la tabla
+de migraciones; conteos e índices coincidieron y la rotación conservó
+exactamente `BACKUP_KEEP` dumps.
+
 ## Solicitud de borrar análisis
 
 **Síntoma:** una persona solicita eliminar sus análisis derivados.
@@ -201,6 +264,39 @@ para una base temporal, clona el punto de recuperación a una base nueva.
 
 **Verificación:** la pantalla de datos muestra cero análisis para la cuenta y
 el evento de auditoría asociado al `x-request-id` queda en `completed` sin PII.
+
+## Solicitud de eliminación completa de cuenta (procedimiento manual)
+
+Mientras no exista el flujo automático, la eliminación de cuenta se atiende de
+forma manual.
+
+- **Canal:** `soporte@ninfasolutions.com` (confirmar antes de publicar en la
+  página de privacidad).
+- **Responsable:** la persona operadora del proyecto.
+- **Plazo objetivo:** confirmar recepción dentro de 3 días hábiles y completar
+  dentro de 15 días corridos.
+
+Checklist por solicitud (registrar fecha y resultado de cada paso en una
+entrada de la bitácora, sin PII más allá del hash de la cuenta):
+
+1. Verificar identidad: responder al mismo correo de la cuenta afectada y
+   pedir una confirmación explícita desde ese correo. Nunca pedir contraseñas
+   ni tokens.
+2. Si hay suscripción activa cuando existan cobros: cancelarla primero y
+   confirmar que no habrá cargos futuros.
+3. Pedir a la persona (o ejecutar con su autorización escrita):
+   desconexión de Gmail desde la app (revoca el grant) y borrado de análisis
+   con la confirmación `BORRAR MIS ANALISIS`.
+4. Revocar todas las sesiones de la cuenta.
+5. Eliminar manualmente en la base: configuración, presets, conexión Gmail,
+   estados de scheduler y la cuenta, conservando sólo los registros de
+   auditoría de borrado y los financieros/legales exigibles.
+6. Eliminar la persona usuaria en WorkOS (o documentar por qué se conserva).
+7. Verificar que un login nuevo con ese correo crearía una cuenta vacía.
+8. Enviar confirmación final por correo y registrar el cierre en la bitácora.
+
+**Verificación:** consulta por hash de cuenta sin resultados en `mira.records`
+(salvo auditorías de borrado) y confirmación enviada.
 
 ## Incidente de seguridad
 

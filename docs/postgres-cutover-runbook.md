@@ -91,3 +91,34 @@ gcloud scheduler jobs resume ghmi-daily-report --location us-central1
 Tras un periodo de observación sin errores y con backup/export de Firestore,
 retirar la identidad Firestore de la API nueva. La clave local legacy se rota
 en una tarea separada; no forma parte del cambio de tráfico.
+
+## Validación funcional restante (checklist ejecutable)
+
+Estado 2026-07-18: login WorkOS, lectura Gmail y análisis manual ya validados
+en la revisión activa. Falta lo siguiente; marcar cada punto con fecha al
+completarlo.
+
+1. **Scheduler** — reanudado y disparado manualmente el 2026-07-18: `200` en
+   `/internal/scheduled-analysis` tras restaurar `CRON_SECRET` y
+   `RESEND_API_KEY` en `ghmi-api-00049-2qb` (la revisión PostgreSQL los había
+   perdido; el primer disparo devolvió 404). Falta observar la primera
+   ejecución programada completa (lunes 08:00 America/Santiago) con reporte
+   entregado.
+2. **Lectura de configuración** — abrir Configuración con la cuenta tester y
+   verificar que carga política, límites y estado de IA sin errores.
+3. **Borrado de análisis + auditoría** — con la cuenta tester (idealmente con
+   un análisis desechable): Privacidad → `BORRAR MIS ANALISIS`; verificar
+   cero análisis visibles y el registro de auditoría `completed` para el
+   `request_id` en PostgreSQL. Requiere sesión de la persona usuaria.
+4. **Reconexión Gmail OAuth** — desconectar Gmail desde Cuenta y reconectar la
+   misma casilla; verificar que un análisis nuevo funciona después. Requiere
+   sesión de la persona usuaria.
+5. **Webhook WorkOS real** — provocar un `session.revoked` real (cerrar sesión
+   desde el dashboard de WorkOS o «Cerrar todas las sesiones») y confirmar en
+   Cloud Logging `operation=workos_webhook` con HTTP 204.
+6. **Auditoría por lotes desplegada** — tras el próximo deploy del worker/API,
+   confirmar en Cloud Logging llamadas a `/audit/batch`, ninguna a
+   `/audit/thread`, y comparar tokens con la referencia 2600/470.
+7. **Periodo de observación** — una semana sin errores nuevos en las alertas
+   creadas el 2026-07-18 antes de retirar Firestore como rollback y exportar su
+   respaldo final.
