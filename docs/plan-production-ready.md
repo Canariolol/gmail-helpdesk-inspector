@@ -1460,10 +1460,13 @@ Decisión inicial recomendada:
 
 - [x] Emitir JSON estructurado desde API.
 - [x] Emitir JSON estructurado desde worker.
-- [ ] Mantener niveles:
+- [x] Mantener niveles:
   - `INFO`: operación normal relevante.
   - `WARN`: degradación recuperable.
   - `ERROR`: operación fallida.
+  - Verificado 2026-07-18 en Cloud Logging: `INFO request completed`,
+    `WARN auth rejected`, `ERROR` en fallos; las alertas y métricas filtran
+    por `jsonPayload.level` porque tracing no emite `severity`.
 - [ ] Incluir:
   - [x] `service`.
   - [x] `environment`.
@@ -1479,9 +1482,17 @@ Decisión inicial recomendada:
   `environment`, `request_id`, `operation`, `status` y `duration_ms`; sus
   errores Bedrock incluyen un `error_code` seguro y el `run_id` cuando existe.
   Falta comprobarlos en Cloud Logging tras despliegue.
-- [ ] No incluir datos sensibles.
-- [ ] Definir retención de logs.
-- [ ] Revisar coste estimado.
+- [x] No incluir datos sensibles.
+  - Cubierto por la auditoría de redacción (6.4) y la validación del evento
+    HTTP en Cloud Logging del 2026-07-16; Mercado Pago sigue diferido.
+- [x] Definir retención de logs.
+  - Decisión 2026-07-18: se mantiene la retención por defecto — `_Default`
+    30 días y `_Required` 400 (fijado por Google). Suficiente para diagnóstico
+    en esta etapa; ampliar sólo si un incidente lo exige.
+- [x] Revisar coste estimado.
+  - Con el volumen actual el ingreso de logs queda dentro de la asignación
+    gratuita de Cloud Logging (50 GiB/mes por proyecto); revisar al crecer
+    usuarios junto con el presupuesto GCP pendiente (sección 19).
 
 ## 11.2 Uptime checks
 
