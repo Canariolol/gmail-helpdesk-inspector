@@ -3,6 +3,9 @@
 secrets/*
 !secrets/.gitkeep
 
+# Respaldos locales de PostgreSQL (scripts/backup-postgres.sh)
+backups/
+
 # Rust
 target/
 apps/api/target/

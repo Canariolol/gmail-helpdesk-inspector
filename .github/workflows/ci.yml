@@ -33,3 +33,12 @@ jobs:
           cache-dependency-path: apps/web/package-lock.json
       - run: npm --prefix apps/web ci
       - run: ./scripts/check-all.sh
+      - name: Rust dependency audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - run: cargo audit --file apps/api/Cargo.lock
+      - name: Python dependency audit
+        run: |
+          uv export --directory apps/ai-worker --frozen --no-emit-project --format requirements-txt -o /tmp/ai-worker-requirements.txt
+          uvx pip-audit --requirement /tmp/ai-worker-requirements.txt --disable-pip

@@ -19,6 +19,8 @@ Environment overrides:
   IMAGE_BASE       Defaults to ${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${ARTIFACT_REPO}
   IMAGE_TAG        Defaults to the current Git commit (12 characters)
   API_URL          Optional; used by the web deploy for API_PROXY_TARGET
+  API_DEPLOY_EXTRA_ARGS  Optional; extra gcloud args for the api deploy
+                         (e.g. "--update-env-vars APP_ENV=production")
   VITE_MERCADOPAGO_PUBLIC_KEY  Required to build embedded Mercado Pago checkout
 
 Options:
@@ -169,7 +171,9 @@ resolve_api_url() {
 }
 
 deploy_api() {
-  build_push_deploy "api" "apps/api/Dockerfile" "$API_SERVICE"
+  # Sin comillas a propósito: permite pasar varios argumentos gcloud separados.
+  # shellcheck disable=SC2086
+  build_push_deploy "api" "apps/api/Dockerfile" "$API_SERVICE" ${API_DEPLOY_EXTRA_ARGS:-}
 }
 
 deploy_worker() {
