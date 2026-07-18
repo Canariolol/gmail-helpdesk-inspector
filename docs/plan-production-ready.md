@@ -1869,14 +1869,23 @@ Prioridad: **P1**
 
 ## 16.2 Timeouts y retries
 
-- [ ] Revisar timeout de WorkOS.
-- [ ] Revisar timeout de Google OAuth.
-- [ ] Revisar timeout de Gmail.
-- [ ] Revisar timeout de Firestore.
-- [ ] Revisar timeout del worker.
+Auditoría 2026-07-18: los clientes salientes de la API (HTTP general para
+WorkOS/Google OAuth/worker/Mercado Pago, Gmail y Firestore) usan 30 s de
+timeout total y 10 s de conexión; PostgreSQL usa 10 s para adquirir conexión.
+Resend usaba `Client::new()` sin timeout y se corrigió a los mismos límites.
+
+- [x] Revisar timeout de WorkOS.
+- [x] Revisar timeout de Google OAuth.
+- [x] Revisar timeout de Gmail.
+- [x] Revisar timeout de Firestore.
+- [x] Revisar timeout del worker.
 - [ ] Revisar timeout de Bedrock.
-- [ ] Revisar timeout de Mercado Pago.
-- [ ] Revisar timeout de Resend.
+  - Vive en el worker Python; revisar su cliente boto3 por separado.
+- [x] Revisar timeout de Mercado Pago.
+  - Usa el cliente HTTP general de la API (30 s/10 s).
+- [x] Revisar timeout de Resend.
+  - Corregido 2026-07-18: tenía `Client::new()` sin timeout; un Resend
+    colgado podía detener el análisis programado hasta el límite de Cloud Run.
 - [ ] Añadir retries solo para operaciones idempotentes.
 - [ ] Aplicar backoff con jitter.
 - [ ] Evitar retry automático de cobros no idempotentes.

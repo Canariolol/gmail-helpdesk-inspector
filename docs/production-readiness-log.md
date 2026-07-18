@@ -3101,3 +3101,19 @@ alerta (~14:40–14:50 hora de Chile del 2026-07-18) como verificación final de
 canal, y el resto de pendientes humanos ya registrados: deploy candidato con
 `APP_ENV=production`, primer backup real, rotación de `cron-secret` y revisión
 legal.
+
+## 2026-07-18 — Timeout de Resend y auditoría de timeouts salientes
+
+**Estado:** corregido y validado localmente.
+
+**Qué se hizo:** auditoría de timeouts de clientes salientes: el cliente HTTP
+general (WorkOS, Google OAuth, worker, Mercado Pago), Gmail y Firestore usan
+30 s total / 10 s de conexión, y PostgreSQL 10 s de adquisición. Resend era la
+excepción: `reqwest::Client::new()` sin timeout, por lo que un envío colgado
+podía retener un análisis programado hasta el timeout de Cloud Run (1.800 s).
+Se igualó a 30 s/10 s. Bedrock queda para revisión en el worker Python.
+
+**Evidencia:** 169 tests Rust, fmt y Clippy sin warnings.
+
+**Qué sigue:** revisar el timeout de boto3/Bedrock en el worker y los retries
+con backoff sólo para operaciones idempotentes (sección 16.2).

@@ -37,7 +37,12 @@ impl ResendMailer {
             .clone()
             .ok_or_else(|| anyhow!("REPORT_FROM_EMAIL no está configurado"))?;
         Ok(Self {
-            http: reqwest::Client::new(),
+            // Mismos límites que los demás clientes salientes: un Resend
+            // colgado no debe detener un análisis programado.
+            http: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .build()?,
             api_key,
             from,
         })
