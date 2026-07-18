@@ -1,6 +1,7 @@
 import { ArrowUpRight, Ban, Check, LogOut, RefreshCw, ShieldAlert } from "lucide-react";
 import { useState } from "react";
 import type { AccountStatus, BillingPlan, BillingPlanId, SubscriptionStatus } from "../api/types";
+import { ThemePicker } from "../components/common/ThemePicker";
 import { isBlockedStatus } from "./access/accessState";
 import { PaymentNotes } from "./access/PaymentNotes";
 import { PricingPlans } from "./access/PricingPlans";
@@ -225,6 +226,11 @@ export function CuentaView({
             )}
           </div>
         )}
+
+        <div className="cuenta-plan">
+          <p className="cuenta-plan-name">Apariencia</p>
+          <ThemePicker />
+        </div>
 
         <div className="cuenta-plan">
           <p className="cuenta-plan-name">Sesiones</p>

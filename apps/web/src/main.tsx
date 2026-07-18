@@ -2,6 +2,7 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { App } from "./App";
+import { initTheme } from "./lib/theme";
 import "./styles/tokens.css";
 import "./styles/base.css";
 import "./styles/layout.css";
@@ -11,6 +12,8 @@ import "./styles/access.css";
 import "./styles/landing/landing-shared.css";
 import "./styles/landing/landing-focus.css";
 import "./styles/landing/landing-public.css";
+
+initTheme();
 
 const queryClient = new QueryClient();
 
