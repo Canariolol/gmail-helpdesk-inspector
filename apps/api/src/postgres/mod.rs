@@ -191,6 +191,11 @@ impl PostgresStorage {
 
 #[async_trait]
 impl StorageRepository for PostgresStorage {
+    async fn ping(&self) -> anyhow::Result<()> {
+        sqlx::query("SELECT 1").execute(&self.pool).await?;
+        Ok(())
+    }
+
     async fn upsert_account(&self, account: &Account) -> anyhow::Result<()> {
         self.put(
             "account",

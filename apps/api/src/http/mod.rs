@@ -128,6 +128,7 @@ impl RateLimiter {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/health/ready", get(readiness))
         .route("/auth/workos/login", get(auth_workos_login))
         .route("/auth/workos/callback", get(auth_workos_callback))
         .route("/auth/workos/webhook", post(workos_webhook))
@@ -194,6 +195,17 @@ pub fn router(state: AppState) -> Router {
 
 async fn health() -> Json<serde_json::Value> {
     Json(json!({ "ok": true }))
+}
+
+/// Readiness: liveness más un ping liviano al storage activo. No consulta
+/// Gmail, Bedrock ni proveedores externos, y no expone detalles internos.
+async fn readiness(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
+    state
+        .storage
+        .ping()
+        .await
+        .map_err(|_| ApiError::service_unavailable("El servicio no está listo"))?;
+    Ok(Json(json!({ "ok": true })))
 }
 
 /// Limita el `screen_hint` a los valores válidos de AuthKit; cualquier otra cosa se
@@ -4645,6 +4657,24 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(run.status, AnalysisStatus::Pending);
+    }
+
+    #[tokio::test]
+    async fn readiness_reports_ok_with_healthy_storage() {
+        let test = seeded_app().await;
+        let response = test
+            .app
+            .oneshot(
+                Request::builder()
+                    .uri("/health/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = response_json(response).await;
+        assert_eq!(body["ok"], true);
     }
 
     #[tokio::test]

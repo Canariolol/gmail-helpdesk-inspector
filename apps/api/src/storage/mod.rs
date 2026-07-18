@@ -74,6 +74,11 @@ pub enum GmailConnectionRefresh {
 
 #[async_trait]
 pub trait StorageRepository: Send + Sync {
+    /// Chequeo liviano de readiness. Por defecto no consulta nada; cada
+    /// backend con conexión real (PostgreSQL) lo sobreescribe.
+    async fn ping(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
     async fn upsert_account(&self, account: &Account) -> anyhow::Result<()>;
     async fn get_account_by_workos_user_id(
         &self,

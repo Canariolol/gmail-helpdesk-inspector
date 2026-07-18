@@ -3134,3 +3134,21 @@ como señal temprana de consumo anómalo (uptime checks, Bedrock, Cloud Run).
 
 **Qué sigue:** ajustar el monto cuando exista uso real y evaluar presupuestos
 por servicio si el gasto crece.
+
+## 2026-07-18 — Endpoint de readiness con ping al storage
+
+**Estado:** implementado y validado localmente; se desplegará con la próxima
+imagen (por ejemplo, la candidata de `APP_ENV=production`).
+
+**Qué se hizo:** se añadió `GET /health/ready`: hace un ping liviano al
+storage activo (`SELECT 1` sobre el pool PostgreSQL; los backends de memoria
+y Firestore responden OK sin consultar) y devuelve `{"ok":true}` o un
+`SERVICE_UNAVAILABLE` del contrato público sin detalles internos. `/health` se
+conserva como liveness estático. No consulta Gmail, Bedrock ni Mercado Pago.
+
+**Evidencia:** 170 tests Rust (incluye el nuevo de readiness), fmt y Clippy
+sin warnings.
+
+**Qué sigue:** tras desplegar, apuntar el uptime check de API a
+`/health/ready` si se prefiere detectar también la pérdida de conexión a la
+base, evaluando el costo de mantener viva la conexión del pool.

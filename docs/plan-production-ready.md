@@ -1503,7 +1503,10 @@ Decisión inicial recomendada:
 - [x] Uptime check para API `/health`.
   - Evidencia 2026-07-18: `ghmi-api-health-M3V3H5HuYcs` sobre `/health` del
     origen `run.app`, cada 10 minutos.
-- [ ] Considerar un readiness interno que verifique Firestore.
+- [x] Considerar un readiness interno que verifique Firestore.
+  - `GET /health/ready` hace un ping liviano al storage activo (`SELECT 1`
+    en PostgreSQL); implementado 2026-07-18, pendiente de desplegar con la
+    próxima imagen.
 - [x] No incluir dependencias costosas en cada liveness check.
   - `/health` no consulta proveedores externos.
 - [x] Configurar frecuencia.
@@ -1861,11 +1864,17 @@ Prioridad: **P1**
 
 ## 16.1 Health y readiness
 
-- [ ] Mantener liveness simple.
-- [ ] Crear readiness separado si es necesario.
-- [ ] Readiness puede validar Firestore de forma liviana.
-- [ ] No llamar Gmail, Bedrock o Mercado Pago en cada healthcheck.
-- [ ] Mostrar solo estado general, sin detalles sensibles.
+- [x] Mantener liveness simple.
+  - `/health` responde estático, sin dependencias.
+- [x] Crear readiness separado si es necesario.
+  - `GET /health/ready` (2026-07-18); pendiente de desplegar.
+- [x] Readiness puede validar Firestore de forma liviana.
+  - Valida el storage activo: `SELECT 1` en PostgreSQL; los demás backends
+    responden OK sin consultas.
+- [x] No llamar Gmail, Bedrock o Mercado Pago en cada healthcheck.
+- [x] Mostrar solo estado general, sin detalles sensibles.
+  - Éxito `{"ok":true}`; fallo usa el contrato público (`SERVICE_UNAVAILABLE`)
+    sin detalles del proveedor.
 
 ## 16.2 Timeouts y retries
 
