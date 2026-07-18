@@ -2058,8 +2058,13 @@ Prioridad: **P1**
 
 ## 19.1 Presupuestos
 
-- [ ] Budget de GCP.
-- [ ] Alertas de presupuesto.
+- [x] Budget de GCP.
+  - Evidencia 2026-07-18: presupuesto «Mira GCP mensual» de CLP 50.000/mes
+    filtrado al proyecto (`budgets/e6d2d1f9-d19e-4b6d-a8bd-4e4ac3fde4bf`).
+    Monto inicial conservador; ajustar al crecer el uso.
+- [x] Alertas de presupuesto.
+  - Umbrales al 50%, 90% y 100% del gasto actual; notifican a quienes
+    administran la cuenta de facturación.
 - [ ] Seguimiento de Firestore.
 - [ ] Seguimiento de Cloud Run.
 - [ ] Seguimiento de Logging.

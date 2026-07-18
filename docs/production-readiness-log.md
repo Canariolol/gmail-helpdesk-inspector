@@ -3117,3 +3117,20 @@ Se igualó a 30 s/10 s. Bedrock queda para revisión en el worker Python.
 
 **Qué sigue:** revisar el timeout de boto3/Bedrock en el worker y los retries
 con backoff sólo para operaciones idempotentes (sección 16.2).
+
+## 2026-07-18 — Presupuesto GCP con alertas
+
+**Estado:** activo.
+
+**Qué se hizo:** se habilitó la Cloud Billing Budget API y se creó el
+presupuesto «Mira GCP mensual» de CLP 50.000/mes filtrado al proyecto
+`gmail-helpdesk-inspector`, con umbrales de alerta al 50%, 90% y 100% del
+gasto actual (el primer intento quedó en CLP 50 por defecto de moneda y se
+corrigió de inmediato). Las notificaciones llegan a la administración de la
+cuenta de facturación.
+
+**Motivo:** cierra «Budget de GCP» y «Alertas de presupuesto» (sección 19.1)
+como señal temprana de consumo anómalo (uptime checks, Bedrock, Cloud Run).
+
+**Qué sigue:** ajustar el monto cuando exista uso real y evaluar presupuestos
+por servicio si el gasto crece.
