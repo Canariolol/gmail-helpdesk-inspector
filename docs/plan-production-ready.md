@@ -1879,8 +1879,9 @@ Resend usaba `Client::new()` sin timeout y se corrigió a los mismos límites.
 - [x] Revisar timeout de Gmail.
 - [x] Revisar timeout de Firestore.
 - [x] Revisar timeout del worker.
-- [ ] Revisar timeout de Bedrock.
-  - Vive en el worker Python; revisar su cliente boto3 por separado.
+- [x] Revisar timeout de Bedrock.
+  - Verificado 2026-07-18: el worker llama a Bedrock con
+    `httpx.AsyncClient(timeout=60)` en las dos rutas de auditoría.
 - [x] Revisar timeout de Mercado Pago.
   - Usa el cliente HTTP general de la API (30 s/10 s).
 - [x] Revisar timeout de Resend.
