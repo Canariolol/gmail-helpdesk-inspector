@@ -3046,3 +3046,38 @@ decisión de la persona responsable conforme a su política de secretos.
 **Qué sigue:** observar la ejecución programada del lunes 08:00
 America/Santiago (las alertas nuevas cubren fallos) y verificar la entrega del
 reporte por Resend.
+
+## 2026-07-18 — Borradores legales, CI remoto y auditorías de dependencias
+
+**Estado:** borradores publicables tras revisión legal; CI remoto disparado.
+
+**Qué se hizo:** se redactaron completos los tres documentos legales de la
+web (`legalContent.ts`): Política de privacidad, Términos y condiciones y
+página de Seguridad, con Ninfa Solutions como responsable, jurisdicción Chile,
+los subprocesadores reales (WorkOS, Google, Google Cloud, Supabase, AWS
+Bedrock, Resend y Mercado Pago futuro), transferencias internacionales a
+EE.UU., IA con opt-out y retención honesta (sin prometer borrado automático).
+Mantienen la marca «Borrador» hasta revisión legal. La sección de pagos de los
+términos queda explícitamente «aún no vigente». Se añadió el runbook manual de
+eliminación completa de cuenta (sección 8.5 del plan). El registro de
+aceptación de versiones se difiere a propósito: la forma del acto de
+aceptación (checkbox u otro) es una decisión legal pendiente (17.4) y el flujo
+de registro vive en WorkOS.
+
+En CI se añadieron `cargo audit` (con `.cargo/audit.toml` ignorando
+RUSTSEC-2023-0071 de `rsa`, sin fix y limitado a firma local de JWT) y
+`pip-audit` sobre el export del lockfile de uv; `quinn-proto` se actualizó por
+RUSTSEC-2026-0185. Se creó el PR #1 (`saas-scaling` → `main`), que disparó la
+primera corrida remota de CI, y `main` quedó protegida exigiendo el check
+`verify`. Los runs atascados en `Running` no bloquean análisis nuevos (la
+creación genera siempre un run `Pending` nuevo), por lo que el mecanismo de
+recuperación por TTL se difiere documentadamente.
+
+**Evidencia:** build web OK con el contenido nuevo; `scripts/check-all.sh`
+verde (169 Rust, 11 worker); `cargo audit` y `pip-audit` sin hallazgos
+accionables; PR https://github.com/Canariolol/gmail-helpdesk-inspector/pull/1.
+
+**Qué sigue:** revisión legal de los borradores, confirmar RUT y correo de
+contacto (`soporte@ninfasolutions.com` propuesto), confirmar la primera
+corrida remota de CI y, tras la decisión legal, implementar el registro de
+aceptación de versiones.

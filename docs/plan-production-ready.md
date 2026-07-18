@@ -1174,8 +1174,14 @@ siguen pendientes.
 ## 9.2 Permisos
 
 - [x] Revisar permisos de la service account.
-- [ ] Mantener mínimo privilegio.
-- [ ] Evitar roles Owner/Editor.
+- [x] Mantener mínimo privilegio.
+  - Verificación 2026-07-18: `ghmi-web-00025-qkt` (100% tráfico) usa
+    `ghmi-web-runtime` y `ghmi-ai-worker-00015-rn2` (100%) usa
+    `ghmi-worker-runtime`; la API usa `ghmi-api-postgres-runtime` con acceso
+    por secreto (hoy se añadieron `cron-secret` y `resend-api-key`).
+- [x] Evitar roles Owner/Editor.
+  - La identidad Compute por defecto con `roles/editor` ya no sirve tráfico
+    de ningún servicio Mira.
 - [ ] Confirmar que web y worker no acceden directamente a Firestore.
 - [ ] Separar service accounts por servicio cuando sea útil.
 - [ ] Revisar acceso humano al proyecto.
@@ -1698,16 +1704,23 @@ Prioridad: **P0**
 ## 14.2 CI
 
 - [x] Crear workflow de CI.
-- [ ] Ejecutarlo en pull requests.
+- [x] Ejecutarlo en pull requests.
+  - Evidencia 2026-07-18: PR #1 (`saas-scaling` → `main`) disparó la primera
+    corrida remota.
 - [x] Ejecutarlo antes de deploy.
   - `scripts/redeploy-gcp.sh` ejecuta `scripts/check-all.sh` antes de autenticar Docker, construir o publicar imágenes.
-- [ ] Bloquear merge si falla.
+- [x] Bloquear merge si falla.
+  - Evidencia 2026-07-18: protección de `main` exige el check `verify`.
 - [x] Cachear dependencias.
 - [x] No exponer secretos en PRs.
 - [x] Añadir escaneo de secretos de archivos rastreados.
   - `scripts/check-secrets.sh` usa `git grep` para rechazar formatos de clave privada, AWS, Google, Mercado Pago, GitHub y secretos `sk_live/prod`; se ejecuta desde `scripts/check-all.sh` y por tanto en CI. No es un scanner de entropía ni inspecciona archivos no versionados.
-- [ ] Añadir auditoría de dependencias Rust.
-- [ ] Añadir auditoría de dependencias Python.
+- [x] Añadir auditoría de dependencias Rust.
+  - `cargo audit` en CI; `quinn-proto` actualizado (RUSTSEC-2026-0185) y
+    excepción documentada en `.cargo/audit.toml` para RUSTSEC-2023-0071
+    (`rsa` vía `jsonwebtoken`, sin fix publicado, sólo firma local).
+- [x] Añadir auditoría de dependencias Python.
+  - `uv export` + `pip-audit` en CI; local 2026-07-18 sin vulnerabilidades.
 - [x] Mantener `npm audit`.
   - El gate ejecuta `npm --prefix apps/web audit --omit=dev` antes del build; el último resultado fue 0 vulnerabilidades.
 
@@ -2173,13 +2186,13 @@ Usar esta tabla para mantener una visión ejecutiva:
 | Sanitización de errores | P0 | Validado parcialmente |  | Análisis real posterior a los logs seguros; `request_id` y etapas seguras desplegadas | Falta la parte de Mercado Pago, diferida con pagos. |
 | Desconexión Gmail | P0 | Listo local |  | `scripts/check-all.sh` — 161 Rust, 10 worker | Revocación Google, tokens borrados, scheduler desactivado y confirmación UI; falta prueba desplegada. |
 | Borrado de datos | P0 | En progreso |  | `scripts/check-all.sh` — 167 Rust, 10 worker | Borrado de todos los análisis disponible, auditado sin PII y con señal de fallo; falta borrado de cuenta y prueba contra PostgreSQL activo. |
-| Privacidad y términos | P0 | En progreso |  | `docs/privacy.md`; Configuración y Ayuda | El copy técnico refleja el comportamiento actual; faltan política y términos aprobados/publicables. |
+| Privacidad y términos | P0 | Borradores completos |  | `legalContent.ts`: privacidad, términos y seguridad redactados con Ninfa Solutions como responsable (2026-07-18) | Falta revisión legal, RUT/correo definitivos y quitar la marca «Borrador». Registro de aceptación diferido hasta la decisión legal del acto de aceptación (17.4). |
 | Landing/copy público | P1 | Listo local |  | `npm --prefix apps/web run build` | Sin lenguaje de beta; el copy de IA refleja el opt-out real. Onboarding, ayuda y documentos legales continúan aparte. |
 | PITR Firestore | P0 | Habilitado |  | Firestore `(default)`: PITR y delete protection habilitados (2026-07-15) | Falta prueba de restauración controlada. |
 | Uptime y alertas | P0 | Activas |  | 2 uptime checks, canal email, políticas de 5xx, uptime y errores de aplicación; 3 métricas log-based (2026-07-18) | Falta confirmar el drill de notificación y borrar sus recursos temporales. |
 | Logs API | P0 | En progreso |  | Evento HTTP correlacionado en Cloud Logging de `ghmi-api-00033-xut` | API ya validó campos estructurados y redacción en candidata; faltan Bedrock y errores reales de proveedores. |
 | Consumo Bedrock | P1 | Listo local |  | Auditoría única `/audit/batch`; `scripts/check-all.sh` aprobado (166 Rust, 11 worker y build web) | Falta validación desplegada contra la referencia 2600/470. |
-| CI verde | P0 | Configurado local |  | `.github/workflows/ci.yml`; `scripts/check-all.sh` — 167 Rust, 10 worker, build web y scan de secretos | Corre en PR y `main`, reutiliza el gate y el lockfile. Falta primera ejecución remota y protección de rama. |
+| CI verde | P0 | Activo |  | PR #1 disparó la primera corrida remota; `main` protegida por el check `verify`; auditorías cargo/pip añadidas (2026-07-18) | Confirmar el resultado de la primera corrida remota. |
 | Panel admin | P1 | Pendiente |  |  |  |
 | Hardening contenedores | P1 | En progreso |  | Builds Docker, salud y UID no-root de API/worker/web | Runtime separado, lockfile y usuarios no-root; faltan CSP, escaneo y límites operativos. |
 | Retención automática | P1 | Pendiente |  |  |  |
