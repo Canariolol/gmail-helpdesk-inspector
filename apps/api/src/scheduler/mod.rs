@@ -240,6 +240,12 @@ async fn run_for_user(
     match analyze_and_report(state, mailer, config, window).await {
         Ok(outcome) => outcome,
         Err(_) => {
+            // Log ERROR dedicado: permite distinguir en Cloud Monitoring un
+            // fallo programado de uno manual, sin datos del correo.
+            tracing::error!(
+                operation = "scheduled_analysis",
+                "scheduled analysis failed"
+            );
             let message = "scheduled_analysis_failed".to_string();
             store_state(
                 state,

@@ -3974,6 +3974,11 @@ fn verify_mercadopago_webhook(
     signed_data_id: Option<&str>,
 ) -> Result<(), ApiError> {
     let Some(expected) = &state.config.billing.mercadopago_webhook_secret else {
+        // Sin secreto configurado, producción nunca acepta webhooks sin firma;
+        // en desarrollo se permite para pruebas locales sin credenciales.
+        if state.config.is_production() {
+            return Err(ApiError::unauthorized());
+        }
         return Ok(());
     };
     let x_signature = headers
@@ -5562,6 +5567,19 @@ mod tests {
         let now = UNIX_EPOCH + Duration::from_millis(1742505638683 + 301_000);
 
         assert!(validate_webhook_timestamp(old_ts, now).is_err());
+    }
+
+    #[test]
+    fn mercadopago_webhook_without_secret_is_rejected_in_production_only() {
+        let mut config = test_app_config();
+        config.billing.mercadopago_webhook_secret = None;
+        config.app_env = "production".to_string();
+        let state = AppState::new(config.clone(), Arc::new(MemoryStorage::default()));
+        assert!(verify_mercadopago_webhook(&state, &HeaderMap::new(), None).is_err());
+
+        config.app_env = "development".to_string();
+        let state = AppState::new(config, Arc::new(MemoryStorage::default()));
+        assert!(verify_mercadopago_webhook(&state, &HeaderMap::new(), None).is_ok());
     }
 
     #[tokio::test]

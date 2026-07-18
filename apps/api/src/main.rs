@@ -60,7 +60,7 @@ async fn main() -> anyhow::Result<()> {
         .ok()
         .is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
     {
-        if config.app_env.trim().eq_ignore_ascii_case("production") {
+        if config.is_production() {
             anyhow::bail!("MIGRATE_FIRESTORE_TO_POSTGRES must run outside APP_ENV=production");
         }
         if config.app_storage != "postgres" {

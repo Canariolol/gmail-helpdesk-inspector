@@ -197,7 +197,6 @@ impl AppConfig {
         validate_production_runtime(
             production,
             &app_storage,
-            &billing,
             &web_base_url,
             &api_base_url,
             cookie_secure,
@@ -258,6 +257,11 @@ impl AppConfig {
     /// True si el correo pertenece a una cuenta interna privilegiada (acceso
     /// total). El bypass aplica a cuotas/gating/consentimiento, nunca al
     /// aislamiento de sesión ni de propiedad de datos.
+    /// True cuando `APP_ENV` corresponde a producción (`prod`/`production`).
+    pub fn is_production(&self) -> bool {
+        is_production_env(&self.app_env)
+    }
+
     pub fn is_privileged_account(&self, email: &str) -> bool {
         let normalized = email.trim().to_lowercase();
         !normalized.is_empty()
@@ -324,14 +328,21 @@ fn validate_secret_not_default(
 }
 
 fn validate_billing_config(billing: &BillingConfig, production: bool) -> anyhow::Result<()> {
-    if production && billing.mercadopago_access_token.is_none() {
+    if !production {
+        return Ok(());
+    }
+    if !billing.enforcement_enabled {
         return Err(anyhow!(
-            "MERCADOPAGO_ACCESS_TOKEN is required when APP_ENV=production"
+            "BILLING_ENFORCEMENT_ENABLED must be true when APP_ENV=production"
         ));
     }
-    if production && billing.mercadopago_webhook_secret.is_none() {
+    // Producción sin pasarela es válido mientras pagos siga diferido: el
+    // checkout responde 503 y el webhook rechaza payloads sin firma. Lo que
+    // nunca se permite es una configuración a medias: un access token sin
+    // secreto de webhook dejaría cobros sin sincronizar.
+    if billing.mercadopago_access_token.is_some() && billing.mercadopago_webhook_secret.is_none() {
         return Err(anyhow!(
-            "MERCADOPAGO_WEBHOOK_SECRET is required when APP_ENV=production"
+            "MERCADOPAGO_WEBHOOK_SECRET is required when MERCADOPAGO_ACCESS_TOKEN is set and APP_ENV=production"
         ));
     }
     Ok(())
@@ -355,7 +366,6 @@ fn validate_workos_config(workos: &WorkosConfig, production: bool) -> anyhow::Re
 fn validate_production_runtime(
     production: bool,
     app_storage: &str,
-    billing: &BillingConfig,
     web_base_url: &str,
     api_base_url: &str,
     cookie_secure: bool,
@@ -371,11 +381,6 @@ fn validate_production_runtime(
     if !matches!(app_storage, "firestore" | "postgres") {
         return Err(anyhow!(
             "APP_STORAGE must be firestore or postgres when APP_ENV=production"
-        ));
-    }
-    if !billing.enforcement_enabled {
-        return Err(anyhow!(
-            "BILLING_ENFORCEMENT_ENABLED must be true when APP_ENV=production"
         ));
     }
     if !cookie_secure {
@@ -590,6 +595,30 @@ mod tests {
     }
 
     #[test]
+    fn production_allows_missing_mercadopago_credentials_while_payments_deferred() {
+        let billing = BillingConfig {
+            mercadopago_access_token: None,
+            mercadopago_webhook_secret: None,
+            enforcement_enabled: true,
+        };
+        assert!(validate_billing_config(&billing, true).is_ok());
+    }
+
+    #[test]
+    fn production_requires_billing_enforcement() {
+        let billing = BillingConfig {
+            mercadopago_access_token: None,
+            mercadopago_webhook_secret: None,
+            enforcement_enabled: false,
+        };
+        let err = validate_billing_config(&billing, true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("BILLING_ENFORCEMENT_ENABLED"));
+        assert!(validate_billing_config(&billing, false).is_ok());
+    }
+
+    #[test]
     fn production_requires_workos_webhook_secret() {
         let mut workos = test_app_config().workos;
         workos.webhook_secret = None;
@@ -603,15 +632,9 @@ mod tests {
 
     #[test]
     fn production_rejects_memory_storage_and_insecure_runtime_values() {
-        let billing = BillingConfig {
-            mercadopago_access_token: Some("access".to_string()),
-            mercadopago_webhook_secret: Some("webhook".to_string()),
-            enforcement_enabled: true,
-        };
         let err = validate_production_runtime(
             true,
             "memory",
-            &billing,
             "https://app.example.com",
             "https://api.example.com",
             true,
@@ -628,7 +651,6 @@ mod tests {
         let err = validate_production_runtime(
             true,
             "firestore",
-            &billing,
             "http://app.example.com",
             "https://api.example.com",
             true,
@@ -645,16 +667,10 @@ mod tests {
 
     #[test]
     fn production_accepts_safe_runtime_values() {
-        let billing = BillingConfig {
-            mercadopago_access_token: Some("access".to_string()),
-            mercadopago_webhook_secret: Some("webhook".to_string()),
-            enforcement_enabled: true,
-        };
         assert!(
             validate_production_runtime(
                 true,
                 "firestore",
-                &billing,
                 "https://app.example.com",
                 "https://api.example.com",
                 true,
@@ -670,16 +686,10 @@ mod tests {
 
     #[test]
     fn production_accepts_web_origin_oauth_callbacks_for_the_same_origin_proxy() {
-        let billing = BillingConfig {
-            mercadopago_access_token: Some("access".to_string()),
-            mercadopago_webhook_secret: Some("webhook".to_string()),
-            enforcement_enabled: true,
-        };
         assert!(
             validate_production_runtime(
                 true,
                 "firestore",
-                &billing,
                 "https://app.example.com",
                 "https://api.example.com",
                 true,
