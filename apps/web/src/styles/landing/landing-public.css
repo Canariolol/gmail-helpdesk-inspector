@@ -158,7 +158,7 @@
   gap: var(--space-2);
   background: var(--chip-amber-bg);
   color: var(--chip-amber-fg);
-  border: 1px solid #fde68a;
+  border-left: 3px solid var(--warn);
   border-radius: var(--radius-md);
   padding: var(--space-2) var(--space-3);
   font-size: var(--fs-sm);

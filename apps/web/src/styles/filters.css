@@ -12,15 +12,15 @@
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
-  min-height: 40px;
+  min-height: 38px;
   max-width: 280px;
-  padding: 6px 14px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-pill);
+  padding: 6px 13px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
   background: var(--surface);
   color: var(--text-strong);
   font-size: var(--fs-sm);
-  font-weight: 700;
+  font-weight: 600;
   cursor: pointer;
   transition: border-color 150ms ease, background-color 150ms ease, box-shadow 150ms ease;
 }
@@ -47,6 +47,9 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  font-weight: 500;
 }
 
 .fpop-sep {
@@ -198,8 +201,8 @@
 }
 
 .cal-day.is-selected {
-  background: var(--primary-grad);
-  color: #fff;
+  background: var(--accent);
+  color: var(--accent-ink);
   border-radius: var(--radius-sm);
 }
 
@@ -214,7 +217,7 @@
 }
 
 .cal-day.is-selected.is-today::after {
-  background: #fff;
+  background: var(--accent-ink);
 }
 
 /* ---- Selector de horario ---- */
@@ -277,8 +280,8 @@
 }
 
 .timecol-opt.is-active {
-  background: var(--primary-grad);
-  color: #fff;
+  background: var(--accent);
+  color: var(--accent-ink);
 }
 
 /* ---- Filtros guardados ---- */
@@ -392,10 +395,10 @@
   flex: 0 0 auto;
   border: 0;
   border-radius: var(--radius-md);
-  background: var(--primary-grad);
-  color: #fff;
+  background: var(--accent);
+  color: var(--accent-ink);
   font-size: var(--fs-sm);
-  font-weight: 800;
+  font-weight: 700;
   padding: 0 12px;
   cursor: pointer;
   transition: filter 150ms ease;

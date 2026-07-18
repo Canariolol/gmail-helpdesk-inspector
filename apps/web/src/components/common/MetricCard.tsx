@@ -8,16 +8,19 @@ type Props = {
   value: ReactNode;
   tone: ChipTone;
   onClick?: () => void;
+  /** Métrica protagonista: cifra en acento con el pulso Cadencia debajo. */
+  featured?: boolean;
 };
 
-export function MetricCard({ icon: Icon, label, value, tone, onClick }: Props) {
+export function MetricCard({ icon: Icon, label, value, tone, onClick, featured }: Props) {
   const content = (
     <>
       <span className={`icon-chip tone-${tone}`}>
         <Icon size={18} />
       </span>
       <span className="metric-label">{label}</span>
-      <strong className="metric-value">{value}</strong>
+      <strong className={featured ? "metric-value metric-value-featured" : "metric-value"}>{value}</strong>
+      {featured && <span className="pulse-bar" aria-hidden="true" />}
     </>
   );
   if (onClick) {

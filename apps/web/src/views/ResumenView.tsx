@@ -123,7 +123,7 @@ export function ResumenView(props: Props) {
             <AnalysisFunnelPanel run={run} />
             <div className="metric-grid primary">
               <MetricCard icon={Mail} label="Total analizados" value={run.metrics.total_threads} tone="blue" onClick={() => focusThreads("all")} />
-              <MetricCard icon={CheckCircle2} label="Válidos" value={run.metrics.valid_requests} tone="mint" onClick={() => focusThreads("valid_client_request")} />
+              <MetricCard icon={CheckCircle2} label="Válidos" value={run.metrics.valid_requests} tone="mint" featured onClick={() => focusThreads("valid_client_request")} />
               <MetricCard icon={Reply} label="Respondidos" value={run.metrics.answered} tone="teal" onClick={() => focusThreads("answered")} />
               <MetricCard icon={Clock} label="Sin respuesta" value={run.metrics.unanswered} tone="orange" onClick={() => focusThreads("unanswered")} />
               <MetricCard icon={HelpCircle} label="Pendientes de revisión" value={run.metrics.pending_review} tone="amber" onClick={() => focusThreads("review")} />
