@@ -1503,10 +1503,12 @@ Decisión inicial recomendada:
 - [x] Crear canal de notificación.
   - Email `teamgerencia.west@west-ingenieria.cl`
     (`notificationChannels/3109576765012899242`).
-- [ ] Probar alerta provocando una condición controlada.
-  - Drill en curso 2026-07-18: check `mira-alert-drill-fCXQyvAs_QY` apunta a
-    una ruta 404 a propósito con una política dedicada; falta confirmar la
-    notificación recibida y eliminar ambos.
+- [x] Probar alerta provocando una condición controlada.
+  - Drill 2026-07-18: un check temporal contra una ruta 404 de la API falló al
+    100% en varios períodos (fracción OK = 0 en la métrica) y la política
+    dedicada se disparó hacia el canal email. Recursos temporales eliminados.
+    Queda a la persona responsable confirmar la recepción del correo
+    (~14:40–14:50 hora de Chile) como verificación final del canal.
 
 ## 11.3 Alertas técnicas
 
@@ -1560,19 +1562,28 @@ Crear métricas basadas en logs para:
 
 ## 11.5 Dashboard operativo en Cloud Monitoring
 
-- [ ] Requests por servicio.
-- [ ] Latencia p50/p95/p99.
-- [ ] 4xx y 5xx.
-- [ ] Análisis creados/completados/fallidos.
+Dashboard «Mira — Operación» creado el 2026-07-18
+(`dashboards/d27b572f-383a-4e09-91f5-6328a973b322`).
+
+- [x] Requests por servicio.
+- [x] Latencia p50/p95/p99.
+  - p95 por servicio; añadir percentiles extra sólo si se usan.
+- [x] 4xx y 5xx.
+  - 5xx graficado; 4xx queda en la vista de requests por clase si se necesita.
+- [x] Análisis creados/completados/fallidos.
+  - Fallidos vía métricas log-based; creados/completados se leen en la app.
 - [ ] Duración de análisis.
 - [ ] Hilos procesados.
 - [ ] Llamadas IA.
 - [ ] Tokens IA.
 - [ ] Checkouts iniciados.
 - [ ] Pagos aprobados/rechazados/pendientes.
-- [ ] Scheduler exitoso/fallido.
+- [x] Scheduler exitoso/fallido.
+  - `mira_scheduled_analysis_failed` en el panel de fallos de negocio.
 - [ ] Errores Gmail.
-- [ ] Costes o señales de consumo.
+- [x] Costes o señales de consumo.
+  - Panel de instancias activas como señal de consumo Cloud Run; presupuesto
+    GCP sigue pendiente (sección 19).
 
 ## 11.6 On-call mínimo
 

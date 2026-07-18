@@ -3081,3 +3081,23 @@ accionables; PR https://github.com/Canariolol/gmail-helpdesk-inspector/pull/1.
 contacto (`soporte@ninfasolutions.com` propuesto), confirmar la primera
 corrida remota de CI y, tras la decisión legal, implementar el registro de
 aceptación de versiones.
+
+## 2026-07-18 — CI remoto verde, drill de alerta ejecutado y dashboard operativo
+
+**Estado:** cerrado.
+
+**Qué se hizo:** la primera corrida remota de CI terminó `success`
+(run 29656370625, PR #1) con el gate completo más las auditorías de
+dependencias nuevas; `main` queda protegida por el check `verify`. El drill de
+alerta controlada se ejecutó: el check temporal contra una ruta 404 real de la
+API registró fracción OK = 0 en varios períodos y disparó su política hacia el
+canal email; el check y la política temporales fueron eliminados (los dos
+uptime checks reales permanecen). Se creó el dashboard «Mira — Operación»
+(`dashboards/d27b572f-383a-4e09-91f5-6328a973b322`) con requests, 5xx,
+latencia p95, uptime, fallos de negocio log-based e instancias activas.
+
+**Qué sigue:** que la persona responsable confirme la recepción del correo de
+alerta (~14:40–14:50 hora de Chile del 2026-07-18) como verificación final del
+canal, y el resto de pendientes humanos ya registrados: deploy candidato con
+`APP_ENV=production`, primer backup real, rotación de `cron-secret` y revisión
+legal.
