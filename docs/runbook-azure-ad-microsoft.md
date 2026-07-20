@@ -194,40 +194,34 @@ HTTPS.
 
 ### Producción
 
-El secreto va a Secret Manager, nunca como variable de texto plano:
+**Decisión 2026-07-20: este secreto NO va a Secret Manager.** Se despliega como
+variable de entorno, leída desde `.keys` por el script, de modo que nunca pasa
+por tu historial de shell.
 
 ```bash
-printf '%s' '<el Value del secreto>' | \
-  gcloud secrets create microsoft-client-secret \
-    --project=gmail-helpdesk-inspector \
-    --replication-policy=automatic \
-    --data-file=-
+# 1. Validar las credenciales sin desplegar nada
+scripts/deploy-microsoft.sh --check
 
-# Dar acceso a la service account que corre la API
-gcloud secrets add-iam-policy-binding microsoft-client-secret \
-  --project=gmail-helpdesk-inspector \
-  --member="serviceAccount:ghmi-api-postgres-runtime@gmail-helpdesk-inspector.iam.gserviceaccount.com" \
-  --role="roles/secretmanager.secretAccessor"
+# 2. Desplegar una revisión candidata SIN tráfico de usuarios y verificarla
+scripts/deploy-microsoft.sh
+
+# 3. Recién si el paso 2 dice OK, mover el 100% del tráfico
+scripts/deploy-microsoft.sh --promote
 ```
 
-(La service account verificada el 2026-07-20 sobre `ghmi-api` en `us-central1`.)
+El script valida antes de desplegar: que el client id sea un GUID, que el
+secreto **no** lo sea (así detecta el error de copiar el Secret ID en vez del
+Value) y que no contenga comas ni espacios que lo truncarían en silencio.
+Después del deploy verifica solo que `/mailbox/providers` incluya `microsoft`.
 
-Después, desplegar la API con las variables nuevas:
+Requisito: `scripts/redeploy-gcp.sh` se niega a desplegar con el árbol de Git
+sucio. Comitea o limpia los cambios antes de correrlo.
 
-```bash
-API_DEPLOY_EXTRA_ARGS="--update-env-vars MICROSOFT_CLIENT_ID=<client-id>,MICROSOFT_TENANT=common,MICROSOFT_REDIRECT_URL=https://mira.ninfasolutions.com/mailbox/connect/microsoft/callback --update-secrets MICROSOFT_CLIENT_SECRET=microsoft-client-secret:latest" \
-  scripts/redeploy-gcp.sh --no-traffic api
-```
-
-Verificar en la revisión candidata antes de mover tráfico:
-
-```bash
-curl -s https://<url-del-tag-candidate>/mailbox/providers
-# esperado: {"providers":["google","microsoft"]}
-```
-
-Si devuelve solo `["google"]`, falta alguna de las tres variables. La API no
-falla al arrancar: simplemente no ofrece el proveedor.
+**Lo que estás aceptando al no usar Secret Manager:** el valor queda dentro del
+spec de la revisión de Cloud Run, legible por cualquiera con `roles/run.viewer`
+en el proyecto, y persiste en las revisiones viejas aunque después lo rotes.
+Registrado como deuda aceptada en `plan-production-ready.md` §4.1, junto a
+`WORKOS_API_KEY`.
 
 ---
 

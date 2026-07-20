@@ -350,6 +350,19 @@ Prioridad: **P0**
 - [x] Configurar explícitamente `BILLING_ENFORCEMENT_ENABLED=true`.
 - [ ] Configurar `MERCADOPAGO_ACCESS_TOKEN` mediante Secret Manager.
 - [ ] Configurar `MERCADOPAGO_WEBHOOK_SECRET` mediante Secret Manager.
+- [-] Mantener `MICROSOFT_CLIENT_SECRET` como valor literal, sin Secret Manager.
+  - Decisión 2026-07-20: la persona responsable prefiere no incorporar este
+    secreto a Secret Manager. Se despliega como variable de entorno mediante
+    `scripts/deploy-microsoft.sh`, que lo lee desde `.keys` (ignorado por Git)
+    para que no quede en el historial del shell.
+  - Riesgo asumido: el valor queda dentro del spec de la revisión de Cloud Run,
+    legible con `roles/run.viewer`, y **persiste en las revisiones anteriores
+    aunque después se rote**. Rotarlo de verdad exige además borrar esas
+    revisiones y generar un secreto nuevo en Azure.
+  - Condición de revisión: misma que `WORKOS_API_KEY` — al definir una
+    estrategia de secretos, migrar los tres juntos. El cambio es de una línea en
+    `scripts/deploy-microsoft.sh` (`--update-secrets` en vez de
+    `--update-env-vars`); el código de la API no cambia.
 - [-] Mantener `WORKOS_API_KEY` como valor literal durante esta etapa temprana.
   - Decisión 2026-07-17: la persona responsable no autoriza cambios ni
     rotaciones en Secret Manager y prefiere definir más adelante una estrategia
