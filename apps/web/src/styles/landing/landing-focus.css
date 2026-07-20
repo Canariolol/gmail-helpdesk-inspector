@@ -152,6 +152,7 @@
 .lp-focus-stat {
   display: grid;
   justify-items: start;
+  justify-self: end; /* pega el bloque al borde derecho de su columna */
   align-content: center;
 }
 
