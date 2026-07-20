@@ -136,8 +136,16 @@ No comenzar a cobrar a usuarios externos hasta completar todos los puntos siguie
   - Evidencia 2026-07-15: Firestore `(default)` en `southamerica-west1` expone
     `POINT_IN_TIME_RECOVERY_ENABLED` y `DELETE_PROTECTION_ENABLED`. Falta una
     prueba de restauración controlada.
-- [ ] Alertas mínimas operativas activas.
-- [ ] Uptime checks activos.
+- [x] Alertas mínimas operativas activas.
+  - Evidencia 2026-07-18 (detalle en §11.3): política «Mira: respuestas 5xx en
+    API o web» y política log-based «Mira: errores de aplicación en API o
+    worker», ambas hacia el canal email
+    `notificationChannels/3109576765012899242`. Drill controlado ejecutado.
+    Las alertas de latencia, CPU/memoria y 429 siguen pendientes como P1.
+- [x] Uptime checks activos.
+  - Evidencia 2026-07-18 (detalle en §11.2): `mira-web-KmYdD-H9gvk` sobre la
+    web y `ghmi-api-health-M3V3H5HuYcs` sobre `/health`, cada 10 minutos desde
+    múltiples regiones.
 - [ ] Política de privacidad publicada.
 - [ ] Términos y condiciones publicados.
 - [x] Copy sobre uso de IA consistente con el comportamiento real.

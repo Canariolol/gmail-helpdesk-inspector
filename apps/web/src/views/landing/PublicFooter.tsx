@@ -12,7 +12,7 @@ export function PublicFooter() {
             <img src="/logo-192.png" alt="" />
             {BRAND.short}
           </span>
-          <p>Métricas auditables para tu casilla de soporte en Gmail. Sin reemplazar tu correo.</p>
+          <p>Métricas auditables para tu casilla de soporte. Sin reemplazar tu correo.</p>
         </div>
 
         <nav className="lp-public-footer-cols" aria-label="Enlaces del pie de página">
@@ -34,7 +34,7 @@ export function PublicFooter() {
         <span>
           © {YEAR} {BRAND.name}
         </span>
-        <span>Versión inicial · no afiliado a Google LLC.</span>
+        <span>Versión inicial · no afiliado a Google LLC ni a Microsoft Corporation.</span>
       </div>
     </footer>
   );

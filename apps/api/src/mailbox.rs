@@ -25,6 +25,17 @@ impl MailboxProviderKind {
         }
     }
 
+    /// Scope de solo lectura que Mira consiente en este proveedor. Se estampa en
+    /// la casilla AL CONECTAR: la vista de Privacidad lo muestra como la
+    /// declaración de qué permiso tiene Mira, así que no puede quedar con el
+    /// valor de otro proveedor.
+    pub fn read_scope(self) -> &'static str {
+        match self {
+            Self::Google => "https://www.googleapis.com/auth/gmail.readonly",
+            Self::Microsoft => "Mail.Read",
+        }
+    }
+
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "google" | "gmail" => Some(Self::Google),

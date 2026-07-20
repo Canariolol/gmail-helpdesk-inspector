@@ -70,7 +70,7 @@ export function AyudaView() {
         <h2>Privacidad y permisos</h2>
         <PrivacyCallout />
         <ul className="help-list plain">
-          <li>El permiso de Gmail es exclusivamente de solo lectura.</li>
+          <li>El permiso sobre tu casilla es exclusivamente de solo lectura.</li>
           <li>Mira no envía, etiqueta, archiva, edita ni elimina correos.</li>
           <li>Los cuerpos completos se usan solo durante el análisis/auditoría y no se conservan como datos de producto.</li>
           <li>

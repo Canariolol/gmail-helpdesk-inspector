@@ -30,7 +30,7 @@ function formatDate(iso: string | null): string {
 }
 
 function humanizeReason(reason: string): string {
-  if (reason === "already_disconnected") return "Gmail ya está desconectado";
+  if (reason === "already_disconnected") return "La casilla ya está desconectada";
   if (reason === "account_deletion_policy_pending") return "El borrado de cuenta aún está en definición";
   if (reason === "requires_confirmation") return "Requiere confirmación";
   return reason.split("_").join(" ");
@@ -168,7 +168,12 @@ export function PrivacidadDatosView() {
   }
 
   const data = summary.data;
-  const readonlyScope = data.account.gmail_scope_snapshot.some((scope) => scope.includes("gmail.readonly"));
+  // Cada proveedor declara su propio scope de solo lectura; el badge no puede
+  // buscar el de Google o mentiría en una casilla de Microsoft.
+  const READ_ONLY_SCOPES = ["gmail.readonly", "Mail.Read"];
+  const readonlyScope = data.account.gmail_scope_snapshot.some((scope) =>
+    READ_ONLY_SCOPES.some((readOnly) => scope.includes(readOnly)),
+  );
 
   return (
     <div className="view privacy-view">
@@ -187,13 +192,13 @@ export function PrivacidadDatosView() {
       <div className="privacy-grid two">
         <section className="card privacy-panel">
           <h3><Mail size={18} /> Cuenta conectada</h3>
-          <DataRow label="Cuenta Google" value={data.account.google_account_email} />
-          <DataRow label="Cuenta de Gmail" value={<BoolBadge value={data.account.mailbox_connected} trueLabel="Conectada" falseLabel="Desconectada" />} />
+          <DataRow label="Cuenta de acceso" value={data.account.google_account_email} />
+          <DataRow label="Casilla de correo" value={<BoolBadge value={data.account.mailbox_connected} trueLabel="Conectada" falseLabel="Desconectada" />} />
           <DataRow label="Revocado el" value={formatDate(data.account.mailbox_revoked_at)} />
           <DataRow label="Permiso" value="Solo lectura" />
           <p className="privacy-note">
             La app puede leer la información necesaria para el análisis, pero no puede enviar, modificar, etiquetar ni
-            borrar correos en Gmail.
+            borrar correos en tu casilla.
           </p>
         </section>
 
@@ -247,13 +252,13 @@ export function PrivacidadDatosView() {
               <div className="privacy-action-head">
                 <div className="privacy-action-icon" aria-hidden="true"><Unplug size={19} /></div>
                 <div>
-                  <strong>Desconectar Gmail</strong>
+                  <strong>Desconectar la casilla</strong>
                   <p>Revoca acceso OAuth y detiene nuevos análisis automáticos.</p>
                 </div>
               </div>
               {!confirmingGmailDisconnect ? (
                 <button type="button" className="btn-ghost" onClick={() => setConfirmingGmailDisconnect(true)}>
-                  Desconectar Gmail
+                  Desconectar la casilla
                 </button>
               ) : (
                 <div className="cuenta-confirm">
@@ -278,7 +283,7 @@ export function PrivacidadDatosView() {
           ) : (
             <DisabledActionCard
               icon={<Unplug size={19} />}
-              title="Desconectar Gmail"
+              title="Desconectar la casilla"
               description="Revoca acceso OAuth y detiene nuevos análisis automáticos."
               reason={data.actions.disconnect_gmail.reason}
               tone="warning"

@@ -200,7 +200,9 @@ export function CuentaView({
         {account.gmail_connected && (
           <div className="cuenta-plan">
             <p className="cuenta-plan-name">
-              Casilla {PROVIDER_NAMES[account.mailbox_provider ?? "google"]} conectada{" "}
+              {account.mailbox_provider
+                ? `Casilla ${PROVIDER_NAMES[account.mailbox_provider]} conectada`
+                : "Casilla conectada"}{" "}
               <strong>{account.gmail_account_email}</strong>
             </p>
             {!confirmingGmailDisconnect ? (

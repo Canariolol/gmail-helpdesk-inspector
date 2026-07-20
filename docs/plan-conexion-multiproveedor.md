@@ -316,6 +316,12 @@ solo-Gmail y quedarían mintiendo:
 - La alerta de negocio `gmail_refresh_invalid_grant` (§11.4 del plan de
   producción) pasa a ser por proveedor.
 
+**Aplicado el 2026-07-20.** Quedan deliberadamente sin tocar, para la fase IMAP:
+el vocabulario "etiquetas" del selector de filtros (`LabelPickerModal`,
+`labels.ts`), que sigue siendo jerga de Gmail; los identificadores internos
+(`disconnect_gmail`, `gmail_connected`, `onDisconnectGmail`), que no son
+visibles; y los defaults de dominios ignorados sesgados a `google.com`.
+
 ## 12. Tamaño honesto del esfuerzo
 
 | Pieza | Esfuerzo | Nota |
@@ -355,7 +361,9 @@ solo-Gmail y quedarían mintiendo:
 **Etapa C — frontend y copy**
 12. [x] `GmailConnectGate` → `MailboxConnectGate` con la lista de proveedores.
 13. [x] `mailbox_provider` en `AccountStatus` y en la vista de Cuenta.
-14. [ ] Corrección del copy público y legal (§11), con tu revisión.
+14. [x] Corrección del copy público y legal (§11) — 2026-07-20. **Los textos
+    legales necesitan tu lectura antes de publicarse**: cambió el alcance
+    declarado del servicio y la lista de subprocesadores.
 
 **Fase posterior — IMAP**, solo cuando un cliente de pago lo bloquee.
 

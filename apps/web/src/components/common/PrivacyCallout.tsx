@@ -6,12 +6,12 @@ type Props = {
 
 export function PrivacyCallout({ compact = false }: Props) {
   return (
-    <section className={compact ? "privacy-callout compact" : "privacy-callout"} aria-label="Privacidad y permisos de Gmail">
+    <section className={compact ? "privacy-callout compact" : "privacy-callout"} aria-label="Privacidad y permisos sobre tu casilla">
       <div className="privacy-callout-icon" aria-hidden="true">
         <ShieldCheck size={22} />
       </div>
       <div>
-        <h2>Acceso Gmail de solo lectura</h2>
+        <h2>Acceso de solo lectura a tu casilla</h2>
         <p>
           La app solo puede leer los correos necesarios para el análisis: no puede enviar, editar, etiquetar ni borrar
           mensajes.

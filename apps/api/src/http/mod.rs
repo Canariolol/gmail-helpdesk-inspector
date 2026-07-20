@@ -643,6 +643,10 @@ async fn gmail_connect_callback(
     bundle.mailbox.google_account_email = profile.email_address.clone();
     bundle.mailbox.display_name = profile.email_address.clone();
     bundle.mailbox.authorized_by_user_email = existing_session.google_account_email.clone();
+    // El scope se estampa al conectar, no al aprovisionar: la vista de
+    // Privacidad lo muestra como la declaración del permiso vigente.
+    bundle.mailbox.gmail_scope_snapshot =
+        vec![MailboxProviderKind::Google.read_scope().to_string()];
     bundle.mailbox.connected_at = now;
     bundle.mailbox.revoked_at = None;
     bundle.policy_version = policy_version_from_draft(
@@ -833,6 +837,26 @@ async fn microsoft_connect_callback(
         revoked_at: None,
     };
     state.storage.upsert_gmail_connection(&connection).await?;
+
+    // Misma actualización de casilla y política que el callback de Google: sin
+    // esto la organización quedaría declarando la casilla y el scope anteriores.
+    let mut bundle =
+        get_or_provision_org_config(&state, &existing_session.google_account_email).await?;
+    bundle.mailbox.google_account_email = profile.email_address.clone();
+    bundle.mailbox.display_name = profile.email_address.clone();
+    bundle.mailbox.authorized_by_user_email = existing_session.google_account_email.clone();
+    bundle.mailbox.gmail_scope_snapshot =
+        vec![MailboxProviderKind::Microsoft.read_scope().to_string()];
+    bundle.mailbox.connected_at = now;
+    bundle.mailbox.revoked_at = None;
+    bundle.policy_version = policy_version_from_draft(
+        &bundle.mailbox,
+        &bundle.draft,
+        bundle.policy_version.version + 1,
+        &existing_session.google_account_email,
+        now,
+    );
+    state.storage.upsert_org_config(&bundle).await?;
 
     {
         let mailbox = state.mailbox.clone();

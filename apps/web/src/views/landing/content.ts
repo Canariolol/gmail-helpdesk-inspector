@@ -4,7 +4,7 @@ import type { LucideIcon } from "lucide-react";
 export const BRAND = {
   name: "Mira Helpdesk",
   short: "Mira",
-  // La cuenta se crea con WorkOS; Gmail se conecta después, aparte.
+  // La cuenta se crea con WorkOS; la casilla se conecta después, aparte.
   publicTag: "Versión inicial · sin reemplazar tu correo",
 };
 
@@ -22,7 +22,7 @@ export const HERO: { focus: HeroCopy } = {
     kicker: BRAND.publicTag,
     title: "¿Cuántas respondiste",
     highlight: "de verdad?",
-    subtitle: "Convierte tu casilla de Gmail en métricas auditables. Sin reemplazar tu correo.",
+    subtitle: "Convierte tu casilla de soporte en métricas auditables. Sin reemplazar tu correo.",
     cta: "Crear cuenta",
     login: "Ingresar",
   },
@@ -46,7 +46,7 @@ export const ADVANTAGES: Advantage[] = [
     id: "privacidad",
     Icon: ShieldCheck,
     title: "Privacidad por diseño",
-    body: "Pedimos solo lectura de Gmail. No enviamos, no etiquetamos, no archivamos y no guardamos el cuerpo completo de tus correos.",
+    body: "Pedimos solo lectura de tu casilla. No enviamos, no etiquetamos, no archivamos y no guardamos el cuerpo completo de tus correos.",
   },
   {
     id: "ia",
@@ -58,7 +58,7 @@ export const ADVANTAGES: Advantage[] = [
     id: "friccion",
     Icon: Plug,
     title: "Cero fricción",
-    body: "Conectas Gmail, defines qué cuenta como solicitud y listo. No reemplaza tu correo: lo mide en silencio.",
+    body: "Conectas tu casilla, defines qué cuenta como solicitud y listo. No reemplaza tu correo: lo mide en silencio.",
   },
 ];
 

@@ -3209,3 +3209,44 @@ connect rechazada), fmt, Clippy sin warnings, 11 tests Python y build web.
 un connect real. Después, corregir el copy público y legal que hoy declara que
 Mira soporta únicamente Gmail y Google Workspace, e incorporar Microsoft a la
 lista de subprocesadores de la política de privacidad.
+
+## 2026-07-20 — Copy neutralizado, runbook de Azure AD y scope de casilla corregido
+
+**Estado:** copy y backend aplicados y validados localmente; los textos legales
+requieren revisión del responsable antes de publicarse.
+
+**Qué se hizo:**
+
+1. **Bug de declaración de privacidad.** El `gmail_scope_snapshot` de la casilla
+   se estampaba `gmail.readonly` al aprovisionar la organización y no se
+   actualizaba nunca al conectar. Con multiproveedor eso habría hecho que la
+   vista de Privacidad declarara `gmail.readonly` sobre una casilla de Microsoft
+   — una afirmación falsa sobre qué permiso tiene Mira. Se agregó
+   `MailboxProviderKind::read_scope()` y ambos callbacks ahora estampan el scope
+   real del proveedor al conectar. El callback de Microsoft, además, no estaba
+   actualizando la casilla ni la versión de política; ahora hace lo mismo que el
+   de Google.
+2. **Copy neutralizado** en 22 ocurrencias visibles: landing, footer, textos
+   legales (privacidad, términos y seguridad), Configuración, Ayuda, Privacidad y
+   datos, notas de pago, callout de privacidad y el embudo de análisis. El
+   footer suma la no-afiliación con Microsoft Corporation. La lista de
+   subprocesadores incorpora a Microsoft. El badge de solo lectura ahora
+   reconoce `Mail.Read` además de `gmail.readonly`.
+3. **Runbook `docs/runbook-azure-ad-microsoft.md`**: registro de la app en Azure
+   AD paso a paso, con los tres puntos donde falla el flujo (redirect URI que
+   debe coincidir exacto, el Value del secreto que solo se muestra una vez, y
+   `offline_access` sin el cual no hay refresh token), tabla de errores
+   `AADSTS*`, comandos de Secret Manager con la service account real
+   (`ghmi-api-postgres-runtime@…`) y el procedimiento de rotación a los 24 meses.
+4. **Gate maestro desincronizado corregido**: «Alertas mínimas operativas» y
+   «Uptime checks activos» figuraban abiertos en la sección 2 pese a estar
+   cerrados con evidencia en §11.2/§11.3 desde el 2026-07-18. Se cerraron con
+   puntero a la evidencia, dejando explícito que latencia, CPU/memoria y 429
+   siguen pendientes como P1.
+
+**Evidencia:** `scripts/check-all.sh` en verde — 178 tests Rust, fmt, Clippy,
+11 tests Python y build web.
+
+**Qué sigue:** revisar los textos legales (cambió el alcance declarado del
+servicio y la lista de subprocesadores), registrar la app en Azure AD siguiendo
+el runbook, y recién entonces probar un connect real contra Microsoft.

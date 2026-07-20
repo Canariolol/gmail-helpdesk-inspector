@@ -460,8 +460,8 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
               <span className="mono-label">01 · Organización</span>
               <h3>Organización y contexto</h3>
               <p>
-                Funciona con cualquier cuenta de Google. Usamos Gmail solo lectura y la zona horaria
-                de tu equipo para calcular ventanas y reportes.
+                Funciona con Gmail, Google Workspace, Outlook y Microsoft 365. Usamos un permiso de
+                solo lectura y la zona horaria de tu equipo para calcular ventanas y reportes.
               </p>
             </div>
             <div className="field">
@@ -751,8 +751,8 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
                 aplicación.
               </p>
               <p>
-                <strong>¿Qué NO se modifica?</strong> Nada de tu Gmail. La app solo tiene permiso de
-                lectura.
+                <strong>¿Qué NO se modifica?</strong> Nada de tu casilla. La app solo tiene permiso
+                de lectura.
               </p>
               <p style={{ color: "var(--text-muted)" }}>
                 En esta versión inicial, los flujos destructivos se activarán de forma controlada.

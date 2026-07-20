@@ -29,8 +29,8 @@ export const PRIVACY: LegalDoc = {
       body: "De tu cuenta: nombre, correo y organización, gestionados a través de nuestro proveedor de autenticación. De la casilla conectada: identificadores de hilos y mensajes, fechas, participantes, asuntos, fragmentos breves (snippets), decisiones de clasificación, resultados de auditoría y métricas agregadas. No almacenamos el cuerpo completo de los correos: se procesa temporalmente durante el análisis y se descarta.",
     },
     {
-      heading: "Acceso a Gmail (solo lectura)",
-      body: "Mira usa exclusivamente el permiso de solo lectura de Gmail (gmail.readonly). No enviamos, respondemos, etiquetamos, archivamos ni eliminamos correos. Las credenciales de acceso se guardan cifradas y puedes desconectar la casilla en cualquier momento desde la aplicación; al hacerlo revocamos el acceso también ante Google cuando es posible.",
+      heading: "Acceso a la casilla (solo lectura)",
+      body: "Mira usa exclusivamente permisos de solo lectura: gmail.readonly en Gmail y Google Workspace, y Mail.Read en Outlook y Microsoft 365. No enviamos, respondemos, etiquetamos, archivamos ni eliminamos correos. Las credenciales de acceso se guardan cifradas y puedes desconectar la casilla en cualquier momento desde la aplicación; al hacerlo revocamos el acceso también ante el proveedor cuando es posible.",
     },
     {
       heading: "Finalidad del tratamiento",
@@ -46,7 +46,7 @@ export const PRIVACY: LegalDoc = {
     },
     {
       heading: "Encargados y subprocesadores",
-      body: "Tratan datos por encargo nuestro: WorkOS (autenticación y sesiones), Google (OAuth y lectura de Gmail), Google Cloud (infraestructura de la aplicación, EE.UU.), Supabase (base de datos, EE.UU.), Amazon Web Services — Bedrock (auditoría IA) y Resend (envío de reportes por correo). Cuando se habiliten los cobros, Mercado Pago procesará los pagos; Mira no recibe ni almacena números de tarjeta.",
+      body: "Tratan datos por encargo nuestro: WorkOS (autenticación y sesiones), Google (OAuth y lectura de la casilla, cuando conectas Gmail o Google Workspace), Microsoft (OAuth y lectura de la casilla, cuando conectas Outlook o Microsoft 365), Google Cloud (infraestructura de la aplicación, EE.UU.), Supabase (base de datos, EE.UU.), Amazon Web Services — Bedrock (auditoría IA) y Resend (envío de reportes por correo). Cuando se habiliten los cobros, Mercado Pago procesará los pagos; Mira no recibe ni almacena números de tarjeta.",
     },
     {
       heading: "Transferencias internacionales",
@@ -58,7 +58,7 @@ export const PRIVACY: LegalDoc = {
     },
     {
       heading: "Seguridad de los datos",
-      body: "Todo el tráfico usa HTTPS, las credenciales de Gmail se cifran antes de guardarse, el componente de IA no es accesible públicamente y el acceso a los datos está aislado por organización. El detalle está en la página de Seguridad.",
+      body: "Todo el tráfico usa HTTPS, las credenciales de la casilla conectada se cifran antes de guardarse, el componente de IA no es accesible públicamente y el acceso a los datos está aislado por organización. El detalle está en la página de Seguridad.",
     },
     {
       heading: "Cambios a esta política",
@@ -79,7 +79,7 @@ export const TERMS: LegalDoc = {
   sections: [
     {
       heading: "Descripción del servicio",
-      body: "Mira analiza la actividad de una casilla de Gmail o Google Workspace conectada por la organización y entrega métricas de atención, reportes y una auditoría asistida por IA orientada a revisión humana. La versión actual soporta únicamente Gmail y Google Workspace, con una casilla por organización.",
+      body: "Mira analiza la actividad de una casilla de correo conectada por la organización y entrega métricas de atención, reportes y una auditoría asistida por IA orientada a revisión humana. La versión actual soporta Gmail, Google Workspace, Outlook y Microsoft 365, con una casilla por organización.",
     },
     {
       heading: "Cuenta y registro",
@@ -135,12 +135,12 @@ export const SECURITY: LegalDoc = {
     "Resumen honesto de las prácticas de seguridad de Mira Helpdesk. No afirmamos certificaciones que no tenemos ni seguridad absoluta; describimos lo que efectivamente hacemos.",
   sections: [
     {
-      heading: "Permiso mínimo sobre Gmail",
-      body: "El único permiso solicitado es lectura (gmail.readonly). Mira no puede enviar, modificar, etiquetar ni borrar correos.",
+      heading: "Permiso mínimo sobre la casilla",
+      body: "El único permiso solicitado es de lectura: gmail.readonly en Gmail y Google Workspace, Mail.Read en Outlook y Microsoft 365. Mira no puede enviar, modificar, etiquetar ni borrar correos.",
     },
     {
       heading: "Cifrado",
-      body: "Todo el tráfico viaja por HTTPS. Los tokens de acceso a Gmail se cifran a nivel de aplicación antes de persistirse, además del cifrado en reposo del proveedor de base de datos.",
+      body: "Todo el tráfico viaja por HTTPS. Los tokens de acceso a la casilla se cifran a nivel de aplicación antes de persistirse, además del cifrado en reposo del proveedor de base de datos.",
     },
     {
       heading: "Minimización de datos",

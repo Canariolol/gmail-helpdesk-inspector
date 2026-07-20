@@ -19,7 +19,7 @@ type Props = {
 
 // Hace visible la pérdida silenciosa: los hilos descartados antes de clasificar
 // no se guardan, así que sin este panel el usuario no tenía forma de ver por qué
-// el total analizado es menor que lo encontrado en Gmail.
+// el total analizado es menor que lo encontrado en la casilla.
 export function AnalysisFunnelPanel({ run }: Props) {
   const [open, setOpen] = useState(false);
   const funnel = run.metrics.funnel;
@@ -49,7 +49,7 @@ export function AnalysisFunnelPanel({ run }: Props) {
           Embudo del análisis
         </span>
         <span className="funnel-subtitle">
-          Gmail encontró {candidates}; se analizaron {analyzed} y {aiUnique} requirieron revisión con IA.
+          Se encontraron {candidates}; se analizaron {analyzed} y {aiUnique} requirieron revisión con IA.
         </span>
         <ChevronDown size={18} className={open ? "funnel-chevron open" : "funnel-chevron"} />
       </button>
@@ -57,10 +57,10 @@ export function AnalysisFunnelPanel({ run }: Props) {
       {open && (
         <div className="funnel-body">
           <div className="funnel-stages">
-            <FunnelStat icon={Inbox} label="Encontrados en Gmail" value={candidates} tone="tone-blue" />
+            <FunnelStat icon={Inbox} label="Encontrados en la casilla" value={candidates} tone="tone-blue" />
             <FunnelStat
               icon={Filter}
-              label="Fuera de la pestaña Principal"
+              label="Fuera de la bandeja principal"
               value={droppedNotPrimary}
               tone="tone-amber"
             />
@@ -77,7 +77,7 @@ export function AnalysisFunnelPanel({ run }: Props) {
           {skippedByPlan > 0 && (
             <p className="funnel-hint">
               {skippedByPlan} hilos analizables quedaron fuera por el límite del plan
-              {funnel.more_beyond_retrieved ? "; Gmail además indicó que había más resultados" : ""}.
+              {funnel.more_beyond_retrieved ? "; el proveedor además indicó que había más resultados" : ""}.
             </p>
           )}
 
