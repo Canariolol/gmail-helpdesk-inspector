@@ -177,7 +177,9 @@ cualquier otro valor va a rechazar la mitad de los casos.
 
 ### Desarrollo local
 
-En tu `.env` local (o en `.keys`, que ya está en `.gitignore`):
+`docker-compose.yml` monta el `.env` completo dentro del contenedor de la API
+(`env_file: .env`), así que basta con agregarlo ahí y `scripts/local-up.sh` lo
+toma solo. No hay que tocar el script.
 
 ```bash
 MICROSOFT_CLIENT_ID=<el Application client ID>
@@ -195,27 +197,29 @@ HTTPS.
 ### Producción
 
 **Decisión 2026-07-20: este secreto NO va a Secret Manager.** Se despliega como
-variable de entorno, leída desde `.keys` por el script, de modo que nunca pasa
-por tu historial de shell.
+variable de entorno.
+
+No hay que declarar nada al invocar el deploy: `redeploy-gcp.sh` lee las
+credenciales de Microsoft desde `.keys` (o `.env` como respaldo) y las inyecta
+solo. El comando de siempre:
 
 ```bash
-# 1. Validar las credenciales sin desplegar nada
-scripts/deploy-microsoft.sh --check
-
-# 2. Desplegar una revisión candidata SIN tráfico de usuarios y verificarla
-scripts/deploy-microsoft.sh
-
-# 3. Recién si el paso 2 dice OK, mover el 100% del tráfico
-scripts/deploy-microsoft.sh --promote
+scripts/redeploy-gcp.sh --no-traffic api   # candidata sin tráfico de usuarios
+scripts/redeploy-gcp.sh api                # despliega y mueve el tráfico
 ```
 
-El script valida antes de desplegar: que el client id sea un GUID, que el
-secreto **no** lo sea (así detecta el error de copiar el Secret ID en vez del
-Value) y que no contenga comas ni espacios que lo truncarían en silencio.
-Después del deploy verifica solo que `/mailbox/providers` incluya `microsoft`.
+Antes de desplegar valida que el client id sea un GUID, que el secreto **no** lo
+sea (así detecta el error de copiar el Secret ID en vez del Value) y que no
+contenga comas ni espacios que `gcloud` truncaría en silencio. Después del
+deploy consulta `/mailbox/providers` y avisa si Microsoft no quedó habilitado.
 
-Requisito: `scripts/redeploy-gcp.sh` se niega a desplegar con el árbol de Git
-sucio. Comitea o limpia los cambios antes de correrlo.
+El `MICROSOFT_REDIRECT_URL` de producción **no** se lee de `.env` —ahí vive el de
+localhost, y desplegarlo rompería el login con `AADSTS50011`. Se deriva del
+`WEB_BASE_URL` que ya tiene el servicio desplegado. Para forzar otro valor,
+exportá `MICROSOFT_REDIRECT_URL_PROD`.
+
+Si no hay credenciales locales, el deploy funciona igual y la API simplemente no
+ofrece el proveedor.
 
 **Lo que estás aceptando al no usar Secret Manager:** el valor queda dentro del
 spec de la revisión de Cloud Run, legible por cualquiera con `roles/run.viewer`

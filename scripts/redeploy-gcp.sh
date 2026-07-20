@@ -22,6 +22,13 @@ Environment overrides:
   API_DEPLOY_EXTRA_ARGS  Optional; extra gcloud args for the api deploy
                          (e.g. "--update-env-vars APP_ENV=production")
   VITE_MERCADOPAGO_PUBLIC_KEY  Required to build embedded Mercado Pago checkout
+  MICROSOFT_TENANT             Defaults to common
+  MICROSOFT_REDIRECT_URL_PROD  Defaults to WEB_BASE_URL of the deployed service
+                               + /mailbox/connect/microsoft/callback
+
+Microsoft Graph credentials are read automatically from .keys (or .env) and sent
+as plain env vars; no extra flags needed. Without them the API deploys fine and
+simply does not offer the Microsoft provider.
 
 Options:
   --no-traffic     Creates a revision tagged candidate without moving user traffic
@@ -170,10 +177,123 @@ resolve_api_url() {
     --format='value(status.url)'
 }
 
+# Lee una clave de un archivo de credenciales local sin ejecutarlo (un `source`
+# correría cualquier cosa que hubiera ahí dentro).
+read_local_key() {
+  local file="$1"; shift
+  [[ -f "$file" ]] || return 1
+  local wanted value
+  for wanted in "$@"; do
+    value="$(sed -nE "s/^[[:space:]]*${wanted}[[:space:]]*=[[:space:]]*//p" "$file" | head -n1)"
+    value="${value%\"}"; value="${value#\"}"
+    value="${value%\'}"; value="${value#\'}"
+    if [[ -n "$value" ]]; then
+      printf '%s' "$value"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Credenciales de Microsoft Graph. Decisión 2026-07-20: no van a Secret Manager,
+# se despliegan como variables de entorno leídas desde un archivo local ignorado
+# por Git, para que no queden en el historial del shell.
+#
+# Si no hay credenciales, la API se despliega igual y simplemente no ofrece el
+# botón de Microsoft. No hace falta declarar nada al invocar el script.
+#
+# Escribe en el array global MICROSOFT_ARGS en vez de imprimir a stdout: si
+# imprimiera, el llamador tendría que capturarlo con `$(...)` o `< <(...)`, la
+# función correría en una subshell y un `exit 1` de las validaciones no abortaría
+# el deploy — se desplegaría sin Microsoft en silencio.
+MICROSOFT_ARGS=()
+microsoft_env_args() {
+  MICROSOFT_ARGS=()
+  local client_id secret
+  client_id="${MICROSOFT_CLIENT_ID:-$(read_local_key .keys MICROSOFT_CLIENT_ID client_id \
+    || read_local_key .env MICROSOFT_CLIENT_ID || true)}"
+  secret="${MICROSOFT_CLIENT_SECRET:-$(read_local_key .keys MICROSOFT_CLIENT_SECRET secret_value \
+    || read_local_key .env MICROSOFT_CLIENT_SECRET || true)}"
+
+  if [[ -z "$client_id" || -z "$secret" ]]; then
+    echo "Microsoft: sin credenciales locales; se despliega sin el proveedor." >&2
+    return 0
+  fi
+
+  local guid='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+  if [[ ! "$client_id" =~ $guid ]]; then
+    echo "MICROSOFT_CLIENT_ID no tiene forma de GUID; revisá el 'Application (client) ID'." >&2
+    exit 1
+  fi
+  # Azure muestra 'Value' y 'Secret ID' juntos; el Secret ID es un GUID que no
+  # autentica. Fallar acá evita un AADSTS7000215 críptico en producción.
+  if [[ "$secret" =~ $guid ]]; then
+    echo "MICROSOFT_CLIENT_SECRET tiene forma de GUID: es el 'Secret ID', no el 'Value'." >&2
+    exit 1
+  fi
+  # gcloud separa --update-env-vars por comas: un secreto con coma se desplegaría
+  # truncado en silencio y fallaría recién en el primer login real.
+  if [[ "$secret" == *,* || "$secret" == *" "* ]]; then
+    echo "MICROSOFT_CLIENT_SECRET contiene coma o espacio; no se puede pasar sin truncarse." >&2
+    exit 1
+  fi
+
+  # El redirect NO se lee de .env: ahí vive el de localhost, y desplegarlo a
+  # producción rompería el login con AADSTS50011. Se deriva del WEB_BASE_URL
+  # que ya tiene el servicio desplegado.
+  local redirect="${MICROSOFT_REDIRECT_URL_PROD:-}"
+  if [[ -z "$redirect" ]]; then
+    local web_base
+    web_base="$(gcloud run services describe "$API_SERVICE" \
+      --project "$GCP_PROJECT_ID" --region "$GCP_REGION" \
+      --format='value(spec.template.spec.containers[0].env.filter("name:WEB_BASE_URL").extract(value))' \
+      2>/dev/null | tr -d '[]' | tr -d "'")"
+    if [[ -z "$web_base" || "$web_base" != https://* ]]; then
+      echo "No pude derivar el redirect de Microsoft desde WEB_BASE_URL del servicio." >&2
+      echo "Exportá MICROSOFT_REDIRECT_URL_PROD con la URL HTTPS registrada en Azure." >&2
+      exit 1
+    fi
+    redirect="${web_base%/}/mailbox/connect/microsoft/callback"
+  fi
+
+  echo "Microsoft: habilitado (client id ${client_id:0:8}…, redirect ${redirect})." >&2
+  MICROSOFT_ARGS=(
+    --update-env-vars
+    "MICROSOFT_CLIENT_ID=${client_id},MICROSOFT_CLIENT_SECRET=${secret},MICROSOFT_REDIRECT_URL=${redirect},MICROSOFT_TENANT=${MICROSOFT_TENANT:-common}"
+  )
+}
+
+# Confirma que la API realmente esté ofreciendo Microsoft. Una variable que no
+# llegó produce un botón ausente y ningún error visible; esto lo delata ahora.
+verify_microsoft_enabled() {
+  local base_url
+  base_url="$(resolve_api_url)"
+  if [[ "$no_traffic" == true ]]; then
+    base_url="https://candidate---${base_url#https://}"
+  fi
+  local providers
+  providers="$(curl -fsS --max-time 30 "${base_url}/mailbox/providers" 2>/dev/null || true)"
+  if [[ "$providers" == *'"microsoft"'* ]]; then
+    echo "Microsoft: verificado en ${base_url}/mailbox/providers"
+  else
+    echo "AVISO: la API no está ofreciendo Microsoft tras el deploy." >&2
+    echo "  GET ${base_url}/mailbox/providers -> ${providers:-(sin respuesta)}" >&2
+  fi
+}
+
 deploy_api() {
-  # Sin comillas a propósito: permite pasar varios argumentos gcloud separados.
+  # Llamada directa, no en subshell: así un fallo de validación aborta el deploy.
+  microsoft_env_args
+  # Sin comillas a propósito en API_DEPLOY_EXTRA_ARGS: permite pasar varios
+  # argumentos gcloud separados. Las de Microsoft sí van citadas, porque el
+  # secreto no debe partirse por word splitting.
   # shellcheck disable=SC2086
-  build_push_deploy "api" "apps/api/Dockerfile" "$API_SERVICE" ${API_DEPLOY_EXTRA_ARGS:-}
+  build_push_deploy "api" "apps/api/Dockerfile" "$API_SERVICE" \
+    "${MICROSOFT_ARGS[@]}" ${API_DEPLOY_EXTRA_ARGS:-}
+
+  if [[ ${#MICROSOFT_ARGS[@]} -gt 0 ]]; then
+    verify_microsoft_enabled
+  fi
 }
 
 deploy_worker() {
