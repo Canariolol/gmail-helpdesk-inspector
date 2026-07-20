@@ -93,7 +93,7 @@ export function AnalysisFunnelPanel({ run }: Props) {
               <h4>Hilos que quedaron fuera</h4>
               <ul>
                 {funnel.dropped_samples.map((dropped) => (
-                  <DroppedRow key={dropped.gmail_thread_id} dropped={dropped} />
+                  <DroppedRow key={dropped.thread_id} dropped={dropped} />
                 ))}
               </ul>
             </div>

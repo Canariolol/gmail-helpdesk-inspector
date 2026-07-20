@@ -1,11 +1,14 @@
 use anyhow::anyhow;
 
 use super::GoogleTokenResponse;
-use crate::config::GoogleConfig;
+use crate::config::{GoogleConfig, MicrosoftConfig};
+use crate::mailbox::MailboxProviderKind;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RefreshError {
-    #[error("Google rechazó el refresh token (invalid_grant); se requiere iniciar sesión de nuevo")]
+    #[error(
+        "el proveedor rechazó el refresh token (invalid_grant); se requiere reconectar la casilla"
+    )]
     InvalidGrant,
     #[error(transparent)]
     Other(#[from] anyhow::Error),
@@ -18,17 +21,77 @@ pub async fn refresh_google_access_token(
     google: &GoogleConfig,
     refresh_token: &str,
 ) -> Result<GoogleTokenResponse, RefreshError> {
-    let response = http
-        .post("https://oauth2.googleapis.com/token")
-        .form(&[
+    post_refresh(
+        http,
+        "https://oauth2.googleapis.com/token",
+        &[
             ("client_id", google.client_id.as_str()),
             ("client_secret", google.client_secret.as_str()),
             ("refresh_token", refresh_token),
             ("grant_type", "refresh_token"),
-        ])
+        ],
+    )
+    .await
+}
+
+/// Microsoft **rota** el refresh token en cada uso: la respuesta trae uno nuevo
+/// y el anterior deja de servir. Quien llame debe persistir el rotado.
+pub async fn refresh_microsoft_access_token(
+    http: &reqwest::Client,
+    microsoft: &MicrosoftConfig,
+    refresh_token: &str,
+) -> Result<GoogleTokenResponse, RefreshError> {
+    let url = format!(
+        "https://login.microsoftonline.com/{}/oauth2/v2.0/token",
+        microsoft.tenant
+    );
+    post_refresh(
+        http,
+        &url,
+        &[
+            ("client_id", microsoft.client_id.as_str()),
+            ("client_secret", microsoft.client_secret.as_str()),
+            ("refresh_token", refresh_token),
+            ("grant_type", "refresh_token"),
+            ("scope", super::MICROSOFT_MAIL_SCOPE),
+        ],
+    )
+    .await
+}
+
+/// Refresca según el proveedor de la conexión. Devuelve `InvalidGrant` cuando el
+/// usuario debe reconectar, para que el llamador revoque en vez de reintentar.
+pub async fn refresh_access_token_for(
+    http: &reqwest::Client,
+    provider: MailboxProviderKind,
+    google: &GoogleConfig,
+    microsoft: Option<&MicrosoftConfig>,
+    refresh_token: &str,
+) -> Result<GoogleTokenResponse, RefreshError> {
+    match provider {
+        MailboxProviderKind::Google => {
+            refresh_google_access_token(http, google, refresh_token).await
+        }
+        MailboxProviderKind::Microsoft => {
+            let microsoft = microsoft.ok_or_else(|| {
+                RefreshError::Other(anyhow!("Microsoft provider is not configured"))
+            })?;
+            refresh_microsoft_access_token(http, microsoft, refresh_token).await
+        }
+    }
+}
+
+async fn post_refresh(
+    http: &reqwest::Client,
+    url: &str,
+    form: &[(&str, &str)],
+) -> Result<GoogleTokenResponse, RefreshError> {
+    let response = http
+        .post(url)
+        .form(form)
         .send()
         .await
-        .map_err(|_| anyhow!("Google token refresh request failed"))?;
+        .map_err(|_| anyhow!("token refresh request failed"))?;
     let status = response.status().as_u16();
     let body = response.text().await.unwrap_or_default();
     classify_refresh_response(status, &body)
@@ -40,9 +103,7 @@ pub(crate) fn classify_refresh_response(
 ) -> Result<GoogleTokenResponse, RefreshError> {
     if (200..300).contains(&status) {
         return serde_json::from_str(body).map_err(|error| {
-            RefreshError::Other(anyhow!(
-                "Google token refresh returned invalid JSON: {error}"
-            ))
+            RefreshError::Other(anyhow!("token refresh returned invalid JSON: {error}"))
         });
     }
     let error_code = serde_json::from_str::<serde_json::Value>(body)
@@ -52,7 +113,7 @@ pub(crate) fn classify_refresh_response(
         return Err(RefreshError::InvalidGrant);
     }
     Err(RefreshError::Other(anyhow!(
-        "Google token refresh failed with {status}"
+        "token refresh failed with {status}"
     )))
 }
 

@@ -11,11 +11,11 @@ use crate::{
     analysis::{AnalysisConfig, AnalysisMetrics, AnalysisRun, AnalysisStatus},
     auth::{
         decrypt_token, encrypt_token,
-        refresh::{RefreshError, refresh_google_access_token},
+        refresh::{RefreshError, refresh_access_token_for},
     },
     billing::subscription_allows_access,
     http::{AppState, execute_analysis, mark_run_failed},
-    mailbox::gmail_connection_is_active,
+    mailbox::mailbox_connection_is_active,
     policies::{ReportMode, retention_expires_at, setup_state},
     report::{
         ReportMailer, ResendMailer,
@@ -374,27 +374,33 @@ async fn fresh_access_token(state: &AppState, config: &ScheduleConfig) -> anyhow
         .await?
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "no hay una conexión Gmail activa para {}; vuelve a conectar la casilla",
+                "no hay una conexión de casilla activa para {}; vuelve a conectarla",
                 config.user_email
             )
         })?;
-    if !gmail_connection_is_active(Some(&connection)) {
+    if !mailbox_connection_is_active(Some(&connection)) {
         return Err(anyhow::anyhow!(
-            "la conexión Gmail está revocada; vuelve a conectar la casilla"
+            "la conexión de la casilla está revocada; vuelve a conectarla"
         ));
     }
     let encrypted_refresh = connection.refresh_token_encrypted.clone().ok_or_else(|| {
-        anyhow::anyhow!("la conexión Gmail no tiene refresh token; vuelve a conectar la casilla")
+        anyhow::anyhow!("la conexión de la casilla no tiene refresh token; vuelve a conectarla")
     })?;
     let refresh_token = decrypt_token(&encrypted_refresh, &state.config.encryption_key)?;
-    let token = refresh_google_access_token(&state.http, &state.config.google, &refresh_token)
-        .await
-        .map_err(|error| match error {
-            RefreshError::InvalidGrant => anyhow::anyhow!(
-                "Google rechazó el refresh token; vuelve a conectar la casilla para renovar el acceso a Gmail"
-            ),
-            RefreshError::Other(inner) => inner,
-        })?;
+    let token = refresh_access_token_for(
+        &state.http,
+        connection.provider,
+        &state.config.google,
+        state.config.microsoft.as_ref(),
+        &refresh_token,
+    )
+    .await
+    .map_err(|error| match error {
+        RefreshError::InvalidGrant => anyhow::anyhow!(
+            "el proveedor rechazó el refresh token; vuelve a conectar la casilla para renovar el acceso"
+        ),
+        RefreshError::Other(inner) => inner,
+    })?;
 
     let mut updated = connection.clone();
     updated.access_token_encrypted =
@@ -408,7 +414,7 @@ async fn fresh_access_token(state: &AppState, config: &ScheduleConfig) -> anyhow
         .storage
         .refresh_gmail_connection(&connection, &updated)
         .await?
-        != crate::storage::GmailConnectionRefresh::Updated
+        != crate::storage::MailboxConnectionRefresh::Updated
     {
         return Err(anyhow::anyhow!(
             "la conexión Gmail cambió durante el refresh; se canceló el análisis programado"
@@ -766,7 +772,7 @@ mod tests {
         crate::analysis::EmailThread {
             id: id.to_string(),
             analysis_run_id: run_id.to_string(),
-            gmail_thread_id: format!("gmail-{id}"),
+            thread_id: format!("gmail-{id}"),
             subject: "Ayuda sensible".to_string(),
             normalized_subject: "ayuda sensible".to_string(),
             classification: crate::analysis::Classification::Ambiguous,
@@ -795,7 +801,7 @@ mod tests {
     fn message(id: &str, from: &str) -> crate::analysis::EmailMessage {
         crate::analysis::EmailMessage {
             id: id.to_string(),
-            gmail_message_id: format!("gmail-{id}"),
+            message_id: format!("gmail-{id}"),
             from_email: from.to_string(),
             from_name: None,
             to_emails: vec!["help@x.cl".to_string()],

@@ -1,10 +1,21 @@
 import { ArrowUpRight, Ban, Check, LogOut, RefreshCw, ShieldAlert } from "lucide-react";
 import { useState } from "react";
-import type { AccountStatus, BillingPlan, BillingPlanId, SubscriptionStatus } from "../api/types";
+import type {
+  AccountStatus,
+  BillingPlan,
+  BillingPlanId,
+  MailboxProviderId,
+  SubscriptionStatus,
+} from "../api/types";
 import { ThemePicker } from "../components/common/ThemePicker";
 import { isBlockedStatus } from "./access/accessState";
 import { PaymentNotes } from "./access/PaymentNotes";
 import { PricingPlans } from "./access/PricingPlans";
+
+const PROVIDER_NAMES: Record<MailboxProviderId, string> = {
+  google: "de Google",
+  microsoft: "de Microsoft",
+};
 
 interface CuentaViewProps {
   account: AccountStatus;
@@ -189,7 +200,8 @@ export function CuentaView({
         {account.gmail_connected && (
           <div className="cuenta-plan">
             <p className="cuenta-plan-name">
-              Gmail conectado <strong>{account.gmail_account_email}</strong>
+              Casilla {PROVIDER_NAMES[account.mailbox_provider ?? "google"]} conectada{" "}
+              <strong>{account.gmail_account_email}</strong>
             </p>
             {!confirmingGmailDisconnect ? (
               <button
@@ -197,7 +209,7 @@ export function CuentaView({
                 className="btn-ghost"
                 onClick={() => setConfirmingGmailDisconnect(true)}
               >
-                <Ban size={16} /> Desconectar Gmail
+                <Ban size={16} /> Desconectar casilla
               </button>
             ) : (
               <div className="cuenta-confirm">

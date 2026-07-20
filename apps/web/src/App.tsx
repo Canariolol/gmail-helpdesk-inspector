@@ -11,6 +11,7 @@ import type {
   EntitlementSnapshot,
   FilterPreset,
   OrgConfig,
+  MailboxProviderId,
   ThreadDetail,
   UsageResponse,
 } from "./api/types";
@@ -20,7 +21,7 @@ import { AccessShell } from "./views/access/AccessShell";
 import { deriveAccessState, isBlockedStatus } from "./views/access/accessState";
 import { BlockedBanner } from "./views/access/BlockedBanner";
 import { CheckoutView } from "./views/access/CheckoutView";
-import { GmailConnectGate } from "./views/access/GmailConnectGate";
+import { MailboxConnectGate } from "./views/access/MailboxConnectGate";
 import { LoadingGate } from "./views/access/LoadingGate";
 import { PlansModal } from "./views/access/PlansModal";
 import { PricingGate } from "./views/access/PricingGate";
@@ -35,7 +36,12 @@ import { ReportesView } from "./views/ReportesView";
 import { ResumenView } from "./views/ResumenView";
 import { RunsView } from "./views/RunsView";
 
-const GMAIL_CONNECT_URL = `${API_BASE_URL}/gmail/connect/login`;
+// Google conserva su ruta histórica para no romper enlaces vivos; el resto de
+// los proveedores usa la ruta neutral.
+const CONNECT_URLS: Record<MailboxProviderId, string> = {
+  google: `${API_BASE_URL}/gmail/connect/login`,
+  microsoft: `${API_BASE_URL}/mailbox/connect/microsoft/login`,
+};
 const DATA_VIEWS: AppView[] = ["resumen", "hilos", "revision", "anteriores", "reportes"];
 const BLOCKED_VIEWS: AppView[] = ["cuenta", "configuracion", "privacidad", "ayuda"];
 
@@ -100,6 +106,13 @@ export function App() {
     retry: false,
     staleTime: 60_000,
     refetchInterval: 60_000,
+  });
+
+  const mailboxProviders = useQuery({
+    queryKey: ["mailbox-providers"],
+    queryFn: () => api<{ providers: MailboxProviderId[] }>("/mailbox/providers"),
+    retry: false,
+    staleTime: Infinity,
   });
 
   const activeOrgConfig = useQuery({
@@ -437,9 +450,10 @@ export function App() {
 
   if (accessState.kind === "connect_gmail") {
     return (
-      <GmailConnectGate
+      <MailboxConnectGate
         accountEmail={accountData.account_email}
-        connectUrl={GMAIL_CONNECT_URL}
+        providers={mailboxProviders.data?.providers ?? ["google"]}
+        connectUrlFor={(provider) => CONNECT_URLS[provider]}
         planName={planName}
         isTrial={accountData.entitlement.subscription_status === "trialing"}
         onLogout={handleLogout}

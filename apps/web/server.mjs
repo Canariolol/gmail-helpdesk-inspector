@@ -10,6 +10,7 @@ const apiProxyTarget = process.env.API_PROXY_TARGET;
 const apiPrefixes = [
   "/auth",
   "/gmail",
+  "/mailbox",
   "/analysis-runs",
   "/threads",
   "/me",

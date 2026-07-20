@@ -12,6 +12,10 @@ use sha2::{Digest, Sha256};
 
 type HmacSha256 = Hmac<Sha256>;
 
+/// Lectura de correo y refresh token. `offline_access` es lo que hace que
+/// Microsoft entregue un refresh token; `User.Read` da la identidad de la casilla.
+pub const MICROSOFT_MAIL_SCOPE: &str = "offline_access User.Read Mail.Read";
+
 const SESSION_TTL_DAYS: i64 = 30;
 const SESSION_MAX_AGE_SECONDS: i64 = SESSION_TTL_DAYS * 24 * 60 * 60;
 

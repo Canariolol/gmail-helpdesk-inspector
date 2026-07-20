@@ -164,6 +164,31 @@
   justify-content: center;
 }
 
+/* Lista de proveedores: una fila por opción, con el subtítulo bajo el nombre. */
+.access-actions-stack {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.access-actions-stack > a {
+  justify-content: flex-start;
+  min-height: 56px;
+  text-align: left;
+}
+
+.access-provider-label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  line-height: 1.25;
+}
+
+.access-provider-label small {
+  font-weight: 500;
+  font-size: 0.8125rem;
+  opacity: 0.75;
+}
+
 .access-foot-row {
   display: flex;
   flex-wrap: wrap;

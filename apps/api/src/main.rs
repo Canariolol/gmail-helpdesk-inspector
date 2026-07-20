@@ -4,6 +4,7 @@ mod billing;
 mod config;
 mod firestore;
 mod gmail;
+mod graph;
 mod http;
 mod mailbox;
 mod policies;

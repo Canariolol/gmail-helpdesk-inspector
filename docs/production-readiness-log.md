@@ -3152,3 +3152,60 @@ sin warnings.
 **Qué sigue:** tras desplegar, apuntar el uptime check de API a
 `/health/ready` si se prefiere detectar también la pérdida de conexión a la
 base, evaluando el costo de mantener viva la conexión del pool.
+
+## 2026-07-20 — Multiproveedor: trait, renombres neutrales y adaptador Microsoft Graph
+
+**Estado:** implementado y validado localmente; la conexión real con Microsoft
+queda pendiente de que se registre la app en Azure AD.
+
+**Qué se hizo:** se auditó `plan-conexion-multiproveedor.md` contra el código y
+se reescribió: cuatro supuestos habían quedado obsoletos tras la migración a
+PostgreSQL y la separación sesión/conexión (el `provider` va en la conexión y no
+en la sesión; el renombre no requiere DDL porque el storage es JSONB; el motor no
+era 100% neutral por `refine_classification_with_gmail_labels`; el filtrado por
+etiquetas de Gmail se ejecuta en el servidor y no tiene equivalente IMAP).
+
+Decisiones del responsable: Microsoft Graph antes que IMAP; una casilla por
+organización, reemplazable; renombre con alias de compatibilidad; detección por
+MX fuera de esta entrega.
+
+Implementado:
+
+- Renombres `gmail_thread_id`→`thread_id`, `gmail_message_id`→`message_id`,
+  `gmail_account_email`→`mailbox_email`, `GmailConnection`→`MailboxConnection`,
+  todos con `#[serde(alias)]` para leer los registros ya persistidos sin migrar
+  datos. Los campos legacy de `UserSession` se dejaron intactos.
+- Trait `MailboxProvider` (`mailbox.rs`) con tipos neutrales `ProviderThread` y
+  `ThreadListPage`; `GmailClient` pasa a ser una implementación.
+- `MailboxProviderKind` (`google`/`microsoft`) persistido en la conexión, con
+  `#[serde(default)] = Google` para las filas anteriores.
+- `AppState.gmail` → `AppState.mailbox: MailboxProviders`, con despacho **por
+  conexión** resuelto una vez por run, no por hilo.
+- Adaptador `GraphClient`: agrupación por `conversationId`, ventana de fechas por
+  `$filter` sobre `receivedDateTime`, cuerpo en texto plano vía cabecera `Prefer`,
+  carpetas mapeadas al catálogo de etiquetas, y solo la cabecera `Auto-Submitted`
+  persistida (mismo criterio que Gmail).
+- `refresh_access_token_for` por proveedor. Microsoft rota el refresh token en
+  cada uso; el CAS existente ya persiste el rotado.
+- Rutas `/mailbox/connect/microsoft/login|callback` y `/mailbox/providers`. Las
+  rutas `/gmail/*` se conservan como alias. Se agregó `login_hint` al connect de
+  Google y `login_hint`+`domain_hint` al de Microsoft.
+- `MicrosoftConfig` opcional: sin las tres credenciales la API arranca igual y
+  solo ofrece Google, en vez de exponer un botón que siempre falla.
+- Frontend: `GmailConnectGate` → `MailboxConnectGate` con la lista de proveedores
+  disponibles, `mailbox_provider` en `AccountStatus`, y la vista de Cuenta deja de
+  asumir Gmail.
+- `apps/web/server.mjs` agrega `/mailbox` a los prefijos proxeados: sin eso el
+  callback de Microsoft habría devuelto el index de la SPA en producción.
+
+**Evidencia:** `scripts/check-all.sh` en verde — 178 tests Rust (8 nuevos:
+lectura de los alias legacy, default de proveedor, indisponibilidad de Microsoft
+sin Azure AD, ventana OData, escape de comillas en el filtro, cabeceras
+persistidas del adaptador Graph, deduplicación de conversaciones, y la ruta de
+connect rechazada), fmt, Clippy sin warnings, 11 tests Python y build web.
+
+**Qué sigue:** registrar la app en Azure AD (`MICROSOFT_CLIENT_ID`,
+`MICROSOFT_CLIENT_SECRET` en Secret Manager, `MICROSOFT_REDIRECT_URL`) y probar
+un connect real. Después, corregir el copy público y legal que hoy declara que
+Mira soporta únicamente Gmail y Google Workspace, e incorporar Microsoft a la
+lista de subprocesadores de la política de privacidad.

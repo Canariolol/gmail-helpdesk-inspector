@@ -23,7 +23,7 @@ export type ThreadDropReason =
   | "dropped_no_external_in_window";
 
 export interface DroppedThreadInfo {
-  gmail_thread_id: string;
+  thread_id: string;
   subject: string;
   first_message_at?: string | null;
   reason: ThreadDropReason | "stored";
@@ -93,7 +93,7 @@ export interface AnalysisRun {
 export interface EmailThread {
   id: string;
   analysis_run_id: string;
-  gmail_thread_id: string;
+  thread_id: string;
   subject: string;
   classification: Classification;
   classification_source: string;
@@ -179,8 +179,12 @@ export interface AccountStatus {
   org_id: string;
   gmail_connected: boolean;
   gmail_account_email: string | null;
+  /** Proveedor de la casilla conectada. `null` si no hay conexión activa. */
+  mailbox_provider: MailboxProviderId | null;
   entitlement: EntitlementSnapshot;
 }
+
+export type MailboxProviderId = "google" | "microsoft";
 
 export interface CheckoutSession {
   id: string;

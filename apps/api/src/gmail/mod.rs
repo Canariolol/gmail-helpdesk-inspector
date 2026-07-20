@@ -1,4 +1,5 @@
 use anyhow::{Context, anyhow};
+use async_trait::async_trait;
 use base64::{
     Engine,
     engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD},
@@ -10,7 +11,10 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use crate::analysis::{AnalysisConfig, EmailMessage, is_automated_sender, is_internal_email};
-use crate::mailbox::{GmailLabel, GmailProfile, GmailSendAs, MailboxMetadata};
+use crate::mailbox::{
+    GmailLabel, GmailProfile, GmailSendAs, MailboxMetadata, MailboxProvider, MailboxProviderKind,
+    ProviderThread, ThreadListPage,
+};
 
 const PRIMARY_INBOX_LABELS: [&str; 2] = ["INBOX", "CATEGORY_PERSONAL"];
 const EXCLUDED_MESSAGE_LABELS: [&str; 2] = ["SPAM", "TRASH"];
@@ -18,16 +22,6 @@ const EXCLUDED_MESSAGE_LABELS: [&str; 2] = ["SPAM", "TRASH"];
 #[derive(Clone)]
 pub struct GmailClient {
     client: Client,
-}
-
-#[derive(Debug, Clone)]
-pub struct GmailThreadData {
-    pub id: String,
-    pub is_primary_inbox: bool,
-    /// Unión de las etiquetas de Gmail del hilo (INBOX, CATEGORY_*, etiquetas de
-    /// usuario…). Señal para refinar la clasificación.
-    pub label_ids: Vec<String>,
-    pub messages: Vec<EmailMessage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -46,15 +40,6 @@ struct ThreadListResponse {
 #[derive(Debug, Deserialize)]
 struct ThreadRef {
     id: String,
-}
-
-/// Página de IDs de hilos recuperados de Gmail, con señales de truncación para
-/// poder informar "recuperamos N, pero hay más" sin una segunda llamada.
-#[derive(Debug, Clone)]
-pub struct ThreadListPage {
-    pub ids: Vec<String>,
-    pub next_page_token: Option<String>,
-    pub result_size_estimate: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -165,8 +150,13 @@ impl Default for GmailClient {
     }
 }
 
-impl GmailClient {
-    pub async fn list_thread_ids(
+#[async_trait]
+impl MailboxProvider for GmailClient {
+    fn kind(&self) -> MailboxProviderKind {
+        MailboxProviderKind::Google
+    }
+
+    async fn list_thread_ids(
         &self,
         access_token: &str,
         config: &AnalysisConfig,
@@ -194,12 +184,12 @@ impl GmailClient {
         })
     }
 
-    pub async fn fetch_thread(
+    async fn fetch_thread(
         &self,
         access_token: &str,
         thread_id: &str,
         config: &AnalysisConfig,
-    ) -> anyhow::Result<GmailThreadData> {
+    ) -> anyhow::Result<ProviderThread> {
         let url = format!(
             "https://gmail.googleapis.com/gmail/v1/users/me/threads/{thread_id}?format=full"
         );
@@ -215,16 +205,38 @@ impl GmailClient {
             .await?;
 
         let is_primary_inbox = thread_has_all_labels(&response.messages, &PRIMARY_INBOX_LABELS);
-        let label_ids = collect_thread_labels(&response.messages);
+        let folder_ids = collect_thread_labels(&response.messages);
         let messages = normalize_visible_messages(response.messages, config)?;
-        Ok(GmailThreadData {
+        Ok(ProviderThread {
             id: response.id,
             is_primary_inbox,
-            label_ids,
+            folder_ids,
             messages,
         })
     }
 
+    /// Lectura best-effort de toda la metadata al conectar. Cada parte tolera su
+    /// propio error para no abortar el login si una llamada de Gmail falla.
+    async fn fetch_mailbox_metadata(
+        &self,
+        access_token: &str,
+        now: DateTime<Utc>,
+    ) -> MailboxMetadata {
+        let profile = self.get_profile(access_token).await.ok();
+        let labels = self.list_labels(access_token).await.unwrap_or_default();
+        let send_as = self.list_send_as(access_token).await.unwrap_or_default();
+        let filters_count = self.count_filters(access_token).await.unwrap_or(0);
+        MailboxMetadata {
+            profile,
+            labels,
+            send_as,
+            filters_count,
+            synced_at: now,
+        }
+    }
+}
+
+impl GmailClient {
     /// Catálogo de etiquetas (system + usuario). Bajo `gmail.readonly`.
     pub async fn list_labels(&self, access_token: &str) -> anyhow::Result<Vec<GmailLabel>> {
         let response: LabelsListResponse = self
@@ -303,26 +315,6 @@ impl GmailClient {
             .json()
             .await?;
         Ok(response.filter.len() as u32)
-    }
-
-    /// Lectura best-effort de toda la metadata al conectar. Cada parte tolera su
-    /// propio error para no abortar el login si una llamada de Gmail falla.
-    pub async fn fetch_mailbox_metadata(
-        &self,
-        access_token: &str,
-        now: DateTime<Utc>,
-    ) -> MailboxMetadata {
-        let profile = self.get_profile(access_token).await.ok();
-        let labels = self.list_labels(access_token).await.unwrap_or_default();
-        let send_as = self.list_send_as(access_token).await.unwrap_or_default();
-        let filters_count = self.count_filters(access_token).await.unwrap_or(0);
-        MailboxMetadata {
-            profile,
-            labels,
-            send_as,
-            filters_count,
-            synced_at: now,
-        }
     }
 }
 
@@ -466,7 +458,7 @@ fn normalize_message(
 
     Ok(EmailMessage {
         id: message.id.clone(),
-        gmail_message_id: message.id,
+        message_id: message.id,
         from_email,
         from_name,
         to_emails,

@@ -19,6 +19,9 @@ pub struct AppConfig {
     pub encryption_key: String,
     pub session_secret: String,
     pub google: GoogleConfig,
+    /// `None` mientras no exista una app registrada en Azure AD. Sin esto el
+    /// botón de Microsoft no se ofrece, en vez de fallar al apretarlo.
+    pub microsoft: Option<MicrosoftConfig>,
     pub workos: WorkosConfig,
     pub billing: BillingConfig,
     pub firestore: FirestoreConfig,
@@ -30,6 +33,16 @@ pub struct AppConfig {
     /// Cuentas internas privilegiadas (correos en minúsculas) con acceso total:
     /// sin rate limits, sin gating de setup y sin futuros límites de plan.
     pub internal_full_access_emails: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MicrosoftConfig {
+    pub client_id: String,
+    pub client_secret: String,
+    pub redirect_url: String,
+    /// `common` acepta cualquier tenant y cuentas personales. Un tenant ID
+    /// concreto restringe la app a una sola organización.
+    pub tenant: String,
 }
 
 #[derive(Debug, Clone)]
@@ -115,6 +128,20 @@ impl AppConfig {
                 .parse()
                 .context("invalid GMAIL_MAX_THREADS")?,
         };
+        // Microsoft solo se habilita con las tres credenciales presentes: una
+        // configuración a medias produciría un botón que siempre falla.
+        let microsoft_client_id = env_or("MICROSOFT_CLIENT_ID", "");
+        let microsoft_client_secret = secret_or_empty("MICROSOFT_CLIENT_SECRET", false)?;
+        let microsoft_redirect_url = env_or("MICROSOFT_REDIRECT_URL", "");
+        let microsoft = (!microsoft_client_id.trim().is_empty()
+            && !microsoft_client_secret.trim().is_empty()
+            && !microsoft_redirect_url.trim().is_empty())
+        .then(|| MicrosoftConfig {
+            client_id: microsoft_client_id,
+            client_secret: microsoft_client_secret,
+            redirect_url: microsoft_redirect_url,
+            tenant: env_or("MICROSOFT_TENANT", "common"),
+        });
         let workos = WorkosConfig {
             client_id: env_or("WORKOS_CLIENT_ID", ""),
             api_key: secret_or_empty("WORKOS_API_KEY", production)?,
@@ -229,6 +256,7 @@ impl AppConfig {
                 production,
             )?,
             google,
+            microsoft,
             workos,
             billing,
             firestore: FirestoreConfig {
@@ -489,6 +517,7 @@ pub(crate) fn test_app_config() -> AppConfig {
             redirect_url: String::new(),
             gmail_max_threads: 50,
         },
+        microsoft: None,
         workos: WorkosConfig {
             client_id: "client_test".to_string(),
             api_key: "sk_test".to_string(),

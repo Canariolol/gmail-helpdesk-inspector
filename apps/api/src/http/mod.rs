@@ -37,13 +37,13 @@ use crate::{
         Classification, ClassificationSource, DroppedThreadInfo, EmailMessage, EmailThread,
         ManualReview, ManualReviewOverride, ThreadDisposition, TriggerType,
         apply_manual_review_override, calculate_metrics, classify_thread, message_fingerprint,
-        message_is_inside_analysis_window, refine_classification_with_gmail_labels,
+        message_is_inside_analysis_window, refine_classification_with_folders,
         refine_classification_with_policy_hints, rescue_classification_with_valid_signals,
     },
     auth::{
-        GoogleTokenResponse, UserSession, clear_oauth_cookie, clear_session_cookie, decrypt_token,
-        encrypt_token, oauth_cookie,
-        refresh::{RefreshError, refresh_google_access_token},
+        GoogleTokenResponse, MICROSOFT_MAIL_SCOPE, UserSession, clear_oauth_cookie,
+        clear_session_cookie, decrypt_token, encrypt_token, oauth_cookie,
+        refresh::{RefreshError, refresh_access_token_for},
         session_cookie, session_expires_at, session_is_active, sign_session_id,
         verify_session_cookie,
     },
@@ -53,9 +53,13 @@ use crate::{
         UsageLedger, active_subscription_for_trial, free_plan, plan_by_id, public_plans,
         subscription_allows_access,
     },
-    config::AppConfig,
+    config::{AppConfig, MicrosoftConfig},
     gmail::GmailClient,
-    mailbox::{FilterPreset, GmailConnection, gmail_connection_is_active},
+    graph::GraphClient,
+    mailbox::{
+        FilterPreset, MailboxConnection, MailboxProvider, MailboxProviderKind, MailboxProviders,
+        mailbox_connection_is_active,
+    },
     policies::{
         AiPolicy, AnalysisPolicy, MailboxPurpose, OrgConfigBundle, OrgConfigResponse,
         PolicyVersion, ScheduleReportPolicy, apply_ai_defaults_migration, hash_owner_email,
@@ -80,7 +84,7 @@ pub struct AppState {
     pub config: AppConfig,
     pub storage: Arc<dyn StorageRepository>,
     pub http: Client,
-    pub gmail: GmailClient,
+    pub mailbox: Arc<MailboxProviders>,
     rate_limiter: RateLimiter,
 }
 
@@ -91,6 +95,7 @@ struct RateLimiter {
 
 impl AppState {
     pub fn new(config: AppConfig, storage: Arc<dyn StorageRepository>) -> Self {
+        let microsoft = config.microsoft.is_some();
         Self {
             config,
             storage,
@@ -99,7 +104,12 @@ impl AppState {
                 .connect_timeout(Duration::from_secs(10))
                 .build()
                 .expect("failed to build http client"),
-            gmail: GmailClient::default(),
+            // `microsoft` queda en None mientras no haya credenciales de Azure
+            // AD: la ausencia degrada una función, no impide arrancar.
+            mailbox: Arc::new(MailboxProviders::new(
+                GmailClient::default(),
+                microsoft.then(GraphClient::default),
+            )),
             rate_limiter: RateLimiter::default(),
         }
     }
@@ -137,6 +147,15 @@ pub fn router(state: AppState) -> Router {
         .route("/gmail/connect/login", get(gmail_connect_login))
         .route("/gmail/connect/callback", get(gmail_connect_callback))
         .route("/gmail/disconnect", post(gmail_disconnect))
+        .route(
+            "/mailbox/connect/microsoft/login",
+            get(microsoft_connect_login),
+        )
+        .route(
+            "/mailbox/connect/microsoft/callback",
+            get(microsoft_connect_callback),
+        )
+        .route("/mailbox/providers", get(mailbox_providers))
         .route("/auth/logout", post(auth_logout))
         .route("/auth/logout-all", post(auth_logout_all))
         .route("/auth/me", get(auth_me))
@@ -533,6 +552,9 @@ async fn gmail_connect_login(
             ("state", oauth_state.as_str()),
             ("code_challenge", code_challenge.as_str()),
             ("code_challenge_method", "S256"),
+            // Preselecciona la cuenta con la que ya inició sesión en Mira, para
+            // que el selector de cuentas no aparezca sin necesidad.
+            ("login_hint", session.google_account_email.as_str()),
         ],
     )
     .expect("valid oauth url");
@@ -562,18 +584,7 @@ async fn gmail_connect_callback(
 ) -> Result<impl IntoResponse, ApiError> {
     let existing_session = require_session(&state, &headers).await?;
     require_active_entitlement(&state, &existing_session).await?;
-    let verifier_payload = headers
-        .get(header::COOKIE)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|cookies| extract_named_cookie(cookies, "ghmi_oauth"))
-        .and_then(|cookie| verify_session_cookie(&cookie, &state.config.session_secret))
-        .ok_or_else(|| ApiError::bad_request("missing or invalid OAuth PKCE cookie"))?;
-    let (expected_state, code_verifier) = verifier_payload
-        .split_once(':')
-        .ok_or_else(|| ApiError::bad_request("invalid OAuth PKCE cookie payload"))?;
-    if query.state.as_deref() != Some(expected_state) {
-        return Err(ApiError::bad_request("OAuth state mismatch"));
-    }
+    let code_verifier = verified_oauth_code_verifier(&state, &headers, query.state.as_deref())?;
 
     let token: GoogleTokenResponse = state
         .http
@@ -584,7 +595,7 @@ async fn gmail_connect_callback(
             ("client_secret", state.config.google.client_secret.as_str()),
             ("redirect_uri", state.config.google.redirect_url.as_str()),
             ("grant_type", "authorization_code"),
-            ("code_verifier", code_verifier),
+            ("code_verifier", code_verifier.as_str()),
         ])
         .send()
         .await?
@@ -605,9 +616,10 @@ async fn gmail_connect_callback(
         .storage
         .get_gmail_connection(&existing_session.google_account_email)
         .await?;
-    let connection = GmailConnection {
+    let connection = MailboxConnection {
         owner_email: existing_session.google_account_email.clone(),
-        gmail_account_email: profile.email_address.clone(),
+        provider: MailboxProviderKind::Google,
+        mailbox_email: profile.email_address.clone(),
         access_token_encrypted: encrypt_token(&token.access_token, &state.config.encryption_key)?,
         refresh_token_encrypted: token
             .refresh_token
@@ -645,12 +657,15 @@ async fn gmail_connect_callback(
     // AL CONECTAR, en segundo plano para no demorar el redirect ni romper el login
     // si una llamada de Gmail falla.
     {
-        let gmail = state.gmail.clone();
+        let mailbox = state.mailbox.clone();
         let storage = state.storage.clone();
         let access_token = token.access_token.clone();
         let owner = existing_session.google_account_email.clone();
         tokio::spawn(async move {
-            let metadata = gmail.fetch_mailbox_metadata(&access_token, now).await;
+            let Ok(provider) = mailbox.get(MailboxProviderKind::Google) else {
+                return;
+            };
+            let metadata = provider.fetch_mailbox_metadata(&access_token, now).await;
             if storage
                 .upsert_mailbox_metadata(&owner, &metadata)
                 .await
@@ -679,6 +694,207 @@ async fn gmail_connect_callback(
         HeaderValue::from_str(&state.config.web_base_url).unwrap(),
     );
     Ok((StatusCode::FOUND, headers))
+}
+
+/// Proveedores que este despliegue puede ofrecer. El frontend no debe mostrar un
+/// botón que no puede funcionar.
+async fn mailbox_providers(State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(json!({
+        "providers": state
+            .mailbox
+            .available()
+            .into_iter()
+            .map(|kind| kind.as_str())
+            .collect::<Vec<_>>(),
+    }))
+}
+
+fn microsoft_config(state: &AppState) -> Result<&MicrosoftConfig, ApiError> {
+    state.config.microsoft.as_ref().ok_or_else(|| {
+        ApiError::bad_request("la conexión con Microsoft no está habilitada en este entorno")
+    })
+}
+
+/// Espejo de `gmail_connect_login`: redirect de página completa a Microsoft, con
+/// PKCE y la misma cookie temporal de verificación.
+async fn microsoft_connect_login(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    let session = require_session(&state, &headers).await?;
+    require_active_entitlement(&state, &session).await?;
+    let microsoft = microsoft_config(&state)?;
+    let oauth_state = random_urlsafe(24);
+    let code_verifier = random_urlsafe(48);
+    let code_challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(code_verifier.as_bytes()));
+    let signed_oauth = sign_session_id(
+        &format!("{oauth_state}:{code_verifier}"),
+        &state.config.session_secret,
+    )?;
+    let domain_hint = session
+        .google_account_email
+        .split_once('@')
+        .map(|(_, domain)| domain.to_string())
+        .unwrap_or_default();
+    let url = url::Url::parse_with_params(
+        &format!(
+            "https://login.microsoftonline.com/{}/oauth2/v2.0/authorize",
+            microsoft.tenant
+        ),
+        &[
+            ("client_id", microsoft.client_id.as_str()),
+            ("redirect_uri", microsoft.redirect_url.as_str()),
+            ("response_type", "code"),
+            ("scope", MICROSOFT_MAIL_SCOPE),
+            ("response_mode", "query"),
+            ("state", oauth_state.as_str()),
+            ("code_challenge", code_challenge.as_str()),
+            ("code_challenge_method", "S256"),
+            ("login_hint", session.google_account_email.as_str()),
+            ("domain_hint", domain_hint.as_str()),
+        ],
+    )
+    .expect("valid microsoft oauth url");
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&oauth_cookie(
+            &signed_oauth,
+            &state.config.cookie_same_site,
+            state.config.cookie_secure,
+        ))
+        .unwrap(),
+    );
+    Ok((headers, Redirect::temporary(url.as_str())))
+}
+
+async fn microsoft_connect_callback(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<OAuthCallback>,
+) -> Result<impl IntoResponse, ApiError> {
+    let existing_session = require_session(&state, &headers).await?;
+    require_active_entitlement(&state, &existing_session).await?;
+    let microsoft = microsoft_config(&state)?;
+    let code_verifier = verified_oauth_code_verifier(&state, &headers, query.state.as_deref())?;
+
+    let token: GoogleTokenResponse = state
+        .http
+        .post(format!(
+            "https://login.microsoftonline.com/{}/oauth2/v2.0/token",
+            microsoft.tenant
+        ))
+        .form(&[
+            ("code", query.code.as_str()),
+            ("client_id", microsoft.client_id.as_str()),
+            ("client_secret", microsoft.client_secret.as_str()),
+            ("redirect_uri", microsoft.redirect_url.as_str()),
+            ("grant_type", "authorization_code"),
+            ("code_verifier", code_verifier.as_str()),
+            ("scope", MICROSOFT_MAIL_SCOPE),
+        ])
+        .send()
+        .await?
+        .json_or_google_error("Microsoft OAuth code exchange")
+        .await?;
+
+    let graph = GraphClient::default();
+    let profile = graph.get_profile(&token.access_token).await.map_err(|_| {
+        ApiError::bad_request("no se pudo leer la identidad de la casilla en Microsoft")
+    })?;
+
+    let now = Utc::now();
+    let previous = state
+        .storage
+        .get_gmail_connection(&existing_session.google_account_email)
+        .await?;
+    let connection = MailboxConnection {
+        owner_email: existing_session.google_account_email.clone(),
+        provider: MailboxProviderKind::Microsoft,
+        mailbox_email: profile.email_address.clone(),
+        access_token_encrypted: encrypt_token(&token.access_token, &state.config.encryption_key)?,
+        // Microsoft rota el refresh token: si esta respuesta no trae uno, el
+        // anterior sigue siendo el único válido.
+        refresh_token_encrypted: token
+            .refresh_token
+            .as_deref()
+            .map(|refresh| encrypt_token(refresh, &state.config.encryption_key))
+            .transpose()?
+            .or_else(|| {
+                previous
+                    .as_ref()
+                    .and_then(|connection| connection.refresh_token_encrypted.clone())
+            }),
+        connected_at: previous
+            .as_ref()
+            .map(|connection| connection.connected_at)
+            .unwrap_or(now),
+        updated_at: now,
+        revoked_at: None,
+    };
+    state.storage.upsert_gmail_connection(&connection).await?;
+
+    {
+        let mailbox = state.mailbox.clone();
+        let storage = state.storage.clone();
+        let access_token = token.access_token.clone();
+        let owner = existing_session.google_account_email.clone();
+        tokio::spawn(async move {
+            let Ok(provider) = mailbox.get(MailboxProviderKind::Microsoft) else {
+                return;
+            };
+            let metadata = provider.fetch_mailbox_metadata(&access_token, now).await;
+            if storage
+                .upsert_mailbox_metadata(&owner, &metadata)
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    operation = "mailbox_metadata_persist",
+                    provider = "microsoft",
+                    "no se pudo guardar metadata de la casilla al conectar"
+                );
+            }
+        });
+    }
+
+    let mut headers = HeaderMap::new();
+    headers.append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&clear_oauth_cookie(
+            &state.config.cookie_same_site,
+            state.config.cookie_secure,
+        ))
+        .unwrap(),
+    );
+    headers.insert(
+        header::LOCATION,
+        HeaderValue::from_str(&state.config.web_base_url).unwrap(),
+    );
+    Ok((StatusCode::FOUND, headers))
+}
+
+/// Valida la cookie PKCE temporal y el `state` del proveedor, y devuelve el
+/// `code_verifier`. Compartido por los callbacks de Google y Microsoft para que
+/// una sola implementación cubra ambos.
+fn verified_oauth_code_verifier(
+    state: &AppState,
+    headers: &HeaderMap,
+    provider_state: Option<&str>,
+) -> Result<String, ApiError> {
+    let verifier_payload = headers
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|cookies| extract_named_cookie(cookies, "ghmi_oauth"))
+        .and_then(|cookie| verify_session_cookie(&cookie, &state.config.session_secret))
+        .ok_or_else(|| ApiError::bad_request("missing or invalid OAuth PKCE cookie"))?;
+    let (expected_state, code_verifier) = verifier_payload
+        .split_once(':')
+        .ok_or_else(|| ApiError::bad_request("invalid OAuth PKCE cookie payload"))?;
+    if provider_state != Some(expected_state) {
+        return Err(ApiError::bad_request("OAuth state mismatch"));
+    }
+    Ok(code_verifier.to_string())
 }
 
 async fn gmail_disconnect(
@@ -792,10 +1008,10 @@ async fn auth_me(
     Ok(Json(json!({
         "email": session.google_account_email,
         "workos_user_id": session.workos_user_id,
-        "gmail_connected": gmail_connection_is_active(connection.as_ref()),
+        "gmail_connected": mailbox_connection_is_active(connection.as_ref()),
         "gmail_account_email": connection
-            .filter(|connection| gmail_connection_is_active(Some(connection)))
-            .map(|connection| connection.gmail_account_email),
+            .filter(|connection| mailbox_connection_is_active(Some(connection)))
+            .map(|connection| connection.mailbox_email),
     })))
 }
 
@@ -806,6 +1022,9 @@ struct AccountStatusResponse {
     org_id: String,
     gmail_connected: bool,
     gmail_account_email: Option<String>,
+    /// Proveedor de la casilla conectada ("google" | "microsoft"). `None`
+    /// cuando no hay conexión activa.
+    mailbox_provider: Option<String>,
     entitlement: EntitlementSnapshot,
 }
 
@@ -824,10 +1043,14 @@ async fn get_account_status(
         account_email: session.google_account_email.clone(),
         workos_user_id: session.workos_user_id.clone(),
         org_id: bundle.org.id,
-        gmail_connected: gmail_connection_is_active(connection.as_ref()),
+        gmail_connected: mailbox_connection_is_active(connection.as_ref()),
+        mailbox_provider: connection
+            .as_ref()
+            .filter(|connection| mailbox_connection_is_active(Some(connection)))
+            .map(|connection| connection.provider.as_str().to_string()),
         gmail_account_email: connection
-            .filter(|connection| gmail_connection_is_active(Some(connection)))
-            .map(|connection| connection.gmail_account_email),
+            .filter(|connection| mailbox_connection_is_active(Some(connection)))
+            .map(|connection| connection.mailbox_email),
         entitlement,
     }))
 }
@@ -1849,7 +2072,7 @@ async fn sync_schedule_config_from_policy(
     // puede volver a activar el scheduler. La preferencia se conserva y se
     // aplicará al reconectar Gmail.
     let enabled =
-        schedule.scheduler_enabled && gmail_connection_is_active(gmail_connection.as_ref());
+        schedule.scheduler_enabled && mailbox_connection_is_active(gmail_connection.as_ref());
     state
         .storage
         .upsert_schedule_config(&ScheduleConfig {
@@ -2322,7 +2545,7 @@ async fn start_analysis_run(
         .storage
         .get_gmail_connection(&session.google_account_email)
         .await?
-        .filter(|connection| gmail_connection_is_active(Some(connection)))
+        .filter(|connection| mailbox_connection_is_active(Some(connection)))
         .ok_or_else(|| ApiError::forbidden("conecta Gmail antes de analizar"))?;
     let run = require_owned_run(&state, &id, &session).await?;
     if run.status != AnalysisStatus::Pending {
@@ -2644,7 +2867,7 @@ async fn apply_manual_review_request(
         .storage
         .upsert_manual_review_override(&ManualReviewOverride {
             owner_email: session.google_account_email.clone(),
-            gmail_thread_id: thread.gmail_thread_id.clone(),
+            thread_id: thread.thread_id.clone(),
             source_run_id: thread.analysis_run_id.clone(),
             message_fingerprint: message_fingerprint(&messages),
             reviewer_label: session.google_account_email.clone(),
@@ -2749,8 +2972,21 @@ pub(crate) async fn execute_analysis(
     // analizados pueda llenarse pese a los descartes del embudo.
     let retrieval_max = retrieval_max_for(has_finite_run_cap, analyzed_cap, policy_max).max(1);
 
-    let page = state
-        .gmail
+    // El proveedor se resuelve una vez por run desde la conexión de la casilla,
+    // no por hilo: dentro del run no puede cambiar.
+    let provider_kind = state
+        .storage
+        .get_gmail_connection(&run.user_email)
+        .await
+        .context(AnalysisFailureStage("mailbox_connection_lookup"))?
+        .map(|connection| connection.provider)
+        .unwrap_or_default();
+    let provider = state
+        .mailbox
+        .get(provider_kind)
+        .context(AnalysisFailureStage("mailbox_provider_unavailable"))?;
+
+    let page = provider
         .list_thread_ids(&access_token, &run.config, retrieval_max)
         .await
         .context(AnalysisFailureStage("gmail_list_threads"))?;
@@ -2794,6 +3030,7 @@ pub(crate) async fn execute_analysis(
         let mut task_stream = stream::iter(thread_ids.into_iter().map(|thread_id| async move {
             prepare_one_thread(
                 state_ref,
+                provider,
                 access_ref,
                 run_id_ref,
                 config_ref,
@@ -2884,7 +3121,7 @@ pub(crate) async fn execute_analysis(
     // una vez dividiendo el lote; no existe una segunda llamada por hilo.
     for index_chunk in batch_indexes.chunks(AI_BATCH_SIZE) {
         for index in index_chunk {
-            ai_unique_thread_ids.insert(prepared_threads[*index].thread.gmail_thread_id.clone());
+            ai_unique_thread_ids.insert(prepared_threads[*index].thread.thread_id.clone());
         }
         let batch = audit_batch_with_split(
             &state,
@@ -2900,7 +3137,7 @@ pub(crate) async fn execute_analysis(
 
         for index in index_chunk {
             let prepared = &mut prepared_threads[*index];
-            if let Some(decision) = batch.decisions.get(&prepared.thread.gmail_thread_id) {
+            if let Some(decision) = batch.decisions.get(&prepared.thread.thread_id) {
                 apply_batch_decision(
                     &mut prepared.thread,
                     &prepared.messages,
@@ -3034,7 +3271,7 @@ fn dropped_thread_info(
 ) -> DroppedThreadInfo {
     let first = messages.iter().min_by_key(|message| message.date);
     DroppedThreadInfo {
-        gmail_thread_id: thread_id.to_string(),
+        thread_id: thread_id.to_string(),
         subject: first
             .map(|message| message.subject.clone())
             .unwrap_or_else(|| "(sin asunto)".to_string()),
@@ -3053,16 +3290,17 @@ struct ThreadProcessingContext<'a> {
     analyzed_cap: u32,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn prepare_one_thread(
     state: &AppState,
+    provider: &dyn MailboxProvider,
     access_token: &str,
     run_id: &str,
     config: &AnalysisConfig,
     processing: ThreadProcessingContext<'_>,
     thread_id: String,
 ) -> anyhow::Result<ThreadOutcome> {
-    let data = state
-        .gmail
+    let data = provider
         .fetch_thread(access_token, &thread_id, config)
         .await?;
     if !data.is_primary_inbox {
@@ -3112,7 +3350,7 @@ async fn prepare_one_thread(
 
     let mut thread = classify_thread(run_id, &data.id, &data.messages, config);
     // Señal extra: refina el veredicto heurístico con las pestañas/categorías de Gmail.
-    refine_classification_with_gmail_labels(&mut thread, &data.label_ids);
+    refine_classification_with_folders(&mut thread, &data.folder_ids);
     // Señal extra: enruta a revisión los hilos cuyo asunto/remitente coincide con una
     // regla de no-responsabilidad configurada (antes solo alimentaban a la IA).
     if let Some(snapshot) = processing.policy_snapshot {
@@ -3137,7 +3375,7 @@ async fn prepare_one_thread(
     }
     if let Some(review) = state
         .storage
-        .get_manual_review_override(processing.owner_email, &thread.gmail_thread_id)
+        .get_manual_review_override(processing.owner_email, &thread.thread_id)
         .await?
         && review.message_fingerprint == message_fingerprint(&data.messages)
     {
@@ -3159,7 +3397,7 @@ async fn prepare_one_thread(
         prepared: Some(PreparedThread {
             thread,
             messages: data.messages,
-            label_ids: data.label_ids,
+            label_ids: data.folder_ids,
             should_batch,
         }),
         ..Default::default()
@@ -3338,7 +3576,7 @@ fn batch_messages_for_thread(
 
 fn batch_summary(prepared: &PreparedThread, max_body_chars: usize) -> BatchThreadSummary {
     BatchThreadSummary {
-        thread_id: prepared.thread.gmail_thread_id.clone(),
+        thread_id: prepared.thread.thread_id.clone(),
         subject: prepared.thread.subject.clone(),
         gmail_labels: prepared.label_ids.clone(),
         messages: batch_messages_for_thread(prepared, max_body_chars),
@@ -3434,7 +3672,7 @@ fn merge_batch_response(
 ) {
     let expected = indexes
         .iter()
-        .map(|index| prepared[*index].thread.gmail_thread_id.as_str())
+        .map(|index| prepared[*index].thread.thread_id.as_str())
         .collect::<HashSet<_>>();
     execution.input_tokens += response.input_tokens;
     execution.output_tokens += response.output_tokens;
@@ -3605,18 +3843,24 @@ async fn enforce_rate_limit(
 
 async fn fresh_gmail_access_token(
     state: &AppState,
-    connection: &GmailConnection,
+    connection: &MailboxConnection,
 ) -> Result<String, ApiError> {
     let encrypted_refresh = connection
         .refresh_token_encrypted
         .as_deref()
         .ok_or_else(|| {
-            ApiError::forbidden("la conexión con Gmail expiró; vuelve a conectar la casilla")
+            ApiError::forbidden("la conexión con la casilla expiró; vuelve a conectarla")
         })?;
     let refresh_token = decrypt_token(encrypted_refresh, &state.config.encryption_key)?;
-    let token = refresh_google_access_token(&state.http, &state.config.google, &refresh_token)
-        .await
-        .map_err(gmail_refresh_error)?;
+    let token = refresh_access_token_for(
+        &state.http,
+        connection.provider,
+        &state.config.google,
+        state.config.microsoft.as_ref(),
+        &refresh_token,
+    )
+    .await
+    .map_err(gmail_refresh_error)?;
 
     let mut updated = connection.clone();
     updated.access_token_encrypted =
@@ -3630,10 +3874,10 @@ async fn fresh_gmail_access_token(
         .storage
         .refresh_gmail_connection(connection, &updated)
         .await?
-        != crate::storage::GmailConnectionRefresh::Updated
+        != crate::storage::MailboxConnectionRefresh::Updated
     {
         return Err(ApiError::conflict(
-            "la conexión Gmail cambió mientras se iniciaba el análisis; inténtalo nuevamente",
+            "la conexión de la casilla cambió mientras se iniciaba el análisis; inténtalo nuevamente",
         ));
     }
     Ok(token.access_token)
@@ -3650,8 +3894,8 @@ fn gmail_refresh_error(error: RefreshError) -> ApiError {
     }
 }
 
-fn require_gmail_connected(connection: Option<&GmailConnection>) -> Result<(), ApiError> {
-    if gmail_connection_is_active(connection) {
+fn require_gmail_connected(connection: Option<&MailboxConnection>) -> Result<(), ApiError> {
+    if mailbox_connection_is_active(connection) {
         Ok(())
     } else {
         Err(ApiError::forbidden("conecta Gmail antes de analizar"))
@@ -4626,9 +4870,10 @@ mod tests {
         fixture.storage.update_analysis_run(&pending).await.unwrap();
         fixture
             .storage
-            .upsert_gmail_connection(&GmailConnection {
+            .upsert_gmail_connection(&MailboxConnection {
                 owner_email: "alice@example.com".to_string(),
-                gmail_account_email: "alice@example.com".to_string(),
+                provider: MailboxProviderKind::Google,
+                mailbox_email: "alice@example.com".to_string(),
                 access_token_encrypted: "current-access-token".to_string(),
                 refresh_token_encrypted: None,
                 connected_at: now,
@@ -4973,7 +5218,7 @@ mod tests {
         EmailThread {
             id: id.to_string(),
             analysis_run_id: run_id.to_string(),
-            gmail_thread_id: format!("gmail-{id}"),
+            thread_id: format!("gmail-{id}"),
             subject: "Ayuda".to_string(),
             normalized_subject: "ayuda".to_string(),
             classification: Classification::ValidClientRequest,
@@ -5021,7 +5266,7 @@ mod tests {
         first.date -= chrono::Duration::seconds(1);
         let messages = vec![first, reply];
         let mut decision = BatchAuditDecision {
-            thread_id: candidate.gmail_thread_id.clone(),
+            thread_id: candidate.thread_id.clone(),
             classification: Classification::ValidClientRequest,
             is_valid_client_request: true,
             is_answered: true,
@@ -5077,7 +5322,7 @@ mod tests {
     fn message(id: &str, from: &str) -> EmailMessage {
         EmailMessage {
             id: id.to_string(),
-            gmail_message_id: format!("gmail-{id}"),
+            message_id: format!("gmail-{id}"),
             from_email: from.to_string(),
             from_name: None,
             to_emails: vec!["help@example.com".to_string()],
@@ -5492,7 +5737,7 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
-        assert!(!gmail_connection_is_active(
+        assert!(!mailbox_connection_is_active(
             fixture
                 .storage
                 .get_gmail_connection("alice@example.com")
@@ -5697,7 +5942,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(gmail_connection_is_active(Some(&connection)));
+        assert!(mailbox_connection_is_active(Some(&connection)));
         let mut bundle = crate::policies::provision_default_config("alice@example.com", Utc::now());
         bundle.draft.schedule_report_policy.scheduler_enabled = true;
         fixture.storage.upsert_org_config(&bundle).await.unwrap();
@@ -5727,7 +5972,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(!gmail_connection_is_active(Some(&connection)));
+        assert!(!mailbox_connection_is_active(Some(&connection)));
         let bundle = fixture
             .storage
             .get_org_config_for_user("alice@example.com")
@@ -6380,6 +6625,34 @@ mod tests {
         assert_eq!(legacy.config.internal_domains, vec!["legacy.test"]);
     }
 
+    /// Sin credenciales de Azure AD, Microsoft no debe ofrecerse ni aceptar un
+    /// connect: un botón que no puede funcionar es peor que ningún botón.
+    #[tokio::test]
+    async fn microsoft_connect_is_rejected_until_azure_ad_is_configured() {
+        let test = seeded_app().await;
+        let response = test
+            .app
+            .clone()
+            .oneshot(request(Method::GET, "/mailbox/providers", None, None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = response_json(response).await;
+        assert_eq!(body["providers"], json!(["google"]));
+
+        let response = test
+            .app
+            .oneshot(request(
+                Method::GET,
+                "/mailbox/connect/microsoft/login",
+                Some(&test.alice_cookie),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
     #[tokio::test]
     async fn owned_run_endpoints_require_session() {
         let test = seeded_app().await;
@@ -6472,7 +6745,7 @@ mod tests {
         for index in 0..4 {
             let mut thread = template.clone();
             thread.id = format!("ambiguous-{index}");
-            thread.gmail_thread_id = format!("gmail-ambiguous-{index}");
+            thread.thread_id = format!("gmail-ambiguous-{index}");
             thread.first_client_message_id = Some(format!("message-{index}"));
             test.storage
                 .upsert_thread(

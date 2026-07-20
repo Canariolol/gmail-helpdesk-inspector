@@ -12,13 +12,14 @@ use crate::{
     },
     auth::UserSession,
     billing::{Account, CheckoutSession, Subscription, UsageLedger},
-    mailbox::{FilterPreset, GmailConnection, MailboxMetadata},
+    mailbox::{FilterPreset, MailboxConnection, MailboxMetadata},
     policies::{OrgConfigBundle, PolicyVersion},
     scheduler::model::{ScheduleConfig, ScheduleState},
     storage::{
-        AnalysisDataDeletionAudit, GmailConnectionRefresh, ManualReviewInheritanceMigrationResult,
-        ManualReviewMetricsMigrationResult, ScheduleWindowClaim, StorageRepository,
-        clear_gmail_connection, existing_schedule_window_claim, gmail_connection_from_legacy,
+        AnalysisDataDeletionAudit, MailboxConnectionRefresh,
+        ManualReviewInheritanceMigrationResult, ManualReviewMetricsMigrationResult,
+        ScheduleWindowClaim, StorageRepository, clear_gmail_connection,
+        existing_schedule_window_claim, gmail_connection_from_legacy,
     },
 };
 
@@ -307,7 +308,7 @@ impl StorageRepository for PostgresStorage {
         self.get("user_session", id).await
     }
 
-    async fn upsert_gmail_connection(&self, connection: &GmailConnection) -> anyhow::Result<()> {
+    async fn upsert_gmail_connection(&self, connection: &MailboxConnection) -> anyhow::Result<()> {
         self.put(
             "gmail_connection",
             &normalize_email(&connection.owner_email),
@@ -329,7 +330,7 @@ impl StorageRepository for PostgresStorage {
     async fn get_gmail_connection(
         &self,
         owner_email: &str,
-    ) -> anyhow::Result<Option<GmailConnection>> {
+    ) -> anyhow::Result<Option<MailboxConnection>> {
         let id = normalize_email(owner_email);
         if let Some(connection) = self.get("gmail_connection", &id).await? {
             return Ok(Some(connection));
@@ -362,9 +363,9 @@ impl StorageRepository for PostgresStorage {
 
     async fn refresh_gmail_connection(
         &self,
-        previous: &GmailConnection,
-        updated: &GmailConnection,
-    ) -> anyhow::Result<GmailConnectionRefresh> {
+        previous: &MailboxConnection,
+        updated: &MailboxConnection,
+    ) -> anyhow::Result<MailboxConnectionRefresh> {
         let id = normalize_email(&previous.owner_email);
         let previous_data = serde_json::to_value(previous)?;
         let updated_data = serde_json::to_value(updated)?;
@@ -385,9 +386,9 @@ impl StorageRepository for PostgresStorage {
         .await?
         .rows_affected();
         Ok(if changed == 1 {
-            GmailConnectionRefresh::Updated
+            MailboxConnectionRefresh::Updated
         } else {
-            GmailConnectionRefresh::ConnectionChanged
+            MailboxConnectionRefresh::ConnectionChanged
         })
     }
 
@@ -939,11 +940,11 @@ impl StorageRepository for PostgresStorage {
             &format!(
                 "{}:{}",
                 normalize_email(&review.owner_email),
-                review.gmail_thread_id
+                review.thread_id
             ),
             RecordFields {
                 owner_email: Some(&review.owner_email),
-                thread_id: Some(&review.gmail_thread_id),
+                thread_id: Some(&review.thread_id),
                 run_id: Some(&review.source_run_id),
                 sort_at: Some(review.created_at),
                 ..Default::default()
@@ -956,11 +957,11 @@ impl StorageRepository for PostgresStorage {
     async fn get_manual_review_override(
         &self,
         owner_email: &str,
-        gmail_thread_id: &str,
+        thread_id: &str,
     ) -> anyhow::Result<Option<ManualReviewOverride>> {
         self.get(
             "manual_review_override",
-            &format!("{}:{gmail_thread_id}", normalize_email(owner_email)),
+            &format!("{}:{thread_id}", normalize_email(owner_email)),
         )
         .await
     }

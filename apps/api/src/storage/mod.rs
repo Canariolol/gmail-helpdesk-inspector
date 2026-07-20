@@ -17,7 +17,7 @@ use crate::{
     },
     auth::UserSession,
     billing::{Account, CheckoutSession, Subscription, UsageLedger},
-    mailbox::{FilterPreset, GmailConnection, MailboxMetadata},
+    mailbox::{FilterPreset, MailboxConnection, MailboxMetadata},
     policies::{OrgConfigBundle, PolicyVersion},
     scheduler::model::{ScheduleConfig, ScheduleRunStatus, ScheduleState},
 };
@@ -67,7 +67,7 @@ pub enum ScheduleWindowClaim {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GmailConnectionRefresh {
+pub enum MailboxConnectionRefresh {
     Updated,
     ConnectionChanged,
 }
@@ -93,16 +93,16 @@ pub trait StorageRepository: Send + Sync {
     ) -> anyhow::Result<()>;
     async fn upsert_user_session(&self, session: &UserSession) -> anyhow::Result<()>;
     async fn get_user_session(&self, id: &str) -> anyhow::Result<Option<UserSession>>;
-    async fn upsert_gmail_connection(&self, connection: &GmailConnection) -> anyhow::Result<()>;
+    async fn upsert_gmail_connection(&self, connection: &MailboxConnection) -> anyhow::Result<()>;
     async fn get_gmail_connection(
         &self,
         owner_email: &str,
-    ) -> anyhow::Result<Option<GmailConnection>>;
+    ) -> anyhow::Result<Option<MailboxConnection>>;
     async fn refresh_gmail_connection(
         &self,
-        previous: &GmailConnection,
-        updated: &GmailConnection,
-    ) -> anyhow::Result<GmailConnectionRefresh>;
+        previous: &MailboxConnection,
+        updated: &MailboxConnection,
+    ) -> anyhow::Result<MailboxConnectionRefresh>;
     async fn revoke_user_sessions(
         &self,
         owner_email: &str,
@@ -200,7 +200,7 @@ pub trait StorageRepository: Send + Sync {
     async fn get_manual_review_override(
         &self,
         owner_email: &str,
-        gmail_thread_id: &str,
+        thread_id: &str,
     ) -> anyhow::Result<Option<ManualReviewOverride>>;
     async fn reconcile_manual_review_metrics_v1(
         &self,
@@ -230,7 +230,7 @@ pub struct MemoryStorage {
 #[derive(Default)]
 struct MemoryInner {
     sessions: HashMap<String, UserSession>,
-    gmail_connections: HashMap<String, GmailConnection>,
+    gmail_connections: HashMap<String, MailboxConnection>,
     accounts: HashMap<String, Account>,
     runs: HashMap<String, AnalysisRun>,
     threads: HashMap<String, EmailThread>,
@@ -272,11 +272,8 @@ fn thread_storage_key(run_id: &str, thread_id: &str) -> String {
     format!("{run_id}:{thread_id}")
 }
 
-fn override_storage_key(owner_email: &str, gmail_thread_id: &str) -> String {
-    format!(
-        "{}:{gmail_thread_id}",
-        owner_email.trim().to_ascii_lowercase()
-    )
+fn override_storage_key(owner_email: &str, thread_id: &str) -> String {
+    format!("{}:{thread_id}", owner_email.trim().to_ascii_lowercase())
 }
 
 pub fn clear_gmail_connection(session: &mut UserSession, now: DateTime<Utc>) {
@@ -314,14 +311,16 @@ pub(crate) fn existing_schedule_window_claim(
 
 /// Compatibilidad de una sola vez para credenciales creadas antes de que la
 /// conexión Gmail se separara de la sesión web.
-pub fn gmail_connection_from_legacy(session: &UserSession) -> Option<GmailConnection> {
+pub fn gmail_connection_from_legacy(session: &UserSession) -> Option<MailboxConnection> {
     let access_token_encrypted = session.gmail_access_token_encrypted.clone().or_else(|| {
         (!session.access_token_encrypted.trim().is_empty())
             .then(|| session.access_token_encrypted.clone())
     })?;
-    Some(GmailConnection {
+    Some(MailboxConnection {
         owner_email: session.google_account_email.clone(),
-        gmail_account_email: session.gmail_account_email.clone()?,
+        // Las credenciales heredadas de la sesión solo pudieron venir de Google.
+        provider: crate::mailbox::MailboxProviderKind::Google,
+        mailbox_email: session.gmail_account_email.clone()?,
         access_token_encrypted,
         refresh_token_encrypted: session
             .gmail_refresh_token_encrypted
@@ -416,7 +415,7 @@ impl StorageRepository for MemoryStorage {
         Ok(self.inner.read().await.sessions.get(id).cloned())
     }
 
-    async fn upsert_gmail_connection(&self, connection: &GmailConnection) -> anyhow::Result<()> {
+    async fn upsert_gmail_connection(&self, connection: &MailboxConnection) -> anyhow::Result<()> {
         self.inner
             .write()
             .await
@@ -428,7 +427,7 @@ impl StorageRepository for MemoryStorage {
     async fn get_gmail_connection(
         &self,
         owner_email: &str,
-    ) -> anyhow::Result<Option<GmailConnection>> {
+    ) -> anyhow::Result<Option<MailboxConnection>> {
         let key = owner_key(owner_email);
         if let Some(connection) = self.inner.read().await.gmail_connections.get(&key).cloned() {
             return Ok(Some(connection));
@@ -470,23 +469,23 @@ impl StorageRepository for MemoryStorage {
 
     async fn refresh_gmail_connection(
         &self,
-        previous: &GmailConnection,
-        updated: &GmailConnection,
-    ) -> anyhow::Result<GmailConnectionRefresh> {
+        previous: &MailboxConnection,
+        updated: &MailboxConnection,
+    ) -> anyhow::Result<MailboxConnectionRefresh> {
         let mut inner = self.inner.write().await;
         let Some(current) = inner
             .gmail_connections
             .get(&owner_key(&previous.owner_email))
         else {
-            return Ok(GmailConnectionRefresh::ConnectionChanged);
+            return Ok(MailboxConnectionRefresh::ConnectionChanged);
         };
         if current.updated_at != previous.updated_at || current.revoked_at.is_some() {
-            return Ok(GmailConnectionRefresh::ConnectionChanged);
+            return Ok(MailboxConnectionRefresh::ConnectionChanged);
         }
         inner
             .gmail_connections
             .insert(owner_key(&updated.owner_email), updated.clone());
-        Ok(GmailConnectionRefresh::Updated)
+        Ok(MailboxConnectionRefresh::Updated)
     }
 
     async fn revoke_user_sessions(
@@ -997,7 +996,7 @@ impl StorageRepository for MemoryStorage {
         review: &ManualReviewOverride,
     ) -> anyhow::Result<()> {
         self.inner.write().await.manual_review_overrides.insert(
-            override_storage_key(&review.owner_email, &review.gmail_thread_id),
+            override_storage_key(&review.owner_email, &review.thread_id),
             review.clone(),
         );
         Ok(())
@@ -1006,14 +1005,14 @@ impl StorageRepository for MemoryStorage {
     async fn get_manual_review_override(
         &self,
         owner_email: &str,
-        gmail_thread_id: &str,
+        thread_id: &str,
     ) -> anyhow::Result<Option<ManualReviewOverride>> {
         Ok(self
             .inner
             .read()
             .await
             .manual_review_overrides
-            .get(&override_storage_key(owner_email, gmail_thread_id))
+            .get(&override_storage_key(owner_email, thread_id))
             .cloned())
     }
 
@@ -1104,7 +1103,7 @@ impl StorageRepository for MemoryStorage {
                 .unwrap_or_default();
             let inherited = ManualReviewOverride {
                 owner_email: run.user_email.clone(),
-                gmail_thread_id: review.email_thread_id.clone(),
+                thread_id: review.email_thread_id.clone(),
                 source_run_id: run_id,
                 message_fingerprint: message_fingerprint(&messages),
                 reviewer_label: review.reviewer_label,
@@ -1116,7 +1115,7 @@ impl StorageRepository for MemoryStorage {
                 notes: review.notes,
                 created_at: review.created_at,
             };
-            let key = override_storage_key(&inherited.owner_email, &inherited.gmail_thread_id);
+            let key = override_storage_key(&inherited.owner_email, &inherited.thread_id);
             let should_replace = inner
                 .manual_review_overrides
                 .get(&key)
@@ -1160,10 +1159,7 @@ impl StorageRepository for MemoryStorage {
                     };
                     let Some(review) = inner
                         .manual_review_overrides
-                        .get(&override_storage_key(
-                            &run.user_email,
-                            &snapshot.gmail_thread_id,
-                        ))
+                        .get(&override_storage_key(&run.user_email, &snapshot.thread_id))
                         .cloned()
                     else {
                         continue;
@@ -1370,9 +1366,10 @@ mod tests {
             .await
             .unwrap();
         storage
-            .upsert_gmail_connection(&GmailConnection {
+            .upsert_gmail_connection(&MailboxConnection {
                 owner_email: "owner@example.com".to_string(),
-                gmail_account_email: "owner@example.com".to_string(),
+                provider: crate::mailbox::MailboxProviderKind::Google,
+                mailbox_email: "owner@example.com".to_string(),
                 access_token_encrypted: "access".to_string(),
                 refresh_token_encrypted: Some("r2".to_string()),
                 connected_at: Utc::now(),
@@ -1417,9 +1414,10 @@ mod tests {
     #[tokio::test]
     async fn refresh_does_not_restore_a_gmail_connection_after_disconnect() {
         let storage = MemoryStorage::default();
-        let previous = GmailConnection {
+        let previous = MailboxConnection {
             owner_email: "owner@example.com".to_string(),
-            gmail_account_email: "owner@example.com".to_string(),
+            provider: crate::mailbox::MailboxProviderKind::Google,
+            mailbox_email: "owner@example.com".to_string(),
             access_token_encrypted: "old-access".to_string(),
             refresh_token_encrypted: Some("old-refresh".to_string()),
             connected_at: Utc::now(),
@@ -1440,7 +1438,7 @@ mod tests {
                 .refresh_gmail_connection(&previous, &refreshed)
                 .await
                 .unwrap(),
-            GmailConnectionRefresh::ConnectionChanged
+            MailboxConnectionRefresh::ConnectionChanged
         );
         let stored = storage
             .get_gmail_connection("owner@example.com")
@@ -1624,7 +1622,7 @@ mod tests {
             |id: &str, classification: Classification, is_valid_client_request: bool| EmailThread {
                 id: id.to_string(),
                 analysis_run_id: "legacy-run".to_string(),
-                gmail_thread_id: format!("gmail-{id}"),
+                thread_id: format!("gmail-{id}"),
                 subject: "Legacy".to_string(),
                 normalized_subject: "legacy".to_string(),
                 classification,
@@ -1757,7 +1755,7 @@ mod tests {
         let make_thread = |run_id: &str, id: &str| EmailThread {
             id: id.to_string(),
             analysis_run_id: run_id.to_string(),
-            gmail_thread_id: id.to_string(),
+            thread_id: id.to_string(),
             subject: id.to_string(),
             normalized_subject: id.to_string(),
             classification: Classification::Ambiguous,
@@ -1783,7 +1781,7 @@ mod tests {
         };
         let make_message = |id: &str| EmailMessage {
             id: id.to_string(),
-            gmail_message_id: id.to_string(),
+            message_id: id.to_string(),
             from_email: "client@example.net".to_string(),
             from_name: None,
             to_emails: vec!["support@example.com".to_string()],

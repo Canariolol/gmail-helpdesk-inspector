@@ -24,14 +24,15 @@ use crate::{
     auth::UserSession,
     billing::{Account, CheckoutSession, Subscription, UsageLedger},
     config::{FirestoreConfig, ServiceAccountKey},
-    mailbox::{FilterPreset, GmailConnection, MailboxMetadata, gmail_connection_is_active},
+    mailbox::{FilterPreset, MailboxConnection, MailboxMetadata, mailbox_connection_is_active},
     policies::{OrgConfigBundle, PolicyVersion, hash_owner_email},
     postgres::PostgresStorage,
     scheduler::model::{ScheduleConfig, ScheduleState},
     storage::{
-        AnalysisDataDeletionAudit, GmailConnectionRefresh, ManualReviewInheritanceMigrationResult,
-        ManualReviewMetricsMigrationResult, ScheduleWindowClaim, StorageRepository,
-        clear_gmail_connection, existing_schedule_window_claim, gmail_connection_from_legacy,
+        AnalysisDataDeletionAudit, MailboxConnectionRefresh,
+        ManualReviewInheritanceMigrationResult, ManualReviewMetricsMigrationResult,
+        ScheduleWindowClaim, StorageRepository, clear_gmail_connection,
+        existing_schedule_window_claim, gmail_connection_from_legacy,
     },
 };
 
@@ -504,7 +505,10 @@ impl FirestoreStorage {
             target.upsert_user_session(&session).await?;
             counts.sessions += 1;
         }
-        for connection in self.list::<GmailConnection>("", "gmailConnections").await? {
+        for connection in self
+            .list::<MailboxConnection>("", "gmailConnections")
+            .await?
+        {
             target.upsert_gmail_connection(&connection).await?;
             if let Some(metadata) = self.get_mailbox_metadata(&connection.owner_email).await? {
                 target
@@ -698,7 +702,7 @@ impl StorageRepository for FirestoreStorage {
         self.get(&format!("users/{id}")).await
     }
 
-    async fn upsert_gmail_connection(&self, connection: &GmailConnection) -> anyhow::Result<()> {
+    async fn upsert_gmail_connection(&self, connection: &MailboxConnection) -> anyhow::Result<()> {
         self.put(
             &format!(
                 "gmailConnections/{}",
@@ -712,7 +716,7 @@ impl StorageRepository for FirestoreStorage {
     async fn get_gmail_connection(
         &self,
         owner_email: &str,
-    ) -> anyhow::Result<Option<GmailConnection>> {
+    ) -> anyhow::Result<Option<MailboxConnection>> {
         let path = format!("gmailConnections/{}", hash_owner_email(owner_email));
         if let Some(connection) = self.get(&path).await? {
             return Ok(Some(connection));
@@ -756,29 +760,31 @@ impl StorageRepository for FirestoreStorage {
 
     async fn refresh_gmail_connection(
         &self,
-        previous: &GmailConnection,
-        updated: &GmailConnection,
-    ) -> anyhow::Result<GmailConnectionRefresh> {
+        previous: &MailboxConnection,
+        updated: &MailboxConnection,
+    ) -> anyhow::Result<MailboxConnectionRefresh> {
         let path = format!(
             "gmailConnections/{}",
             hash_owner_email(&previous.owner_email)
         );
-        let Some((current, update_time)) =
-            self.get_with_update_time::<GmailConnection>(&path).await?
+        let Some((current, update_time)) = self
+            .get_with_update_time::<MailboxConnection>(&path)
+            .await?
         else {
-            return Ok(GmailConnectionRefresh::ConnectionChanged);
+            return Ok(MailboxConnectionRefresh::ConnectionChanged);
         };
-        if current.updated_at != previous.updated_at || !gmail_connection_is_active(Some(&current))
+        if current.updated_at != previous.updated_at
+            || !mailbox_connection_is_active(Some(&current))
         {
-            return Ok(GmailConnectionRefresh::ConnectionChanged);
+            return Ok(MailboxConnectionRefresh::ConnectionChanged);
         }
         if self
             .put_if_current(&path, updated, Some(&update_time))
             .await?
         {
-            Ok(GmailConnectionRefresh::Updated)
+            Ok(MailboxConnectionRefresh::Updated)
         } else {
-            Ok(GmailConnectionRefresh::ConnectionChanged)
+            Ok(MailboxConnectionRefresh::ConnectionChanged)
         }
     }
 
@@ -825,7 +831,7 @@ impl StorageRepository for FirestoreStorage {
         now: chrono::DateTime<Utc>,
     ) -> anyhow::Result<()> {
         let connection_path = format!("gmailConnections/{}", hash_owner_email(owner_email));
-        if let Some(mut connection) = self.get::<GmailConnection>(&connection_path).await? {
+        if let Some(mut connection) = self.get::<MailboxConnection>(&connection_path).await? {
             connection.access_token_encrypted.clear();
             connection.refresh_token_encrypted = None;
             connection.revoked_at = Some(now);
@@ -1290,7 +1296,7 @@ impl StorageRepository for FirestoreStorage {
             &format!(
                 "ownerProfiles/{}/manualReviewOverrides/{}",
                 hash_owner_email(&review.owner_email),
-                review.gmail_thread_id
+                review.thread_id
             ),
             review,
         )
@@ -1300,10 +1306,10 @@ impl StorageRepository for FirestoreStorage {
     async fn get_manual_review_override(
         &self,
         owner_email: &str,
-        gmail_thread_id: &str,
+        thread_id: &str,
     ) -> anyhow::Result<Option<ManualReviewOverride>> {
         self.get(&format!(
-            "ownerProfiles/{}/manualReviewOverrides/{gmail_thread_id}",
+            "ownerProfiles/{}/manualReviewOverrides/{thread_id}",
             hash_owner_email(owner_email)
         ))
         .await
@@ -1400,7 +1406,7 @@ impl StorageRepository for FirestoreStorage {
                 let messages = self.list_messages(&run.id, &review.email_thread_id).await?;
                 let inherited = ManualReviewOverride {
                     owner_email: run.user_email.clone(),
-                    gmail_thread_id: review.email_thread_id.clone(),
+                    thread_id: review.email_thread_id.clone(),
                     source_run_id: run.id.clone(),
                     message_fingerprint: message_fingerprint(&messages),
                     reviewer_label: review.reviewer_label,
@@ -1415,7 +1421,7 @@ impl StorageRepository for FirestoreStorage {
                 let key = format!(
                     "{}:{}",
                     inherited.owner_email.trim().to_ascii_lowercase(),
-                    inherited.gmail_thread_id
+                    inherited.thread_id
                 );
                 if overrides
                     .get(&key)
@@ -1456,7 +1462,7 @@ impl StorageRepository for FirestoreStorage {
                     let key = format!(
                         "{}:{}",
                         run.user_email.trim().to_ascii_lowercase(),
-                        thread.gmail_thread_id
+                        thread.thread_id
                     );
                     let Some(review) = overrides.get(&key) else {
                         continue;

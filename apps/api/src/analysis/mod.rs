@@ -112,7 +112,8 @@ pub enum ThreadDisposition {
 /// usuario pueda ver CUÁLES se cayeron y por qué (nunca guarda el cuerpo).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DroppedThreadInfo {
-    pub gmail_thread_id: String,
+    #[serde(alias = "gmail_thread_id")]
+    pub thread_id: String,
     pub subject: String,
     #[serde(default)]
     pub first_message_at: Option<DateTime<Utc>>,
@@ -255,7 +256,8 @@ pub struct AnalysisRun {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmailMessage {
     pub id: String,
-    pub gmail_message_id: String,
+    #[serde(alias = "gmail_message_id")]
+    pub message_id: String,
     pub from_email: String,
     pub from_name: Option<String>,
     pub to_emails: Vec<String>,
@@ -275,7 +277,8 @@ pub struct EmailMessage {
 pub struct EmailThread {
     pub id: String,
     pub analysis_run_id: String,
-    pub gmail_thread_id: String,
+    #[serde(alias = "gmail_thread_id")]
+    pub thread_id: String,
     pub subject: String,
     pub normalized_subject: String,
     pub classification: Classification,
@@ -356,7 +359,8 @@ pub struct ManualReview {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManualReviewOverride {
     pub owner_email: String,
-    pub gmail_thread_id: String,
+    #[serde(alias = "gmail_thread_id")]
+    pub thread_id: String,
     pub source_run_id: String,
     pub message_fingerprint: String,
     pub reviewer_label: String,
@@ -474,7 +478,7 @@ pub fn normalize_subject(subject: &str) -> String {
 
 pub fn classify_thread(
     analysis_run_id: &str,
-    gmail_thread_id: &str,
+    thread_id: &str,
     messages: &[EmailMessage],
     config: &AnalysisConfig,
 ) -> EmailThread {
@@ -491,7 +495,7 @@ pub fn classify_thread(
         reasons.push("El hilo no tiene mensajes legibles.".to_string());
         return build_thread(
             analysis_run_id,
-            gmail_thread_id,
+            thread_id,
             subject,
             normalized_subject,
             Classification::Ambiguous,
@@ -542,7 +546,7 @@ pub fn classify_thread(
         reasons.push(reason.to_string());
         return build_thread(
             analysis_run_id,
-            gmail_thread_id,
+            thread_id,
             subject,
             normalized_subject,
             classification,
@@ -572,7 +576,7 @@ pub fn classify_thread(
         );
         return ignored_thread(
             analysis_run_id,
-            gmail_thread_id,
+            thread_id,
             subject,
             normalized_subject,
             Some(first_message.date),
@@ -680,7 +684,7 @@ pub fn classify_thread(
 
     build_thread(
         analysis_run_id,
-        gmail_thread_id,
+        thread_id,
         subject,
         normalized_subject,
         classification,
@@ -737,7 +741,7 @@ fn subject_looks_like_newsletter(lower_subject: &str) -> bool {
 
 fn ignored_thread(
     analysis_run_id: &str,
-    gmail_thread_id: &str,
+    thread_id: &str,
     subject: String,
     normalized_subject: String,
     first_message_at: Option<DateTime<Utc>>,
@@ -746,7 +750,7 @@ fn ignored_thread(
 ) -> EmailThread {
     build_thread(
         analysis_run_id,
-        gmail_thread_id,
+        thread_id,
         subject,
         normalized_subject,
         Classification::Misc,
@@ -767,7 +771,7 @@ fn ignored_thread(
 #[allow(clippy::too_many_arguments)]
 fn build_thread(
     analysis_run_id: &str,
-    gmail_thread_id: &str,
+    thread_id: &str,
     subject: String,
     normalized_subject: String,
     classification: Classification,
@@ -784,9 +788,9 @@ fn build_thread(
     now: DateTime<Utc>,
 ) -> EmailThread {
     EmailThread {
-        id: gmail_thread_id.to_string(),
+        id: thread_id.to_string(),
         analysis_run_id: analysis_run_id.to_string(),
-        gmail_thread_id: gmail_thread_id.to_string(),
+        thread_id: thread_id.to_string(),
         subject,
         normalized_subject,
         classification,
@@ -1021,7 +1025,7 @@ const GMAIL_FORUMS_LABEL: &str = "CATEGORY_FORUMS";
 /// conservador: ante un conflicto con un veredicto "válido" de reglas/heurística
 /// no invierte a ciegas, sino que enruta a revisión manual (y, para Promociones,
 /// marca Newsletter). No toca resultados ya aplicados por IA o revisión manual.
-pub fn refine_classification_with_gmail_labels(thread: &mut EmailThread, gmail_labels: &[String]) {
+pub fn refine_classification_with_folders(thread: &mut EmailThread, gmail_labels: &[String]) {
     if matches!(
         thread.classification_source,
         ClassificationSource::Ai | ClassificationSource::Manual
@@ -1229,10 +1233,64 @@ pub fn rescue_classification_with_valid_signals(
 mod tests {
     use super::*;
 
+    /// Los registros ya persistidos en `mira.records` usan los nombres antiguos
+    /// `gmail_thread_id`/`gmail_message_id`. El renombre a nombres neutrales solo
+    /// es seguro mientras los alias sigan leyéndolos: sin esto, los runs
+    /// históricos dejarían de deserializar.
+    #[test]
+    fn reads_legacy_gmail_prefixed_ids_from_stored_json() {
+        let dropped: DroppedThreadInfo = serde_json::from_value(serde_json::json!({
+            "gmail_thread_id": "t1",
+            "subject": "asunto",
+            "reason": "dropped_not_primary_inbox",
+        }))
+        .expect("DroppedThreadInfo legacy");
+        assert_eq!(dropped.thread_id, "t1");
+
+        let message: EmailMessage = serde_json::from_value(serde_json::json!({
+            "id": "m1",
+            "gmail_message_id": "gm1",
+            "from_email": "a@x.cl",
+            "from_name": null,
+            "to_emails": [],
+            "cc_emails": [],
+            "date": "2026-01-01T00:00:00Z",
+            "subject": "s",
+            "snippet": "",
+            "headers": {},
+            "is_internal": false,
+            "is_external": true,
+            "is_automated": false,
+        }))
+        .expect("EmailMessage legacy");
+        assert_eq!(message.message_id, "gm1");
+
+        let override_json = serde_json::json!({
+            "owner_email": "o@x.cl",
+            "gmail_thread_id": "t2",
+            "source_run_id": "r1",
+            "message_fingerprint": "f",
+            "reviewer_label": "l",
+            "classification": "valid_client_request",
+            "is_answered": true,
+            "first_client_message_id": null,
+            "first_internal_reply_message_id": null,
+            "last_internal_message_id": null,
+            "notes": null,
+            "response_time_minutes": null,
+            "resolution_time_minutes": null,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+        });
+        let review: ManualReviewOverride =
+            serde_json::from_value(override_json).expect("ManualReviewOverride legacy");
+        assert_eq!(review.thread_id, "t2");
+    }
+
     fn msg(id: &str, from: &str, internal: bool, at_minute: i64) -> EmailMessage {
         EmailMessage {
             id: id.to_string(),
-            gmail_message_id: id.to_string(),
+            message_id: id.to_string(),
             from_email: from.to_string(),
             from_name: None,
             to_emails: vec![],
@@ -1436,7 +1494,7 @@ mod tests {
         assert_eq!(thread.classification, Classification::ValidClientRequest);
         assert!(thread.is_valid_client_request);
 
-        refine_classification_with_gmail_labels(
+        refine_classification_with_folders(
             &mut thread,
             &["INBOX".to_string(), "CATEGORY_PROMOTIONS".to_string()],
         );
@@ -1470,7 +1528,7 @@ mod tests {
             &config,
         );
         thread.classification_source = ClassificationSource::Ai;
-        refine_classification_with_gmail_labels(&mut thread, &["CATEGORY_PROMOTIONS".to_string()]);
+        refine_classification_with_folders(&mut thread, &["CATEGORY_PROMOTIONS".to_string()]);
         // La IA manda: no se reclasifica ni se fuerza revisión por la etiqueta.
         assert_eq!(thread.classification, Classification::ValidClientRequest);
         assert!(thread.is_valid_client_request);
