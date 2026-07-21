@@ -55,10 +55,10 @@ export function PricingPlans({
                 <Check size={15} /> {plan.limits.runs_per_month} análisis al mes
               </li>
               <li>
-                <Check size={15} /> {formatClp(plan.limits.analyzed_threads_per_month)} hilos analizados/mes
+                <Check size={15} /> {formatClp(plan.limits.retrieved_threads_per_month)} correos revisados/mes
               </li>
               <li>
-                <Check size={15} /> {formatClp(plan.limits.ai_audited_threads_per_month)} hilos auditados por Ninfa/mes
+                <Check size={15} /> {formatClp(plan.limits.ai_analyzed_threads_per_month)} hilos auditados por Ninfa/mes
               </li>
               <li>
                 <Check size={15} /> {plan.limits.mailboxes} casilla{plan.limits.mailboxes > 1 ? "s" : ""} ·{" "}

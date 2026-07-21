@@ -467,9 +467,12 @@ export function App() {
   const runsCreated = usage.data?.usage.runs_created ?? 0;
   const runsLimitReached = !isBlocked && runsLimit !== null && runsCreated >= runsLimit;
   // El cupo mensual de Free se mide en hilos ANALIZADOS, no solo en #análisis.
-  const analyzedLimit = usage.data?.limits?.analyzed_threads_per_month ?? null;
-  const analyzedUsed = usage.data?.usage.analyzed_threads ?? 0;
-  const analyzedLimitReached = !isBlocked && analyzedLimit !== null && analyzedUsed >= analyzedLimit;
+  // Cupos que BLOQUEAN un análisis nuevo: runs y correos recuperados. El cupo de
+  // IA no bloquea (degrada a heurística) y se informa en el reporte del run.
+  const retrievedLimit = usage.data?.limits?.retrieved_threads_per_month ?? null;
+  const retrievedUsed = usage.data?.usage.retrieved_threads ?? 0;
+  const retrievedLimitReached =
+    !isBlocked && retrievedLimit !== null && retrievedUsed >= retrievedLimit;
   const effectiveView = isBlocked && DATA_VIEWS.includes(view) ? "cuenta" : view;
 
   return (
@@ -484,11 +487,11 @@ export function App() {
       />
       <main className="main-area">
         {isBlocked && <BlockedBanner onReactivate={() => setView("cuenta")} />}
-        {analyzedLimitReached && analyzedLimit !== null ? (
+        {retrievedLimitReached && retrievedLimit !== null ? (
           <UsageLimitBanner
-            used={analyzedUsed}
-            limit={analyzedLimit}
-            unitLabel="hilos analizados"
+            used={retrievedUsed}
+            limit={retrievedLimit}
+            unitLabel="correos revisados"
             planName={planName}
             onUpgrade={openPlans}
           />

@@ -241,10 +241,12 @@ explícita (decisión 0.1.2).
   `AADSTS700082`/`invalid_grant` en el cuerpo. Se mapea a la misma
   `RefreshError::InvalidGrant`.
 
-## 9. [CONGELADO] Detección por MX y auto-redirect
+## 9. [IMPLEMENTADO 2026-07-21] Detección por MX y auto-redirect
 
-> No entra en esta entrega (decisión 0.1.4). Se conserva el diseño para cuando
-> llegue IMAP y la tercera opción "No estoy seguro / otro" lo justifique.
+> Se descongeló y construyó como **Fase A**, sin esperar a IMAP: la mayoría de
+> quienes no saben su proveedor sí están en Google o Microsoft, así que encaminarlos
+> ya resuelve el problema. Los dominios que no lo están reciben un aviso claro de
+> que el soporte está en implementación. Ver etapa D en §13.
 
 Cuando el usuario escribe su correo en la opción 3, Mira detectaría el proveedor
 por los registros MX del dominio (no por el sufijo — el sufijo miente:
@@ -365,7 +367,30 @@ visibles; y los defaults de dominios ignorados sesgados a `google.com`.
     legales necesitan tu lectura antes de publicarse**: cambió el alcance
     declarado del servicio y la lista de subprocesadores.
 
-**Fase posterior — IMAP**, solo cuando un cliente de pago lo bloquee.
+**Etapa D — tercera opción con detección MX (Fase A, sin IMAP) — HECHA 2026-07-21**
+15. [x] `provider_detect.rs`: MX por DNS-over-HTTPS con el cliente HTTP existente
+    (sin resolver como dependencia). Clasifica Google / Microsoft / Unsupported /
+    Unknown por sufijo de host con límite de etiqueta.
+16. [x] `GET /mailbox/detect?email=` con sesión requerida y rate limit por cuenta
+    (20/h): el endpoint hace DNS saliente con un dominio que aporta el usuario.
+17. [x] `login_hint` opcional en ambos connects: preselecciona la casilla que el
+    usuario escribió, no la cuenta con la que inició sesión en Mira.
+18. [x] Opción "No estoy seguro / otro" en `MailboxConnectGate`: detecta y
+    auto-redirige al OAuth correcto; si no es Google ni Microsoft, avisa que el
+    soporte para otros proveedores está en implementación.
+19. [x] **Desenmascarado de gateways**: un MX de Proofpoint/Mimecast/Cisco/etc. ya
+    no se reporta como `Unsupported`. Se consulta el SPF del dominio, que sí declara
+    la infraestructura real (`_spf.google.com`, `spf.protection.outlook.com`) porque
+    el gateway solo intercepta la entrada. Si el SPF tampoco lo delata, es `Unknown`,
+    nunca `Unsupported`.
+20. [x] Lista de espera: `kind=provider_waitlist` en `mira.records` (sin migración)
+    con correo, dominio, veredicto y **los MX observados** — esos MX son la fuente
+    para reconocer gateways todavía no clasificados. Solo se escribe; la lectura es
+    manual por ahora.
+
+**Fase B — IMAP**: evaluada el 2026-07-21, **sin motivo bloqueante**. Se difiere
+por costo (~5–8 d) hasta medir cuántos usuarios caen en `Unsupported`. Riesgo que
+exige cuidado al construirla: SSRF (el host lo aporta el usuario).
 
 ---
 

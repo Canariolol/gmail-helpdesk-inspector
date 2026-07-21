@@ -36,13 +36,15 @@ export interface AnalysisFunnel {
   // Tope del plan: hilos analizables que quedaron fuera por el cupo del plan.
   skipped_by_plan_cap?: number;
   truncated_by_plan?: boolean;
-  plan_analyzed_cap?: number | null;
-  would_be_analyzed?: number | null;
+  plan_reported_cap?: number | null;
+  would_be_reported?: number | null;
   more_beyond_retrieved?: boolean;
   ai_batch_classified?: number;
   ai_detailed_audited?: number;
   ai_unique_threads?: number;
   ai_calls?: number;
+  // Hilos que no se auditaron por agotarse el cupo mensual de IA del plan.
+  ai_skipped_by_budget?: number;
 }
 
 export interface Metrics {
@@ -137,18 +139,19 @@ export interface ThreadDetail {
 
 // ---- Account / Billing ----
 
-export type BillingPlanId = "gratis" | "inicial" | "pro" | "equipo";
+export type BillingPlanId = "gratis" | "inicial" | "pro";
 export type SubscriptionStatus = "pending" | "trialing" | "active" | "past_due" | "cancelled" | "expired";
 
 export interface PlanLimits {
   mailboxes: number;
   members: number;
   runs_per_month: number;
-  // Cupo mensual de hilos efectivamente ANALIZADOS (no los recuperados de Gmail).
-  analyzed_threads_per_month: number;
-  // Tope de hilos analizados por análisis (UNLIMITED en planes de pago).
-  analyzed_threads_per_run: number;
-  ai_audited_threads_per_month: number;
+  // Cupo mensual de hilos RECUPERADOS de la casilla (holgado, anti-abuso).
+  retrieved_threads_per_month: number;
+  // Tope de hilos que entran al informe en cada análisis (UNLIMITED en planes de pago).
+  reported_threads_per_run: number;
+  // Cupo mensual de hilos enviados a la IA: el límite que cuesta dinero.
+  ai_analyzed_threads_per_month: number;
   report_recipients: number;
   retention_days: number;
 }
@@ -204,9 +207,10 @@ export interface UsageLedger {
   org_id: string;
   period_key: string;
   runs_created: number;
-  // Hilos efectivamente ANALIZADOS (guardados) en el período, no los recuperados.
-  analyzed_threads: number;
-  ai_audited_threads: number;
+  // Hilos RECUPERADOS de la casilla en el período.
+  retrieved_threads: number;
+  // Hilos enviados a la IA en el período.
+  ai_analyzed_threads: number;
   updated_at: string;
 }
 

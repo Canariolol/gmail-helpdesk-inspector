@@ -8,6 +8,7 @@ mod http;
 mod mailbox;
 mod policies;
 mod postgres;
+mod provider_detect;
 mod report;
 mod scheduler;
 mod storage;

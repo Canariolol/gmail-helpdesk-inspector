@@ -7,7 +7,6 @@ pub enum BillingPlanId {
     Gratis,
     Inicial,
     Pro,
-    Equipo,
 }
 
 impl BillingPlanId {
@@ -16,7 +15,6 @@ impl BillingPlanId {
             Self::Gratis => "gratis",
             Self::Inicial => "inicial",
             Self::Pro => "pro",
-            Self::Equipo => "equipo",
         }
     }
 
@@ -25,7 +23,6 @@ impl BillingPlanId {
             "gratis" => Some(Self::Gratis),
             "inicial" => Some(Self::Inicial),
             "pro" => Some(Self::Pro),
-            "equipo" => Some(Self::Equipo),
             _ => None,
         }
     }
@@ -42,22 +39,29 @@ pub struct BillingPlan {
     pub highlighted: bool,
 }
 
-/// Centinela para "sin tope de hilos analizados por análisis" (planes de pago):
-/// `analyzed_threads_per_run` con este valor significa que el plan no limita el run
-/// (el límite real lo pone la policy de recuperación y el cupo mensual).
-pub const UNLIMITED_ANALYZED_PER_RUN: u32 = u32::MAX;
+/// Centinela para "sin tope de hilos en el reporte por análisis" (planes de pago).
+pub const UNLIMITED_REPORTED_PER_RUN: u32 = u32::MAX;
 
+/// Límites de un plan. Tres magnitudes distintas, a propósito:
+///
+/// - **recuperados**: hilos sacados de la casilla. Cuestan cuota de API, no dinero;
+///   el cupo es holgado y actúa como válvula anti-abuso.
+/// - **reportados**: los que sobreviven el embudo y entran al informe. Se topan por
+///   análisis (no al mes) para que un plan chico siga dando un informe útil.
+/// - **analizados por IA**: los que efectivamente van a Ninfa. Es el único costo
+///   real (tokens de Bedrock) y por eso es el cupo estricto.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanLimits {
     pub mailboxes: u32,
     pub members: u32,
     pub runs_per_month: u32,
-    /// Cupo mensual de hilos efectivamente ANALIZADOS (los que sobreviven el embudo
-    /// y se guardan), no los recuperados de Gmail.
-    pub analyzed_threads_per_month: u32,
-    /// Tope de hilos ANALIZADOS por cada análisis. `UNLIMITED_ANALYZED_PER_RUN` = sin tope.
-    pub analyzed_threads_per_run: u32,
-    pub ai_audited_threads_per_month: u32,
+    /// Cupo mensual de hilos RECUPERADOS de la casilla.
+    pub retrieved_threads_per_month: u32,
+    /// Tope de hilos que entran al informe en cada análisis.
+    /// `UNLIMITED_REPORTED_PER_RUN` = sin tope.
+    pub reported_threads_per_run: u32,
+    /// Cupo mensual de hilos enviados a la IA. El límite que cuesta dinero.
+    pub ai_analyzed_threads_per_month: u32,
     pub report_recipients: u32,
     pub retention_days: u32,
 }
@@ -132,10 +136,12 @@ pub struct UsageLedger {
     pub org_id: String,
     pub period_key: String,
     pub runs_created: u32,
-    /// Hilos efectivamente ANALIZADOS (guardados) en el período, no los recuperados.
-    #[serde(default, alias = "candidate_threads")]
-    pub analyzed_threads: u32,
-    pub ai_audited_threads: u32,
+    /// Hilos RECUPERADOS de la casilla en el período.
+    #[serde(default, alias = "candidate_threads", alias = "analyzed_threads")]
+    pub retrieved_threads: u32,
+    /// Hilos enviados a la IA en el período.
+    #[serde(default, alias = "ai_audited_threads")]
+    pub ai_analyzed_threads: u32,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -163,10 +169,10 @@ pub fn public_plans() -> Vec<BillingPlan> {
             limits: PlanLimits {
                 mailboxes: 1,
                 members: 1,
-                runs_per_month: 10,
-                analyzed_threads_per_month: 1_000,
-                analyzed_threads_per_run: UNLIMITED_ANALYZED_PER_RUN,
-                ai_audited_threads_per_month: 250,
+                runs_per_month: 40,
+                retrieved_threads_per_month: 4_000,
+                reported_threads_per_run: UNLIMITED_REPORTED_PER_RUN,
+                ai_analyzed_threads_per_month: 800,
                 report_recipients: 3,
                 retention_days: 30,
             },
@@ -179,32 +185,14 @@ pub fn public_plans() -> Vec<BillingPlan> {
             trial_days: 30,
             highlighted: true,
             limits: PlanLimits {
-                mailboxes: 2,
+                mailboxes: 3,
                 members: 3,
-                runs_per_month: 50,
-                analyzed_threads_per_month: 7_500,
-                analyzed_threads_per_run: UNLIMITED_ANALYZED_PER_RUN,
-                ai_audited_threads_per_month: 2_000,
+                runs_per_month: 120,
+                retrieved_threads_per_month: 15_000,
+                reported_threads_per_run: UNLIMITED_REPORTED_PER_RUN,
+                ai_analyzed_threads_per_month: 3_000,
                 report_recipients: 10,
                 retention_days: 90,
-            },
-        },
-        BillingPlan {
-            id: BillingPlanId::Equipo,
-            name: "Equipo".to_string(),
-            usd_reference_monthly: 99,
-            clp_monthly: 99_990,
-            trial_days: 0,
-            highlighted: false,
-            limits: PlanLimits {
-                mailboxes: 5,
-                members: 10,
-                runs_per_month: 200,
-                analyzed_threads_per_month: 25_000,
-                analyzed_threads_per_run: UNLIMITED_ANALYZED_PER_RUN,
-                ai_audited_threads_per_month: 8_000,
-                report_recipients: 25,
-                retention_days: 180,
             },
         },
     ]
@@ -212,8 +200,7 @@ pub fn public_plans() -> Vec<BillingPlan> {
 
 /// Plan gratuito por defecto (sin tarjeta). No es comprable: se asigna como plan
 /// vigente cuando una org no tiene suscripción que dé acceso (nueva o churned).
-/// Límites mini, todos tuneables aquí. El cupo IA permite que cualquier hilo
-/// analizado pueda entrar al embudo batch, sin obligar a auditar todos individualmente.
+/// Límites mini, todos tuneables aquí.
 pub fn free_plan() -> BillingPlan {
     BillingPlan {
         id: BillingPlanId::Gratis,
@@ -225,11 +212,10 @@ pub fn free_plan() -> BillingPlan {
         limits: PlanLimits {
             mailboxes: 1,
             members: 1,
-            // Backstop anti-abuso; el límite real es el cupo de hilos analizados.
-            runs_per_month: 15,
-            analyzed_threads_per_month: 120,
-            analyzed_threads_per_run: 40,
-            ai_audited_threads_per_month: 120,
+            runs_per_month: 10,
+            retrieved_threads_per_month: 400,
+            reported_threads_per_run: 40,
+            ai_analyzed_threads_per_month: 100,
             report_recipients: 1,
             retention_days: 14,
         },
@@ -359,22 +345,34 @@ mod tests {
     }
 
     #[test]
-    fn free_plan_caps_analyzed_and_has_matching_ai_eligibility() {
+    fn free_plan_keeps_ai_as_the_strictest_quota() {
         let limits = free_plan().limits;
-        assert_eq!(limits.analyzed_threads_per_run, 40);
-        assert_eq!(limits.analyzed_threads_per_month, 120);
-        // Todo hilo analizado puede ser elegible para el batch sin exceder el cupo.
-        assert_eq!(
-            limits.ai_audited_threads_per_month,
-            limits.analyzed_threads_per_month
-        );
+        assert_eq!(limits.reported_threads_per_run, 40);
+        assert_eq!(limits.retrieved_threads_per_month, 400);
+        assert_eq!(limits.ai_analyzed_threads_per_month, 100);
+    }
+
+    /// El cupo de IA es el que cuesta dinero: debe ser el más estricto en todos
+    /// los planes, siempre por debajo de los hilos recuperados.
+    #[test]
+    fn ai_quota_is_stricter_than_retrieval_in_every_plan() {
+        let plans = public_plans()
+            .into_iter()
+            .chain(std::iter::once(free_plan()));
+        for plan in plans {
+            assert!(
+                plan.limits.ai_analyzed_threads_per_month < plan.limits.retrieved_threads_per_month,
+                "{}: el cupo IA debe ser menor que el de recuperados",
+                plan.name
+            );
+        }
     }
 
     #[test]
-    fn paid_plans_have_no_per_run_analyzed_cap() {
+    fn paid_plans_have_no_per_run_reported_cap() {
         for plan in public_plans() {
             assert_eq!(
-                plan.limits.analyzed_threads_per_run, UNLIMITED_ANALYZED_PER_RUN,
+                plan.limits.reported_threads_per_run, UNLIMITED_REPORTED_PER_RUN,
                 "{} no debe topar hilos por análisis",
                 plan.name
             );

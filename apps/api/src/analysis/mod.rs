@@ -138,10 +138,10 @@ pub struct AnalysisFunnel {
     pub truncated_by_plan: bool,
     /// Tope de hilos analizados que aplicó el plan en este run (cuando truncó).
     #[serde(default)]
-    pub plan_analyzed_cap: Option<u32>,
+    pub plan_reported_cap: Option<u32>,
     /// Total de hilos analizables observados = analizados + saltados por tope.
     #[serde(default)]
-    pub would_be_analyzed: Option<u64>,
+    pub would_be_reported: Option<u64>,
     /// `true` si Gmail indicó que había aún más hilos allá del lote recuperado.
     #[serde(default)]
     pub more_beyond_retrieved: bool,
@@ -157,6 +157,10 @@ pub struct AnalysisFunnel {
     /// Llamadas totales al proveedor IA, incluidos reintentos y escaladas.
     #[serde(default)]
     pub ai_calls: u64,
+    /// Hilos que iban a auditarse pero quedaron fuera al agotarse el cupo mensual
+    /// de IA del plan. Conservan su clasificación heurística.
+    #[serde(default)]
+    pub ai_skipped_by_budget: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -170,10 +170,27 @@
   align-items: stretch;
 }
 
-.access-actions-stack > a {
+.access-actions-stack > a,
+.access-actions-stack > button {
   justify-content: flex-start;
   min-height: 56px;
   text-align: left;
+}
+
+/* Tercera opción: formulario de detección por dominio. */
+.access-detect {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  text-align: left;
+}
+
+.access-detect > .btn-primary {
+  justify-content: center;
+  min-height: 44px;
 }
 
 .access-provider-label {

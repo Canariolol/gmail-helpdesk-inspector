@@ -680,21 +680,21 @@ impl StorageRepository for PostgresStorage {
         org_id: &str,
         period_key: &str,
         runs_created: u32,
-        analyzed_threads: u32,
-        ai_audited_threads: u32,
+        retrieved_threads: u32,
+        ai_analyzed_threads: u32,
     ) -> anyhow::Result<()> {
         let id = format!("{org_id}:{period_key}");
         sqlx::query(
             "INSERT INTO mira.records (kind,id,org_id,sort_at,data) VALUES \
-             ('usage_ledger',$1,$2,now(),jsonb_build_object('org_id',$2,'period_key',$3,'runs_created',$4,'analyzed_threads',$5,'ai_audited_threads',$6,'updated_at',to_jsonb(now()))) \
+             ('usage_ledger',$1,$2,now(),jsonb_build_object('org_id',$2,'period_key',$3,'runs_created',$4,'retrieved_threads',$5,'ai_analyzed_threads',$6,'updated_at',to_jsonb(now()))) \
              ON CONFLICT (kind,id) DO UPDATE SET sort_at=now(), updated_at=now(), data=jsonb_build_object( \
                'org_id',EXCLUDED.data->'org_id','period_key',EXCLUDED.data->'period_key', \
                'runs_created',to_jsonb(LEAST(4294967295::bigint,COALESCE((mira.records.data->>'runs_created')::bigint,0)+$4)), \
-               'analyzed_threads',to_jsonb(LEAST(4294967295::bigint,COALESCE((mira.records.data->>'analyzed_threads')::bigint,COALESCE((mira.records.data->>'candidate_threads')::bigint,0))+$5)), \
-               'ai_audited_threads',to_jsonb(LEAST(4294967295::bigint,COALESCE((mira.records.data->>'ai_audited_threads')::bigint,0)+$6)), \
+               'retrieved_threads',to_jsonb(LEAST(4294967295::bigint,COALESCE((mira.records.data->>'retrieved_threads')::bigint,COALESCE((mira.records.data->>'candidate_threads')::bigint,0))+$5)), \
+               'ai_analyzed_threads',to_jsonb(LEAST(4294967295::bigint,COALESCE((mira.records.data->>'ai_analyzed_threads')::bigint,0)+$6)), \
                'updated_at',to_jsonb(now()))",
         )
-        .bind(id).bind(org_id).bind(period_key).bind(i64::from(runs_created)).bind(i64::from(analyzed_threads)).bind(i64::from(ai_audited_threads))
+        .bind(id).bind(org_id).bind(period_key).bind(i64::from(runs_created)).bind(i64::from(retrieved_threads)).bind(i64::from(ai_analyzed_threads))
         .execute(&self.pool).await?;
         Ok(())
     }
@@ -1030,6 +1030,23 @@ impl StorageRepository for PostgresStorage {
                 ..Default::default()
             },
             preset,
+        )
+        .await
+    }
+
+    async fn upsert_provider_waitlist(
+        &self,
+        entry: &crate::provider_detect::ProviderWaitlistEntry,
+    ) -> anyhow::Result<()> {
+        self.put(
+            "provider_waitlist",
+            &entry.id,
+            RecordFields {
+                owner_email: Some(&entry.requested_by),
+                sort_at: Some(entry.created_at),
+                ..Default::default()
+            },
+            entry,
         )
         .await
     }

@@ -13,12 +13,13 @@ type Props = {
 // datos reales del usuario, en el instante de demanda insatisfecha).
 export function PlanCapBanner({ run, planName, onUpgrade }: Props) {
   const funnel = run.metrics.funnel;
-  if (!funnel?.truncated_by_plan) return null;
+  const aiSkipped = funnel?.ai_skipped_by_budget ?? 0;
+  if (!funnel || (!funnel.truncated_by_plan && aiSkipped === 0)) return null;
 
   const analyzed = run.metrics.total_threads;
-  const wouldBe = funnel.would_be_analyzed ?? analyzed;
+  const wouldBe = funnel.would_be_reported ?? analyzed;
   const moreMark = funnel.more_beyond_retrieved ? "+" : "";
-  const cap = funnel.plan_analyzed_cap ?? analyzed;
+  const cap = funnel.plan_reported_cap ?? analyzed;
   const planLabel = planName ? ` ${planName}` : " gratis";
 
   return (
@@ -27,14 +28,27 @@ export function PlanCapBanner({ run, planName, onUpgrade }: Props) {
         <Scissors size={18} />
       </span>
       <div className="usage-limit-copy">
-        <strong>
-          Analizamos {analyzed} de {wouldBe}
-          {moreMark} hilos con actividad de clientes.
-        </strong>
-        <span>
-          Tu plan{planLabel} audita hasta {cap} hilos por análisis. Hay más correos en este
-          rango sin auditar; no es una falla. Sube de plan para auditarlos todos.
-        </span>
+        {funnel.truncated_by_plan ? (
+          <>
+            <strong>
+              Analizamos {analyzed} de {wouldBe}
+              {moreMark} hilos con actividad de clientes.
+            </strong>
+            <span>
+              Tu plan{planLabel} incluye hasta {cap} hilos por análisis. Hay más correos en
+              este rango sin revisar; no es una falla. Sube de plan para verlos todos.
+            </span>
+          </>
+        ) : (
+          <strong>Se agotó tu cupo mensual de auditoría con Ninfa.</strong>
+        )}
+        {aiSkipped > 0 && (
+          <span>
+            {aiSkipped} {aiSkipped === 1 ? "hilo quedó" : "hilos quedaron"} sin revisar por
+            Ninfa: agotaste el cupo de IA de tu plan{planLabel} este mes. Se clasificaron con
+            reglas, así que pueden perder precisión.
+          </span>
+        )}
       </div>
       {onUpgrade && (
         <button type="button" className="btn-primary usage-limit-cta" onClick={onUpgrade}>

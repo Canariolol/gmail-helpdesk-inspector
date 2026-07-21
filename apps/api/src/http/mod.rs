@@ -49,7 +49,7 @@ use crate::{
     },
     billing::{
         Account, BillingPlan, BillingPlanId, CheckoutSession, CheckoutSessionStatus,
-        EntitlementSnapshot, Subscription, SubscriptionStatus, UNLIMITED_ANALYZED_PER_RUN,
+        EntitlementSnapshot, Subscription, SubscriptionStatus, UNLIMITED_REPORTED_PER_RUN,
         UsageLedger, active_subscription_for_trial, free_plan, plan_by_id, public_plans,
         subscription_allows_access,
     },
@@ -66,6 +66,7 @@ use crate::{
         normalize_domains, normalize_list, policy_version_from_draft, provision_default_config,
         retention_expires_at, setup_state, validate_timezone,
     },
+    provider_detect::{self, DetectedProvider},
     scheduler::{
         model::{ScheduleConfig, ScheduleState},
         window::next_fire_time_label,
@@ -156,6 +157,7 @@ pub fn router(state: AppState) -> Router {
             get(microsoft_connect_callback),
         )
         .route("/mailbox/providers", get(mailbox_providers))
+        .route("/mailbox/detect", get(detect_mailbox_provider))
         .route("/auth/logout", post(auth_logout))
         .route("/auth/logout-all", post(auth_logout_all))
         .route("/auth/me", get(auth_me))
@@ -526,12 +528,33 @@ fn workos_event_data_id(data: &serde_json::Value) -> Result<&str, ApiError> {
         .ok_or_else(|| ApiError::bad_request("evento WorkOS sin identificador"))
 }
 
+#[derive(Debug, Deserialize, Default)]
+struct ConnectLoginQuery {
+    /// Correo que el usuario escribió en la opción "no estoy seguro". Preselecciona
+    /// la casilla en el proveedor para que el flujo se sienta como el botón directo.
+    #[serde(default)]
+    login_hint: Option<String>,
+}
+
+/// Correo a preseleccionar: el que escribió el usuario si es válido, si no la
+/// cuenta con la que inició sesión en Mira.
+fn login_hint_for<'a>(query: &'a ConnectLoginQuery, session: &'a UserSession) -> &'a str {
+    query
+        .login_hint
+        .as_deref()
+        .map(str::trim)
+        .filter(|hint| provider_detect::domain_of(hint).is_some())
+        .unwrap_or(&session.google_account_email)
+}
+
 async fn gmail_connect_login(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(query): Query<ConnectLoginQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     let session = require_session(&state, &headers).await?;
     require_active_entitlement(&state, &session).await?;
+    let login_hint = login_hint_for(&query, &session);
     let scope = "https://www.googleapis.com/auth/gmail.readonly";
     let oauth_state = random_urlsafe(24);
     let code_verifier = random_urlsafe(48);
@@ -552,9 +575,9 @@ async fn gmail_connect_login(
             ("state", oauth_state.as_str()),
             ("code_challenge", code_challenge.as_str()),
             ("code_challenge_method", "S256"),
-            // Preselecciona la cuenta con la que ya inició sesión en Mira, para
-            // que el selector de cuentas no aparezca sin necesidad.
-            ("login_hint", session.google_account_email.as_str()),
+            // Preselecciona la casilla para que el selector de cuentas no aparezca
+            // sin necesidad.
+            ("login_hint", login_hint),
         ],
     )
     .expect("valid oauth url");
@@ -713,6 +736,80 @@ async fn mailbox_providers(State(state): State<AppState>) -> Json<serde_json::Va
     }))
 }
 
+#[derive(Debug, Deserialize)]
+struct DetectProviderQuery {
+    email: String,
+}
+
+#[derive(Debug, Serialize)]
+struct DetectProviderResponse {
+    provider: DetectedProvider,
+}
+
+/// Opción "No estoy seguro / otro": el usuario escribe su correo y resolvemos el
+/// proveedor por los registros MX del dominio, para encaminarlo al OAuth correcto
+/// sin que tenga que saber si su casilla es Google o Microsoft.
+async fn detect_mailbox_provider(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<DetectProviderQuery>,
+) -> Result<Json<DetectProviderResponse>, ApiError> {
+    let session = require_session(&state, &headers).await?;
+    // El endpoint hace DNS saliente con un dominio que aporta el usuario: se acota
+    // por cuenta para que no sirva de amplificador.
+    enforce_rate_limit(
+        &state,
+        &session.google_account_email,
+        "detect_provider",
+        PROVIDER_DETECT_PER_HOUR,
+    )
+    .await?;
+    let domain = provider_detect::domain_of(&query.email)
+        .ok_or_else(|| ApiError::bad_request("escribe un correo válido"))?;
+    let detection = provider_detect::detect(&state.http, &domain)
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(
+                operation = "detect_provider",
+                ?error,
+                "no se pudo resolver el DNS del dominio"
+            );
+            provider_detect::Detection {
+                provider: DetectedProvider::Unknown,
+                mx_hosts: Vec::new(),
+            }
+        });
+
+    // Sin soporte todavía: guardamos el correo para poder avisarle cuando exista, y
+    // los MX para reconocer gateways que aún no clasificamos. Un fallo al guardar
+    // no debe romper la respuesta al usuario.
+    if detection.provider == DetectedProvider::Unsupported {
+        let entry = provider_detect::ProviderWaitlistEntry {
+            id: query.email.trim().to_ascii_lowercase(),
+            email: query.email.trim().to_ascii_lowercase(),
+            domain,
+            detected: detection.provider,
+            mx_hosts: detection.mx_hosts,
+            requested_by: session.google_account_email.clone(),
+            created_at: Utc::now(),
+        };
+        if let Err(error) = state.storage.upsert_provider_waitlist(&entry).await {
+            tracing::warn!(
+                operation = "provider_waitlist",
+                ?error,
+                "no se pudo registrar el correo en la lista de espera"
+            );
+        }
+    }
+
+    Ok(Json(DetectProviderResponse {
+        provider: detection.provider,
+    }))
+}
+
+/// Detecciones por hora y por cuenta.
+const PROVIDER_DETECT_PER_HOUR: usize = 20;
+
 fn microsoft_config(state: &AppState) -> Result<&MicrosoftConfig, ApiError> {
     state.config.microsoft.as_ref().ok_or_else(|| {
         ApiError::bad_request("la conexión con Microsoft no está habilitada en este entorno")
@@ -724,9 +821,11 @@ fn microsoft_config(state: &AppState) -> Result<&MicrosoftConfig, ApiError> {
 async fn microsoft_connect_login(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(query): Query<ConnectLoginQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     let session = require_session(&state, &headers).await?;
     require_active_entitlement(&state, &session).await?;
+    let login_hint = login_hint_for(&query, &session);
     let microsoft = microsoft_config(&state)?;
     let oauth_state = random_urlsafe(24);
     let code_verifier = random_urlsafe(48);
@@ -735,8 +834,7 @@ async fn microsoft_connect_login(
         &format!("{oauth_state}:{code_verifier}"),
         &state.config.session_secret,
     )?;
-    let domain_hint = session
-        .google_account_email
+    let domain_hint = login_hint
         .split_once('@')
         .map(|(_, domain)| domain.to_string())
         .unwrap_or_default();
@@ -754,7 +852,7 @@ async fn microsoft_connect_login(
             ("state", oauth_state.as_str()),
             ("code_challenge", code_challenge.as_str()),
             ("code_challenge_method", "S256"),
-            ("login_hint", session.google_account_email.as_str()),
+            ("login_hint", login_hint),
             ("domain_hint", domain_hint.as_str()),
         ],
     )
@@ -2960,20 +3058,21 @@ pub(crate) async fn execute_analysis(
         .ok_or_else(|| anyhow::anyhow!("analysis run not found"))
         .context(AnalysisFailureStage("run_lookup"))?;
     // Plan vigente para este run (pagado o Mira Free por defecto). El tope del plan
-    // se aplica sobre los hilos ANALIZADOS (los que sobreviven el embudo), no sobre
-    // los recuperados de Gmail.
+    // El plan aplica tres cupos distintos: recuperados de la casilla (mensual,
+    // holgado), hilos que entran al informe (por análisis) y hilos enviados a la
+    // IA (mensual, estricto: es el único que cuesta dinero).
     let plan = plan_for_run(&state, run.org_id.as_deref())
         .await
         .context(AnalysisFailureStage("plan_lookup"))?;
-    let used_analyzed = match run.org_id.as_deref() {
+    let (used_retrieved, used_ai) = match run.org_id.as_deref() {
         Some(org_id) => state
             .storage
             .get_usage_ledger(org_id, &current_period_key())
             .await
             .context(AnalysisFailureStage("usage_lookup"))?
-            .map(|usage| usage.analyzed_threads)
-            .unwrap_or(0),
-        None => 0,
+            .map(|usage| (usage.retrieved_threads, usage.ai_analyzed_threads))
+            .unwrap_or((0, 0)),
+        None => (0, 0),
     };
     let policy_max = run
         .policy_snapshot
@@ -2982,20 +3081,25 @@ pub(crate) async fn execute_analysis(
         .unwrap_or(state.config.google.gmail_max_threads);
     // En dev (`enforcement_enabled=false`) no hay tope: análisis ilimitado como antes.
     let enforce = state.config.billing.enforcement_enabled;
-    let analyzed_cap = if enforce {
-        analyzed_run_cap(
-            plan.limits.analyzed_threads_per_run,
-            plan.limits.analyzed_threads_per_month,
-            used_analyzed,
-        )
+    // Tope de hilos que entran al informe: es por análisis, no mensual.
+    let reported_cap = if enforce {
+        plan.limits.reported_threads_per_run
     } else {
         u32::MAX
     };
-    let has_finite_run_cap =
-        enforce && plan.limits.analyzed_threads_per_run != UNLIMITED_ANALYZED_PER_RUN;
-    // Recuperamos con holgura cuando hay tope finito (Free), para que el tope de
-    // analizados pueda llenarse pese a los descartes del embudo.
-    let retrieval_max = retrieval_max_for(has_finite_run_cap, analyzed_cap, policy_max).max(1);
+    let has_finite_run_cap = enforce && reported_cap != UNLIMITED_REPORTED_PER_RUN;
+    // La recuperación se acota por lo que queda del cupo MENSUAL de recuperados, y
+    // con holgura sobre el tope del informe para que pueda llenarse pese al embudo.
+    let retrieval_budget = if enforce {
+        plan.limits
+            .retrieved_threads_per_month
+            .saturating_sub(used_retrieved)
+    } else {
+        u32::MAX
+    };
+    let retrieval_max = retrieval_max_for(has_finite_run_cap, reported_cap, policy_max)
+        .min(retrieval_budget)
+        .max(1);
 
     // El proveedor se resuelve una vez por run desde la conexión de la casilla,
     // no por hilo: dentro del run no puede cambiar.
@@ -3063,7 +3167,7 @@ pub(crate) async fn execute_analysis(
                     policy_snapshot: policy_ref,
                     owner_email: owner_email_ref,
                     analyzed_slot: analyzed_slot_ref,
-                    analyzed_cap,
+                    reported_cap,
                 },
                 thread_id,
             )
@@ -3141,6 +3245,18 @@ pub(crate) async fn execute_analysis(
         .enumerate()
         .filter_map(|(index, prepared)| (ai_enabled && prepared.should_batch).then_some(index))
         .collect::<Vec<_>>();
+    // Cupo mensual de IA (el costo real: tokens de Bedrock). Se agota de forma
+    // elegante: el análisis igual corre y clasifica con heurística, solo deja de
+    // auditar. Bloquear el run completo sería peor producto que degradar.
+    let ai_budget = if enforce {
+        plan.limits
+            .ai_analyzed_threads_per_month
+            .saturating_sub(used_ai) as usize
+    } else {
+        usize::MAX
+    };
+    let (ai_audited_now, ai_skipped_by_budget) = split_by_ai_budget(batch_indexes.len(), ai_budget);
+    let batch_indexes = &batch_indexes[..ai_audited_now];
 
     // Segunda fase: una única auditoría completa por lotes. Los errores se reintentan
     // una vez dividiendo el lote; no existe una segunda llamada por hilo.
@@ -3191,9 +3307,10 @@ pub(crate) async fn execute_analysis(
     funnel.skipped_by_plan_cap = skipped_by_plan_cap;
     funnel.truncated_by_plan = skipped_by_plan_cap > 0;
     funnel.more_beyond_retrieved = more_beyond_retrieved;
-    funnel.would_be_analyzed = Some(stored + skipped_by_plan_cap);
-    funnel.plan_analyzed_cap = (skipped_by_plan_cap > 0).then_some(analyzed_cap);
+    funnel.would_be_reported = Some(stored + skipped_by_plan_cap);
+    funnel.plan_reported_cap = (skipped_by_plan_cap > 0).then_some(reported_cap);
     funnel.ai_unique_threads = ai_unique_thread_ids.len() as u64;
+    funnel.ai_skipped_by_budget = ai_skipped_by_budget as u64;
 
     let threads = state.storage.list_threads(&run.id).await?;
     run.metrics = calculate_metrics(&threads, ai_input_tokens, ai_output_tokens);
@@ -3204,11 +3321,12 @@ pub(crate) async fn execute_analysis(
     run.progress_message = "Análisis completado".to_string();
     run.completed_at = Some(Utc::now());
     state.storage.update_analysis_run(&run).await?;
-    // El cupo mensual se cobra por hilos ANALIZADOS (guardados), no por recuperados.
+    // Se cobran las dos magnitudes con cupo mensual: los hilos RECUPERADOS de la
+    // casilla y los enviados a la IA. Los reportados se topan por análisis, no al mes.
     add_analysis_usage(
         &state,
         run.org_id.as_deref(),
-        stored as u32,
+        run.total_candidate_threads as u32,
         ai_unique_thread_ids.len() as u32,
     )
     .await?;
@@ -3231,22 +3349,22 @@ async fn plan_for_run(state: &AppState, org_id: Option<&str>) -> anyhow::Result<
     }
 }
 
-/// Tope de hilos analizados para un run: el menor entre el tope por análisis del
-/// plan y lo que reste del cupo mensual.
-fn analyzed_run_cap(per_run: u32, per_month: u32, used_this_month: u32) -> u32 {
-    let monthly_remaining = per_month.saturating_sub(used_this_month);
-    per_run.min(monthly_remaining)
+/// Reparte los hilos candidatos a IA contra el cupo mensual restante: devuelve
+/// (auditados ahora, saltados por cupo agotado).
+fn split_by_ai_budget(candidates: usize, budget: usize) -> (usize, usize) {
+    let audited = candidates.min(budget);
+    (audited, candidates - audited)
 }
 
 /// Cuántos candidatos recuperar de Gmail. Con tope finito (Free) recuperamos con
 /// holgura para que el tope de analizados pueda llenarse pese a los descartes del
 /// embudo; sin tope (planes de pago) respetamos el `max_threads_per_run` de policy.
-fn retrieval_max_for(has_finite_run_cap: bool, analyzed_cap: u32, policy_max: u32) -> u32 {
+fn retrieval_max_for(has_finite_run_cap: bool, reported_cap: u32, policy_max: u32) -> u32 {
     if has_finite_run_cap {
-        analyzed_cap
+        reported_cap
             .saturating_mul(FREE_RETRIEVAL_FACTOR)
             .min(FREE_RETRIEVAL_HARD_MAX)
-            .max(analyzed_cap.min(FREE_RETRIEVAL_HARD_MAX))
+            .max(reported_cap.min(FREE_RETRIEVAL_HARD_MAX))
     } else {
         policy_max
     }
@@ -3312,7 +3430,7 @@ struct ThreadProcessingContext<'a> {
     /// los cupos del tope del plan entre las tareas concurrentes.
     analyzed_slot: &'a std::sync::atomic::AtomicU32,
     /// Tope de hilos analizados de este run (del plan vigente).
-    analyzed_cap: u32,
+    reported_cap: u32,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3366,7 +3484,7 @@ async fn prepare_one_thread(
     let slot = processing
         .analyzed_slot
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    if slot >= processing.analyzed_cap {
+    if slot >= processing.reported_cap {
         return Ok(ThreadOutcome {
             disposition: ThreadDisposition::SkippedByPlanCap,
             ..Default::default()
@@ -4029,8 +4147,8 @@ fn empty_usage(org_id: &str, period_key: &str) -> UsageLedger {
         org_id: org_id.to_string(),
         period_key: period_key.to_string(),
         runs_created: 0,
-        analyzed_threads: 0,
-        ai_audited_threads: 0,
+        retrieved_threads: 0,
+        ai_analyzed_threads: 0,
         updated_at: Utc::now(),
     }
 }
@@ -4053,7 +4171,7 @@ async fn enforce_usage_allows_run(state: &AppState, org_id: &str) -> Result<(), 
             "alcanzaste el límite mensual de análisis de tu plan",
         ));
     }
-    if usage.analyzed_threads >= plan.limits.analyzed_threads_per_month {
+    if usage.retrieved_threads >= plan.limits.retrieved_threads_per_month {
         return Err(ApiError::payment_required(
             "agotaste tu cupo mensual de hilos analizados — sube de plan para seguir",
         ));
@@ -4076,8 +4194,8 @@ async fn increment_runs_usage(state: &AppState, org_id: Option<&str>) -> Result<
 async fn add_analysis_usage(
     state: &AppState,
     org_id: Option<&str>,
-    analyzed_threads: u32,
-    ai_audited_threads: u32,
+    retrieved_threads: u32,
+    ai_analyzed_threads: u32,
 ) -> anyhow::Result<()> {
     let Some(org_id) = org_id else {
         return Ok(());
@@ -4085,7 +4203,13 @@ async fn add_analysis_usage(
     let period_key = current_period_key();
     state
         .storage
-        .add_usage(org_id, &period_key, 0, analyzed_threads, ai_audited_threads)
+        .add_usage(
+            org_id,
+            &period_key,
+            0,
+            retrieved_threads,
+            ai_analyzed_threads,
+        )
         .await
 }
 
@@ -4690,19 +4814,15 @@ mod tests {
     };
 
     #[test]
-    fn analyzed_run_cap_takes_min_of_per_run_and_monthly_remaining() {
-        // Free: tope por run 40, cupo mensual 120 sin uso => 40.
-        assert_eq!(analyzed_run_cap(40, 120, 0), 40);
-        // Queda poco cupo mensual: el run se topa por el remanente.
-        assert_eq!(analyzed_run_cap(40, 120, 100), 20);
-        // Cupo agotado => 0.
-        assert_eq!(analyzed_run_cap(40, 120, 120), 0);
-        assert_eq!(analyzed_run_cap(40, 120, 999), 0);
-        // Plan de pago (sin tope por run): manda el remanente mensual.
-        assert_eq!(
-            analyzed_run_cap(UNLIMITED_ANALYZED_PER_RUN, 7_500, 100),
-            7_400
-        );
+    fn ai_budget_audits_up_to_the_remaining_quota_and_skips_the_rest() {
+        // Cupo de sobra: se auditan todos.
+        assert_eq!(split_by_ai_budget(10, 100), (10, 0));
+        // Cupo justo: se audita hasta el tope y el resto queda heurístico.
+        assert_eq!(split_by_ai_budget(10, 4), (4, 6));
+        // Cupo agotado: nada va a IA, pero el análisis igual corre.
+        assert_eq!(split_by_ai_budget(10, 0), (0, 10));
+        // Dev (`enforce=false`) usa usize::MAX: nunca recorta.
+        assert_eq!(split_by_ai_budget(10, usize::MAX), (10, 0));
     }
 
     #[test]
@@ -5528,6 +5648,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn detect_rejects_a_malformed_email_before_touching_dns() {
+        let test = seeded_app().await;
+        let response = test
+            .app
+            .oneshot(request(
+                Method::GET,
+                "/mailbox/detect?email=sin-arroba",
+                Some(&test.alice_cookie),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn detect_requires_a_session() {
+        let test = seeded_app().await;
+        let response = test
+            .app
+            .oneshot(request(
+                Method::GET,
+                "/mailbox/detect?email=ana@empresa.cl",
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
     async fn public_plans_expose_clp_prices_and_only_pro_trial() {
         let app = crate::build_app(test_app_config(), Arc::new(MemoryStorage::default()));
         let response = app
@@ -5536,16 +5688,14 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body: serde_json::Value = response_json(response).await;
-        assert_eq!(body.as_array().unwrap().len(), 3);
+        // Solo dos planes comprables: Mira Free se asigna por defecto, no se vende.
+        assert_eq!(body.as_array().unwrap().len(), 2);
         assert_eq!(body[0]["id"], "inicial");
         assert_eq!(body[0]["clp_monthly"], 9990);
         assert_eq!(body[0]["trial_days"], 0);
         assert_eq!(body[1]["id"], "pro");
         assert_eq!(body[1]["clp_monthly"], 29990);
         assert_eq!(body[1]["trial_days"], 30);
-        assert_eq!(body[2]["id"], "equipo");
-        assert_eq!(body[2]["clp_monthly"], 99990);
-        assert_eq!(body[2]["trial_days"], 0);
     }
 
     #[tokio::test]

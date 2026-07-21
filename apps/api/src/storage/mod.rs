@@ -151,8 +151,8 @@ pub trait StorageRepository: Send + Sync {
         org_id: &str,
         period_key: &str,
         runs_created: u32,
-        analyzed_threads: u32,
-        ai_audited_threads: u32,
+        retrieved_threads: u32,
+        ai_analyzed_threads: u32,
     ) -> anyhow::Result<()>;
     async fn get_usage_ledger(
         &self,
@@ -220,6 +220,12 @@ pub trait StorageRepository: Send + Sync {
     async fn list_filter_presets(&self, owner_email: &str) -> anyhow::Result<Vec<FilterPreset>>;
     async fn upsert_filter_preset(&self, preset: &FilterPreset) -> anyhow::Result<()>;
     async fn delete_filter_preset(&self, owner_email: &str, preset_id: &str) -> anyhow::Result<()>;
+    /// Registra a alguien cuyo proveedor de correo aún no soportamos, para avisarle
+    /// cuando exista. Solo se escribe: la lectura es manual por ahora.
+    async fn upsert_provider_waitlist(
+        &self,
+        entry: &crate::provider_detect::ProviderWaitlistEntry,
+    ) -> anyhow::Result<()>;
 }
 
 #[derive(Default, Clone)]
@@ -248,6 +254,7 @@ struct MemoryInner {
     filter_presets: HashMap<String, FilterPreset>,
     manual_review_overrides: HashMap<String, ManualReviewOverride>,
     analysis_data_deletion_audits: HashMap<String, AnalysisDataDeletionAudit>,
+    provider_waitlist: HashMap<String, crate::provider_detect::ProviderWaitlistEntry>,
     manual_review_metrics_v1_applied: bool,
     manual_review_inheritance_v2_applied: bool,
 }
@@ -711,8 +718,8 @@ impl StorageRepository for MemoryStorage {
         org_id: &str,
         period_key: &str,
         runs_created: u32,
-        analyzed_threads: u32,
-        ai_audited_threads: u32,
+        retrieved_threads: u32,
+        ai_analyzed_threads: u32,
     ) -> anyhow::Result<()> {
         let mut inner = self.inner.write().await;
         let usage = inner
@@ -722,13 +729,15 @@ impl StorageRepository for MemoryStorage {
                 org_id: org_id.to_string(),
                 period_key: period_key.to_string(),
                 runs_created: 0,
-                analyzed_threads: 0,
-                ai_audited_threads: 0,
+                retrieved_threads: 0,
+                ai_analyzed_threads: 0,
                 updated_at: Utc::now(),
             });
         usage.runs_created = usage.runs_created.saturating_add(runs_created);
-        usage.analyzed_threads = usage.analyzed_threads.saturating_add(analyzed_threads);
-        usage.ai_audited_threads = usage.ai_audited_threads.saturating_add(ai_audited_threads);
+        usage.retrieved_threads = usage.retrieved_threads.saturating_add(retrieved_threads);
+        usage.ai_analyzed_threads = usage
+            .ai_analyzed_threads
+            .saturating_add(ai_analyzed_threads);
         usage.updated_at = Utc::now();
         Ok(())
     }
@@ -1254,6 +1263,18 @@ impl StorageRepository for MemoryStorage {
             .await
             .filter_presets
             .insert(preset.id.clone(), preset.clone());
+        Ok(())
+    }
+
+    async fn upsert_provider_waitlist(
+        &self,
+        entry: &crate::provider_detect::ProviderWaitlistEntry,
+    ) -> anyhow::Result<()> {
+        self.inner
+            .write()
+            .await
+            .provider_waitlist
+            .insert(entry.id.clone(), entry.clone());
         Ok(())
     }
 
@@ -1961,8 +1982,8 @@ mod tests {
             .unwrap()
             .expect("usage ledger expected");
         assert_eq!(usage.runs_created, 2);
-        assert_eq!(usage.analyzed_threads, 18);
-        assert_eq!(usage.ai_audited_threads, 8);
+        assert_eq!(usage.retrieved_threads, 18);
+        assert_eq!(usage.ai_analyzed_threads, 8);
     }
 
     #[tokio::test]
