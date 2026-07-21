@@ -1,4 +1,5 @@
-import { X } from "lucide-react";
+import { Ban, X } from "lucide-react";
+import { useState } from "react";
 import type { BillingPlan, BillingPlanId } from "../../api/types";
 import { PaymentNotes } from "./PaymentNotes";
 import { PricingPlans } from "./PricingPlans";
@@ -15,6 +16,9 @@ interface PlansModalProps {
   onClose: () => void;
   /** "change" actualiza el plan vigente (sin reautorizar); "checkout" inicia un pago nuevo. */
   mode?: PlansModalMode;
+  /** Cancela al fin del período. Solo se ofrece si hay suscripción vigente. */
+  onCancel?: () => void;
+  cancelPending?: boolean;
 }
 
 export function PlansModal({
@@ -26,8 +30,11 @@ export function PlansModal({
   error,
   onClose,
   mode = "change",
+  onCancel,
+  cancelPending = false,
 }: PlansModalProps) {
   const isChange = mode === "change";
+  const [confirmingCancel, setConfirmingCancel] = useState(false);
 
   return (
     <div className="access-modal-backdrop" role="presentation" onClick={onClose}>
@@ -67,6 +74,42 @@ export function PlansModal({
         />
 
         <PaymentNotes />
+
+        {onCancel && (
+          <div className="plans-modal-cancel">
+            {!confirmingCancel ? (
+              <button
+                type="button"
+                className="access-text-btn"
+                onClick={() => setConfirmingCancel(true)}
+              >
+                <Ban size={14} /> Cancelar suscripción
+              </button>
+            ) : (
+              <>
+                <span>Mantendrás acceso hasta el fin del período. ¿Cancelar?</span>
+                <button
+                  type="button"
+                  className="access-text-btn"
+                  disabled={cancelPending}
+                  onClick={() => {
+                    onCancel();
+                    setConfirmingCancel(false);
+                  }}
+                >
+                  {cancelPending ? "Cancelando…" : "Sí, cancelar"}
+                </button>
+                <button
+                  type="button"
+                  className="access-text-btn"
+                  onClick={() => setConfirmingCancel(false)}
+                >
+                  Volver
+                </button>
+              </>
+            )}
+          </div>
+        )}
       </section>
     </div>
   );

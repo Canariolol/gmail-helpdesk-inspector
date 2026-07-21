@@ -600,6 +600,15 @@ export function App() {
             if (plansModalMode === "change") changePlan.reset();
             else checkout.reset();
           }}
+          onCancel={
+            canChangePlan && !accountData.entitlement.cancel_at_period_end
+              ? () => {
+                  cancelSubscription.mutate();
+                  setPlansModalMode(null);
+                }
+              : undefined
+          }
+          cancelPending={cancelSubscription.isPending}
         />
       )}
     </div>

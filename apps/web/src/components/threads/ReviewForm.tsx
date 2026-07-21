@@ -16,9 +16,6 @@ type Props = {
 export function ReviewForm({ detail, onReview, saving, reviewError, reviewSavedAt }: Props) {
   const [classification, setClassification] = useState<Classification>(detail.thread.classification);
   const [answered, setAnswered] = useState(detail.thread.is_answered);
-  const [firstClient, setFirstClient] = useState(detail.thread.first_client_message_id ?? "");
-  const [firstReply, setFirstReply] = useState(detail.thread.first_internal_reply_message_id ?? "");
-  const [lastInternal, setLastInternal] = useState(detail.thread.last_internal_message_id ?? "");
   const [notes, setNotes] = useState(detail.thread.notes ?? "");
   const [savedFlash, setSavedFlash] = useState(false);
 
@@ -36,8 +33,17 @@ export function ReviewForm({ detail, onReview, saving, reviewError, reviewSavedA
     return () => clearTimeout(timer);
   }, [reviewSavedAt]);
 
-  const clientOptions = detail.messages.filter((message) => message.is_external && !message.is_automated);
-  const internalOptions = detail.messages.filter((message) => message.is_internal && !message.is_automated);
+  // Los mensajes de traza no se eligen: salen del análisis de la casilla. Se
+  // muestran como dato y se reenvían tal cual para no borrarlos al guardar.
+  const firstClient = detail.thread.first_client_message_id ?? null;
+  const firstReply = detail.thread.first_internal_reply_message_id ?? null;
+  const lastInternal = detail.thread.last_internal_message_id ?? null;
+
+  const describe = (messageId: string | null) => {
+    const message = detail.messages.find((item) => item.id === messageId);
+    if (!message) return "—";
+    return `${message.from_email} · ${formatDateTime(message.date)}`;
+  };
 
   return (
     <form
@@ -47,9 +53,9 @@ export function ReviewForm({ detail, onReview, saving, reviewError, reviewSavedA
         onReview({
           new_classification: classification,
           is_answered: answered,
-          first_client_message_id: firstClient || null,
-          first_internal_reply_message_id: firstReply || null,
-          last_internal_message_id: lastInternal || null,
+          first_client_message_id: firstClient,
+          first_internal_reply_message_id: firstReply,
+          last_internal_message_id: lastInternal,
           notes: notes || null,
         });
       }}
@@ -77,39 +83,20 @@ export function ReviewForm({ detail, onReview, saving, reviewError, reviewSavedA
         <input type="checkbox" checked={answered} onChange={(event) => setAnswered(event.target.checked)} />
         Respondido
       </label>
-      <label>
-        Primer mensaje cliente
-        <select value={firstClient} onChange={(event) => setFirstClient(event.target.value)}>
-          <option value="">Sin seleccionar</option>
-          {clientOptions.map((message) => (
-            <option key={message.id} value={message.id}>
-              {message.from_email} · {formatDateTime(message.date)}
-            </option>
-          ))}
-        </select>
-      </label>
-      <label>
-        Primera respuesta interna
-        <select value={firstReply} onChange={(event) => setFirstReply(event.target.value)}>
-          <option value="">Sin seleccionar</option>
-          {internalOptions.map((message) => (
-            <option key={message.id} value={message.id}>
-              {message.from_email} · {formatDateTime(message.date)}
-            </option>
-          ))}
-        </select>
-      </label>
-      <label>
-        Último envío interno
-        <select value={lastInternal} onChange={(event) => setLastInternal(event.target.value)}>
-          <option value="">Sin seleccionar</option>
-          {internalOptions.map((message) => (
-            <option key={message.id} value={message.id}>
-              {message.from_email} · {formatDateTime(message.date)}
-            </option>
-          ))}
-        </select>
-      </label>
+      <dl className="review-trace">
+        <div>
+          <dt>Primer mensaje cliente</dt>
+          <dd>{describe(firstClient)}</dd>
+        </div>
+        <div>
+          <dt>Primera respuesta interna</dt>
+          <dd>{describe(firstReply)}</dd>
+        </div>
+        <div>
+          <dt>Último envío interno</dt>
+          <dd>{describe(lastInternal)}</dd>
+        </div>
+      </dl>
       <label>
         Nota
         <textarea value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="Añadir nota..." />

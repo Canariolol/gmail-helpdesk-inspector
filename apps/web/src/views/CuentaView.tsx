@@ -198,7 +198,7 @@ export function CuentaView({
         )}
 
         {account.gmail_connected && (
-          <div className="cuenta-plan">
+          <div className="cuenta-plan cuenta-row">
             <p className="cuenta-plan-name">
               {account.mailbox_provider
                 ? `Casilla ${PROVIDER_NAMES[account.mailbox_provider]} conectada`
@@ -241,12 +241,12 @@ export function CuentaView({
           </div>
         )}
 
-        <div className="cuenta-plan">
+        <div className="cuenta-plan cuenta-row">
           <p className="cuenta-plan-name">Apariencia</p>
           <ThemePicker />
         </div>
 
-        <div className="cuenta-plan">
+        <div className="cuenta-plan cuenta-row">
           <p className="cuenta-plan-name">Sesiones</p>
           {!confirmingLogoutAll ? (
             <button

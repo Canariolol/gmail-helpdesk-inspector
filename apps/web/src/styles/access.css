@@ -562,6 +562,27 @@
   margin-top: var(--space-5);
 }
 
+/* Fila con la info a la izquierda y la acción a la derecha: evita botones que
+   cruzan la tarjeta de borde a borde. */
+.cuenta-row {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+}
+
+/* Los botones de acción se ajustan a su contenido, nunca al ancho de la tarjeta. */
+.cuenta-plan > button,
+.cuenta-actions > button {
+  align-self: flex-start;
+  width: auto;
+}
+
+.cuenta-plan > .cuenta-confirm {
+  flex-basis: 100%;
+  max-width: 46ch;
+}
+
 .cuenta-plan-name {
   font-family: var(--font-mono);
   font-size: 0.68rem;
@@ -620,6 +641,20 @@
   display: flex;
   align-items: center;
   gap: var(--space-3);
+}
+
+/* Salida discreta al final del modal de planes: no compite con los CTA. */
+.plans-modal-cancel {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  border-top: 1px solid var(--border);
+  margin-top: var(--space-4);
+  padding-top: var(--space-3);
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
 }
 
 /* ---- Checkout embebido (Mercado Pago Brick) ---- */

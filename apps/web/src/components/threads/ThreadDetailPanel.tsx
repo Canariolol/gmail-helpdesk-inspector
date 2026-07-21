@@ -13,7 +13,7 @@ type Props = {
 
 export function ThreadDetailPanel({ detail, onReview, saving, reviewError, reviewSavedAt }: Props) {
   return (
-    <div className="card thread-detail">
+    <div className="card-surface thread-detail">
       <div className="thread-detail-head">
         <h2>{detail.thread.subject}</h2>
         <div className="thread-detail-tags">
