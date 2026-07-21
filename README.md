@@ -20,7 +20,7 @@ Amazon Bedrock by default. Each organization can disable it from Configuration.
 
 - Web: React, TypeScript, Vite, TanStack Query, Recharts
 - API: Rust, Axum
-- Storage: Firestore Native mode
+- Storage: PostgreSQL (Supabase, schema `mira`)
 - AI worker: Python, FastAPI, Pydantic
 - Local runtime: Docker Compose
 
@@ -32,7 +32,7 @@ Amazon Bedrock by default. Each organization can disable it from Configuration.
    cp .env.example .env
    ```
 
-2. Fill WorkOS AuthKit, Mercado Pago, Google Gmail OAuth, Firestore, and
+2. Fill WorkOS AuthKit, Mercado Pago, Google Gmail OAuth, PostgreSQL, and
    Bedrock values in `.env`. Add your Gmail account as an OAuth test user in
    Google Cloud Console while the Google app is in Testing.
 
@@ -58,42 +58,32 @@ Use the same optional environment override as Docker when needed:
 APP_ENV_OVERRIDE=.env.sandbox.local ./scripts/local-dev.sh
 ```
 
-## Firestore Notes
+## Database Notes
 
-Runtime storage targets Firestore directly. The API supports three Firestore
-auth sources, in this order:
+Runtime storage is PostgreSQL (Supabase). Everything lives in the `mira` schema,
+which is deliberately revoked from `anon`, `authenticated`, and `service_role`,
+so the Supabase Table Editor and the PostgREST API cannot read it. Use the SQL
+Editor (or a direct `psql`) to inspect it.
 
-1. `FIRESTORE_BEARER_TOKEN`
-2. `GOOGLE_APPLICATION_CREDENTIALS` service-account JSON
-3. Cloud Run metadata server
-
-For local/Docker development, prefer a service account key because the API can
-use it to mint fresh access tokens automatically:
-
-```bash
-mkdir -p secrets
-cp /path/to/service-account.json secrets/gcp-service-account.json
-```
-
-Then set:
+Set the connection string in `.env`:
 
 ```env
-GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/gcp-service-account.json
-FIRESTORE_BEARER_TOKEN=
+APP_STORAGE=postgres
+POSTGRES_DATABASE_URL=postgresql://...
 ```
 
-`/secrets/gcp-service-account.json` is also mounted for local compatibility, but
-`/run/secrets/gcp-service-account.json` is the recommended path.
+`APP_STORAGE=memory` runs without any database and is for local/dev only.
 
-`FIRESTORE_BEARER_TOKEN` is only a short-lived fallback for quick debugging.
-It commonly expires after about one hour.
+Apply migrations with `scripts/apply-supabase-migrations.sh` (needs
+`SUPABASE_ACCESS_TOKEN` and `SUPABASE_PROJECT_REF`). Take a manual backup with
+`scripts/backup-postgres.sh`.
 
 ## Privacy Defaults
 
 - Gmail scope is limited to `https://www.googleapis.com/auth/gmail.readonly`.
 - The app never sends, labels, deletes, or modifies Gmail messages.
 - Full email body text is fetched only during analysis/auditing and is not
-  persisted in Firestore.
+  persisted in the database.
 - Stored data is limited to metadata, snippets, headers, participants,
   classification decisions, reasons, metrics, and token usage.
 
@@ -205,13 +195,15 @@ combined safely. If `CRON_SECRET` is unset the endpoint answers 404.
 | `RATE_LIMIT_ANALYSIS_CREATE_PER_HOUR` | Per-user manual run creation limit; default `12` |
 | `RATE_LIMIT_ANALYSIS_START_PER_HOUR` | Per-user manual run start limit; default `12` |
 
-### Configuration & state in Firestore
+### Configuration & state in the database
 
-- `scheduleConfigs/{email}` — scheduler execution config (recipients, internal
+Both live in `mira.records`, keyed by `(kind, id)` with `id = {email}`:
+
+- `kind='schedule_config'` — scheduler execution config (recipients, internal
   domains, ignored lists, timezone, thread cap, `enabled`). It can be seeded from
   legacy `SCHEDULE_*`/`REPORT_TO_EMAIL`, but in SaaS mode it is synchronized from
   `/me/org/config` policy updates.
-- `scheduleStates/{email}` — last attempt per user (window, status, run id,
+- `kind='schedule_state'` — last attempt per user (window, status, run id,
   whether the email went out). A window with status `completed` is never
   re-run; a stale `running` claim (>60 min) is retried. Scheduler retries
   after success therefore return `skipped`.

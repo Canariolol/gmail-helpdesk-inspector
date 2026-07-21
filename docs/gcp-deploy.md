@@ -83,7 +83,7 @@ gcloud run services update ghmi-api --region us-central1 \
 Este runbook despliega tres servicios en Cloud Run:
 
 - `ghmi-ai-worker`: privado, recibe llamadas solo desde la API.
-- `ghmi-api`: publico, maneja OAuth Google, Gmail, Firestore y sesiones.
+- `ghmi-api`: publico, maneja OAuth Google, Gmail, PostgreSQL (Supabase) y sesiones.
 - `ghmi-web`: publico, sirve el frontend estatico.
 
 ## 1. Variables locales
@@ -115,7 +115,6 @@ gcloud config set project "$GCP_PROJECT_ID"
 gcloud services enable \
   artifactregistry.googleapis.com \
   run.googleapis.com \
-  firestore.googleapis.com \
   secretmanager.googleapis.com
 
 gcloud artifacts repositories create "$ARTIFACT_REPO" \
@@ -127,15 +126,14 @@ gcloud iam service-accounts create ghmi-runtime \
   --display-name="Gmail Helpdesk Inspector runtime"
 ```
 
-Si el proyecto aun no tiene base Firestore, creala como Firestore Native en la consola de Google Cloud antes del primer analisis.
+La base de datos es PostgreSQL en Supabase, fuera de GCP: no hay que crear nada
+en Google Cloud para persistencia. La cadena de conexion vive en el secreto
+`mira-postgres-url` y las migraciones se aplican con
+`scripts/apply-supabase-migrations.sh`.
 
 Permisos minimos del runtime:
 
 ```bash
-gcloud projects add-iam-policy-binding "$GCP_PROJECT_ID" \
-  --member="serviceAccount:${RUN_SA}" \
-  --role="roles/datastore.user"
-
 gcloud projects add-iam-policy-binding "$GCP_PROJECT_ID" \
   --member="serviceAccount:${RUN_SA}" \
   --role="roles/secretmanager.secretAccessor"
@@ -236,8 +234,8 @@ gcloud run deploy "$API_SERVICE" \
   --cpu 1 \
   --memory 512Mi \
   --no-cpu-throttling \
-  --set-env-vars "APP_STORAGE=firestore,GCP_PROJECT_ID=${GCP_PROJECT_ID},FIRESTORE_DATABASE_ID=(default),AI_WORKER_URL=${WORKER_URL},AI_WORKER_AUDIENCE=${WORKER_URL},WEB_BASE_URL=https://placeholder.invalid,API_BASE_URL=https://placeholder.invalid,APP_COOKIE_SECURE=true,APP_COOKIE_SAMESITE=None,GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID},GOOGLE_REDIRECT_URL=https://placeholder.invalid/gmail/connect/callback,GMAIL_MAX_THREADS=100" \
-  --set-secrets "GOOGLE_CLIENT_SECRET=google-client-secret:latest,APP_ENCRYPTION_KEY=app-encryption-key:latest,APP_SESSION_SECRET=app-session-secret:latest"
+  --set-env-vars "APP_STORAGE=postgres,GCP_PROJECT_ID=${GCP_PROJECT_ID},AI_WORKER_URL=${WORKER_URL},AI_WORKER_AUDIENCE=${WORKER_URL},WEB_BASE_URL=https://placeholder.invalid,API_BASE_URL=https://placeholder.invalid,APP_COOKIE_SECURE=true,APP_COOKIE_SAMESITE=None,GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID},GOOGLE_REDIRECT_URL=https://placeholder.invalid/gmail/connect/callback,GMAIL_MAX_THREADS=100" \
+  --set-secrets "POSTGRES_DATABASE_URL=mira-postgres-url:latest,GOOGLE_CLIENT_SECRET=google-client-secret:latest,APP_ENCRYPTION_KEY=app-encryption-key:latest,APP_SESSION_SECRET=app-session-secret:latest"
 
 export API_URL="$(gcloud run services describe "$API_SERVICE" --region "$GCP_REGION" --format='value(status.url)')"
 ```

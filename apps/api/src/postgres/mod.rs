@@ -969,7 +969,10 @@ impl StorageRepository for PostgresStorage {
     async fn reconcile_manual_review_metrics_v1(
         &self,
     ) -> anyhow::Result<ManualReviewMetricsMigrationResult> {
-        // ponytail: Firestore already runs this reconciliation before export; add a data migration only if the importer finds pre-v1 records.
+        // ponytail: no-op a propósito. La reconciliación v1 ya se aplicó sobre los
+        // datos antes de exportarlos a PostgreSQL, así que ninguna fila de
+        // `mira.records` es pre-v1. Escribir la migración real solo tiene sentido si
+        // aparece una fuente de datos nueva sin reconciliar.
         Ok(ManualReviewMetricsMigrationResult {
             already_applied: true,
             ..Default::default()
@@ -979,7 +982,8 @@ impl StorageRepository for PostgresStorage {
     async fn reconcile_manual_review_inheritance_v2(
         &self,
     ) -> anyhow::Result<ManualReviewInheritanceMigrationResult> {
-        // ponytail: Firestore already runs this reconciliation before export; add a data migration only if the importer finds pre-v2 records.
+        // ponytail: no-op a propósito, mismo razonamiento que la v1: los datos se
+        // reconciliaron antes del export, así que no hay filas pre-v2 en PostgreSQL.
         Ok(ManualReviewInheritanceMigrationResult {
             already_applied: true,
             ..Default::default()
@@ -1057,61 +1061,6 @@ impl PostgresStorage {
             run,
         )
         .await
-    }
-
-    pub(crate) async fn replace_usage_ledger_for_import(
-        &self,
-        usage: &UsageLedger,
-    ) -> anyhow::Result<()> {
-        self.put(
-            "usage_ledger",
-            &format!("{}:{}", usage.org_id, usage.period_key),
-            RecordFields {
-                org_id: Some(&usage.org_id),
-                sort_at: Some(usage.updated_at),
-                ..Default::default()
-            },
-            usage,
-        )
-        .await
-    }
-
-    pub(crate) async fn import_ai_audit(
-        &self,
-        id: &str,
-        run_id: &str,
-        thread_id: &str,
-        audit: &AiAuditResult,
-    ) -> anyhow::Result<()> {
-        self.put(
-            "ai_audit",
-            id,
-            RecordFields {
-                run_id: Some(run_id),
-                thread_id: Some(thread_id),
-                ..Default::default()
-            },
-            audit,
-        )
-        .await
-    }
-
-    pub(crate) async fn clear_for_firestore_import(&self) -> anyhow::Result<()> {
-        sqlx::query("DELETE FROM mira.records")
-            .execute(&self.pool)
-            .await
-            .context("failed to clear PostgreSQL snapshot destination")?;
-        Ok(())
-    }
-
-    pub(crate) async fn record_count(&self) -> anyhow::Result<u64> {
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mira.records")
-            .fetch_one(&self.pool)
-            .await
-            .context("failed to count PostgreSQL snapshot records")?;
-        count
-            .try_into()
-            .context("PostgreSQL snapshot record count is negative")
     }
 }
 

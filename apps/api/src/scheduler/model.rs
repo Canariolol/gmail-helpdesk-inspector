@@ -1,9 +1,10 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// Configuración del análisis programado de un usuario. Vive en Firestore en
-/// `scheduleConfigs/{user_email}` y todos los campos opcionales tienen default
-/// para que el documento pueda editarse a mano sin romper la deserialización.
+/// Configuración del análisis programado de un usuario. Vive en
+/// `mira.records` con `kind='schedule_config'` e `id={user_email}`, y todos los
+/// campos opcionales tienen default para que el JSON pueda editarse a mano sin
+/// romper la deserialización.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScheduleConfig {
     pub user_email: String,

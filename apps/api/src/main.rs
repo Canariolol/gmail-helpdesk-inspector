@@ -2,7 +2,6 @@ mod analysis;
 mod auth;
 mod billing;
 mod config;
-mod firestore;
 mod gmail;
 mod graph;
 mod http;
@@ -25,7 +24,6 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use config::AppConfig;
-use firestore::FirestoreStorage;
 use http::AppState;
 use postgres::PostgresStorage;
 use storage::{MemoryStorage, StorageRepository};
@@ -57,35 +55,8 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let config = AppConfig::from_env()?;
-    if std::env::var("MIGRATE_FIRESTORE_TO_POSTGRES")
-        .ok()
-        .is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
-    {
-        if config.is_production() {
-            anyhow::bail!("MIGRATE_FIRESTORE_TO_POSTGRES must run outside APP_ENV=production");
-        }
-        if config.app_storage != "postgres" {
-            anyhow::bail!("MIGRATE_FIRESTORE_TO_POSTGRES requires APP_STORAGE=postgres");
-        }
-        let source = FirestoreStorage::new(config.firestore.clone())?;
-        let target = PostgresStorage::connect(
-            config
-                .postgres_database_url
-                .as_deref()
-                .expect("validated POSTGRES_DATABASE_URL"),
-        )
-        .await?;
-        let counts = source.copy_to_postgres(&target).await?;
-        tracing::info!(?counts, "Firestore to PostgreSQL copy completed");
-        println!(
-            "Firestore to PostgreSQL copy: {}",
-            serde_json::to_string(&counts)?
-        );
-        return Ok(());
-    }
     let storage: Arc<dyn StorageRepository> = match config.app_storage.as_str() {
         "memory" => Arc::new(MemoryStorage::default()),
-        "firestore" => Arc::new(FirestoreStorage::new(config.firestore.clone())?),
         "postgres" => Arc::new(
             PostgresStorage::connect(
                 config

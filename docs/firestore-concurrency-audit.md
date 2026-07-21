@@ -1,4 +1,17 @@
-# Auditoría de concurrencia Firestore
+# Auditoría de concurrencia Firestore (HISTÓRICO — NO VIGENTE)
+
+> **Este documento ya no describe el sistema.** El backend Firestore fue
+> eliminado del código (2026-07-21) y la persistencia es PostgreSQL. Todos los
+> mecanismos que aparecen abajo —`currentDocument.exists`,
+> `currentDocument.updateTime`, los reintentos por precondición perdida— **ya no
+> existen**. Las columnas "Riesgo" y "Mitigado" de esta tabla no aplican al
+> código actual.
+>
+> En PostgreSQL la exclusión mutua se apoya en `SELECT … FOR UPDATE` dentro de
+> una transacción (ver `claim_schedule_window` en `apps/api/src/postgres/mod.rs`).
+> **Los tres flujos auditados aquí no han sido reauditados contra ese
+> mecanismo.** Se conserva el archivo como registro de qué carreras se
+> identificaron, no como evidencia de que sigan mitigadas.
 
 Fecha: 2026-07-15. Alcance: flujos no financieros de la versión inicial.
 Este documento identifica riesgos; no certifica que estén resueltos ni sustituye

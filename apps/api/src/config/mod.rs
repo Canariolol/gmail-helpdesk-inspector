@@ -1,7 +1,6 @@
 use std::env;
 
 use anyhow::{Context, anyhow};
-use serde::Deserialize;
 use url::Url;
 
 const DEFAULT_ENCRYPTION_KEY: &str = "development-only-change-me-32-bytes";
@@ -24,7 +23,6 @@ pub struct AppConfig {
     pub microsoft: Option<MicrosoftConfig>,
     pub workos: WorkosConfig,
     pub billing: BillingConfig,
-    pub firestore: FirestoreConfig,
     pub postgres_database_url: Option<String>,
     pub ai: AiConfig,
     pub scheduler: SchedulerConfig,
@@ -70,14 +68,6 @@ pub struct BillingConfig {
 }
 
 #[derive(Debug, Clone)]
-pub struct FirestoreConfig {
-    pub project_id: String,
-    pub database_id: String,
-    pub bearer_token: Option<String>,
-    pub service_account_path: Option<String>,
-}
-
-#[derive(Debug, Clone)]
 pub struct AiConfig {
     pub worker_url: String,
     pub worker_audience: Option<String>,
@@ -110,7 +100,7 @@ impl AppConfig {
     pub fn from_env() -> anyhow::Result<Self> {
         let app_env = env_or("APP_ENV", "development");
         let production = is_production_env(&app_env);
-        let app_storage = env_or("APP_STORAGE", "firestore");
+        let app_storage = env_or("APP_STORAGE", "postgres");
         let postgres_database_url = empty_to_none(env::var("POSTGRES_DATABASE_URL").ok());
         if app_storage == "postgres" && postgres_database_url.is_none() {
             return Err(anyhow!(
@@ -166,10 +156,6 @@ impl AppConfig {
                 .unwrap_or(production),
         };
         validate_billing_config(&billing, production)?;
-
-        if app_storage != "memory" {
-            require("GCP_PROJECT_ID")?;
-        }
 
         let scheduler = SchedulerConfig {
             enabled: env_flag("SCHEDULER_ENABLED"),
@@ -259,14 +245,6 @@ impl AppConfig {
             microsoft,
             workos,
             billing,
-            firestore: FirestoreConfig {
-                project_id: env_or("GCP_PROJECT_ID", ""),
-                database_id: env_or("FIRESTORE_DATABASE_ID", "(default)"),
-                bearer_token: empty_to_none(env::var("FIRESTORE_BEARER_TOKEN").ok()),
-                service_account_path: empty_to_none(
-                    env::var("GOOGLE_APPLICATION_CREDENTIALS").ok(),
-                ),
-            },
             postgres_database_url,
             ai: AiConfig {
                 worker_url: ai_worker_url,
@@ -308,15 +286,6 @@ fn secret_or_empty(key: &str, production: bool) -> anyhow::Result<String> {
         )),
         Err(_) => Ok(String::new()),
     }
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ServiceAccountKey {
-    #[allow(dead_code)]
-    pub project_id: Option<String>,
-    pub private_key: String,
-    pub client_email: String,
-    pub token_uri: Option<String>,
 }
 
 fn env_or(key: &str, default: &str) -> String {
@@ -406,9 +375,9 @@ fn validate_production_runtime(
     if !production {
         return Ok(());
     }
-    if !matches!(app_storage, "firestore" | "postgres") {
+    if app_storage != "postgres" {
         return Err(anyhow!(
-            "APP_STORAGE must be firestore or postgres when APP_ENV=production"
+            "APP_STORAGE must be postgres when APP_ENV=production"
         ));
     }
     if !cookie_secure {
@@ -529,12 +498,6 @@ pub(crate) fn test_app_config() -> AppConfig {
             mercadopago_access_token: Some("TEST-access-token".to_string()),
             mercadopago_webhook_secret: Some("test-webhook-secret".to_string()),
             enforcement_enabled: true,
-        },
-        firestore: FirestoreConfig {
-            project_id: String::new(),
-            database_id: String::new(),
-            bearer_token: None,
-            service_account_path: None,
         },
         postgres_database_url: None,
         ai: AiConfig {
@@ -679,7 +642,7 @@ mod tests {
 
         let err = validate_production_runtime(
             true,
-            "firestore",
+            "postgres",
             "http://app.example.com",
             "https://api.example.com",
             true,
@@ -699,7 +662,7 @@ mod tests {
         assert!(
             validate_production_runtime(
                 true,
-                "firestore",
+                "postgres",
                 "https://app.example.com",
                 "https://api.example.com",
                 true,
@@ -718,7 +681,7 @@ mod tests {
         assert!(
             validate_production_runtime(
                 true,
-                "firestore",
+                "postgres",
                 "https://app.example.com",
                 "https://api.example.com",
                 true,

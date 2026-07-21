@@ -1490,8 +1490,9 @@ async fn delete_analysis_data(
         Ok(()) => {
             audit.status = AnalysisDataDeletionStatus::Completed;
             audit.completed_at = Some(Utc::now());
-            // ponytail: Firestore cannot atomically delete every nested document and update this audit.
-            // A pending record is safer than claiming deletion completed when this write fails.
+            // ponytail: el borrado y esta auditoría no comparten transacción, así que
+            // la escritura del audit puede fallar después de borrar los datos. Dejar el
+            // registro en pending es más seguro que afirmar un borrado no confirmado.
             state.storage.record_analysis_data_deletion(&audit).await?;
             Ok(StatusCode::NO_CONTENT)
         }

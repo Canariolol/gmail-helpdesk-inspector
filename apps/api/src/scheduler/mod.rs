@@ -134,7 +134,7 @@ async fn run_configs_for_window(
 
 /// Loop interno: despierta cada minuto y dispara una vez por día hábil desde
 /// las 08:00 de America/Santiago. La idempotencia real vive en ScheduleState,
-/// el memo en memoria solo evita relecturas de Firestore durante el día.
+/// el memo en memoria solo evita relecturas de la base durante el día.
 pub fn spawn(state: AppState) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mailer = match ResendMailer::from_config(&state.config.report) {
@@ -268,8 +268,9 @@ async fn run_for_user(
 }
 
 /// Reserva atómicamente la ventana o devuelve por qué otra ejecución ya la
-/// cubrió. Firestore compara `updateTime` al escribir, por lo que dos
-/// instancias no pueden obtener el mismo claim.
+/// cubrió. El backend toma un lock de fila (`SELECT … FOR UPDATE` dentro de la
+/// transacción del claim), por lo que dos instancias no pueden obtener el mismo
+/// claim sobre un `schedule_state` ya existente.
 async fn check_idempotency(
     state: &AppState,
     config: &ScheduleConfig,

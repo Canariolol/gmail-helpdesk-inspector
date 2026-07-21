@@ -12,7 +12,7 @@ Browser
           │ VITE_API_BASE_URL
           ▼
       apps/api (Rust)
-          ├─► Firestore
+          ├─► PostgreSQL (Supabase, schema `mira`)
           ├─► Gmail API OAuth readonly
           ├─► Resend
           └─► apps/ai-worker (Python FastAPI, stateless)
@@ -39,17 +39,15 @@ Principios de producción beta:
 | `API_BASE_URL` | URL pública de API. También influye en cookie secure. |
 | `APP_COOKIE_SECURE` | Override de cookie secure. |
 | `APP_COOKIE_SAMESITE` | Override SameSite. Default `Lax`; mantenerlo con el proxy mismo-origen. `None` solo es necesario para una API llamada directamente desde otro sitio y exige revisar CSRF. |
-| `APP_STORAGE` | `firestore` por defecto; `memory` solo dev/local. |
+| `APP_STORAGE` | `postgres` (default) en producción: Supabase, schema `mira`. `memory` solo dev/local. Cualquier otro valor es error. |
+| `POSTGRES_DATABASE_URL` | Requerida con `APP_STORAGE=postgres`. En Cloud Run viene del secreto `mira-postgres-url`. |
 | `APP_ENCRYPTION_KEY` | Requerida en producción; no usar default dev. |
 | `APP_SESSION_SECRET` | Requerida en producción; no usar default dev. |
 | `GOOGLE_CLIENT_ID` | OAuth Google client id. |
 | `GOOGLE_CLIENT_SECRET` | OAuth Google secret. |
 | `GOOGLE_REDIRECT_URL` | Callback OAuth. Default local: `/gmail/connect/callback`. |
 | `GMAIL_MAX_THREADS` | Límite global de threads por run; default `50`. |
-| `GCP_PROJECT_ID` | Requerida si `APP_STORAGE != memory`. |
-| `FIRESTORE_DATABASE_ID` | Default `(default)`. |
-| `FIRESTORE_BEARER_TOKEN` | Opcional; preferir service account / ADC en Cloud Run. |
-| `GOOGLE_APPLICATION_CREDENTIALS` | Opcional local; path service account. No usar archivo secreto en repo. |
+| `GCP_PROJECT_ID` | Ya no la lee la API. Cloud Run la inyecta sola; se mantiene por conveniencia operativa. |
 | `AI_WORKER_URL` | URL del worker. |
 | `AI_WORKER_AUDIENCE` | Audience OIDC opcional para invocar worker protegido. |
 | `AI_APPLY_CONFIDENCE_THRESHOLD` | Default `0.92`. |
@@ -94,9 +92,11 @@ Principios de producción beta:
    - OAuth consent screen con scope `https://www.googleapis.com/auth/gmail.readonly`.
    - Test users cargados mientras OAuth esté en Testing.
    - Redirect autorizado: `https://<WEB_DOMAIN>/gmail/connect/callback` o el valor real de `GOOGLE_REDIRECT_URL`.
-4. Confirmar Firestore:
-   - Proyecto correcto en `GCP_PROJECT_ID`.
-   - Service account de API con permisos mínimos necesarios.
+4. Confirmar PostgreSQL (Supabase):
+   - `POSTGRES_DATABASE_URL` apunta al proyecto correcto y el secreto
+     `mira-postgres-url` tiene versión vigente.
+   - Migraciones aplicadas: `scripts/apply-supabase-migrations.sh`.
+   - Respaldo reciente: `scripts/backup-postgres.sh`.
 5. Confirmar Resend:
    - Dominio/sender verificado.
    - `REPORT_FROM_EMAIL` usa un sender autorizado.
@@ -145,7 +145,7 @@ BEDROCK_BATCH_MODEL_ID=<optional-cheaper-model-id>
 Para beta privada segura:
 
 - `APP_ENV=production`.
-- `APP_STORAGE=firestore`.
+- `APP_STORAGE=postgres` (+ `POSTGRES_DATABASE_URL`).
 - `APP_COOKIE_SECURE=true` si API/web usan HTTPS.
 - `APP_COOKIE_SAMESITE=None` si frontend y API quedan en dominios distintos.
 - `max-instances=1` recomendado hasta tener rate limit distribuido y claims robustos multi-instancia.
@@ -154,12 +154,12 @@ Variables mínimas ejemplo:
 
 ```text
 APP_ENV=production
-APP_STORAGE=firestore
+APP_STORAGE=postgres
+POSTGRES_DATABASE_URL=<desde el secreto mira-postgres-url>
 WEB_BASE_URL=https://<WEB_DOMAIN>
 API_BASE_URL=https://<API_DOMAIN>
 GOOGLE_REDIRECT_URL=https://<WEB_DOMAIN>/gmail/connect/callback
 GCP_PROJECT_ID=<GCP_PROJECT_ID>
-FIRESTORE_DATABASE_ID=(default)
 AI_WORKER_URL=https://<AI_WORKER_SERVICE_URL>
 SCHEDULER_ENABLED=false
 RATE_LIMIT_ANALYSIS_CREATE_PER_HOUR=12

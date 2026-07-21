@@ -34,28 +34,10 @@ case "$app_storage" in
       exit 1
     fi
     ;;
-  firestore)
-    # Deprecated: production cut over to PostgreSQL (docs/postgres-cutover-runbook.md).
-    google_credentials="$(env_value GOOGLE_APPLICATION_CREDENTIALS)"
-    firestore_bearer="$(env_value FIRESTORE_BEARER_TOKEN)"
-    if [[ -z "$firestore_bearer" && -z "$google_credentials" ]]; then
-      echo "Firestore auth is not configured." >&2
-      echo "Set GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/gcp-service-account.json in .env." >&2
-      exit 1
-    fi
-    if [[ "$google_credentials" == /run/secrets/* || "$google_credentials" == /secrets/* ]]; then
-      local_secret_path="secrets/${google_credentials##*/}"
-      if [[ ! -f "$local_secret_path" ]]; then
-        echo "Missing service account JSON at $local_secret_path." >&2
-        echo "Copy your GCP service account key there, or update GOOGLE_APPLICATION_CREDENTIALS." >&2
-        exit 1
-      fi
-    fi
-    ;;
   memory)
     ;;
   *)
-    echo "Unsupported APP_STORAGE=$app_storage (expected postgres, firestore, or memory)." >&2
+    echo "Unsupported APP_STORAGE=$app_storage (expected postgres or memory)." >&2
     exit 1
     ;;
 esac
