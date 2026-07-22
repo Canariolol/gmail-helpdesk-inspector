@@ -1,4 +1,4 @@
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, Months, Utc};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -52,11 +52,13 @@ impl BillingInterval {
         }
     }
 
-    fn period_days(&self) -> i64 {
-        match self {
-            Self::Monthly => 30,
-            Self::Annual => 365,
-        }
+    fn period_end(&self, start: DateTime<Utc>) -> DateTime<Utc> {
+        start
+            .checked_add_months(Months::new(match self {
+                Self::Monthly => 1,
+                Self::Annual => 12,
+            }))
+            .expect("billing period must fit in DateTime")
     }
 }
 
@@ -360,7 +362,7 @@ pub fn active_subscription_for_trial(
         provider: "mercadopago".to_string(),
         provider_subscription_id,
         current_period_start: Some(now),
-        current_period_end: Some(now + Duration::days(billing_interval.period_days())),
+        current_period_end: Some(billing_interval.period_end(now)),
         trial_ends_at: (plan.trial_days > 0)
             .then_some(now + Duration::days(plan.trial_days as i64)),
         cancel_at_period_end: false,
@@ -509,8 +511,8 @@ mod tests {
     }
 
     #[test]
-    fn annual_subscription_period_spans_a_year() {
-        let now = Utc::now();
+    fn billing_periods_follow_calendar_months() {
+        let now = "2027-03-01T00:00:00Z".parse().unwrap();
         let sub = active_subscription_for_trial(
             "org-1".to_string(),
             BillingPlanId::Inicial,
@@ -518,21 +520,21 @@ mod tests {
             BillingInterval::Annual,
             now,
         );
-        let period_end = sub.current_period_end.expect("period end expected");
-        assert_eq!((period_end - now).num_days(), 365);
-    }
+        assert_eq!(
+            sub.current_period_end.unwrap(),
+            "2028-03-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap()
+        );
 
-    #[test]
-    fn monthly_subscription_period_spans_thirty_days() {
-        let now = Utc::now();
-        let sub = active_subscription_for_trial(
+        let monthly = active_subscription_for_trial(
             "org-1".to_string(),
             BillingPlanId::Inicial,
             None,
             BillingInterval::Monthly,
             now,
         );
-        let period_end = sub.current_period_end.expect("period end expected");
-        assert_eq!((period_end - now).num_days(), 30);
+        assert_eq!(
+            monthly.current_period_end.unwrap(),
+            "2027-04-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap()
+        );
     }
 }

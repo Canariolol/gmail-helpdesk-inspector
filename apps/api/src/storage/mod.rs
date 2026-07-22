@@ -170,6 +170,13 @@ pub trait StorageRepository: Send + Sync {
         axis: &str,
         threshold: u16,
     ) -> anyhow::Result<bool>;
+    async fn release_quota_alert(
+        &self,
+        org_id: &str,
+        period_key: &str,
+        axis: &str,
+        threshold: u16,
+    ) -> anyhow::Result<()>;
     async fn create_analysis_run(&self, run: &AnalysisRun) -> anyhow::Result<()>;
     async fn claim_pending_analysis_run(&self, id: &str) -> anyhow::Result<Option<AnalysisRun>>;
     async fn update_analysis_run(&self, run: &AnalysisRun) -> anyhow::Result<()>;
@@ -777,6 +784,21 @@ impl StorageRepository for MemoryStorage {
     ) -> anyhow::Result<bool> {
         let key = format!("{org_id}:{period_key}:{axis}:{threshold}");
         Ok(self.inner.write().await.quota_alerts.insert(key))
+    }
+
+    async fn release_quota_alert(
+        &self,
+        org_id: &str,
+        period_key: &str,
+        axis: &str,
+        threshold: u16,
+    ) -> anyhow::Result<()> {
+        self.inner
+            .write()
+            .await
+            .quota_alerts
+            .remove(&format!("{org_id}:{period_key}:{axis}:{threshold}"));
+        Ok(())
     }
 
     async fn create_analysis_run(&self, run: &AnalysisRun) -> anyhow::Result<()> {

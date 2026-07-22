@@ -88,9 +88,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS billing_checkout_sessions_provider_lookup
 CREATE TABLE IF NOT EXISTS billing.usage_ledger (
     org_id TEXT NOT NULL,
     period_key TEXT NOT NULL,
-    runs_created INTEGER NOT NULL DEFAULT 0,
-    retrieved_threads INTEGER NOT NULL DEFAULT 0,
-    ai_analyzed_threads INTEGER NOT NULL DEFAULT 0,
+    runs_created BIGINT NOT NULL DEFAULT 0 CHECK (runs_created BETWEEN 0 AND 4294967295),
+    retrieved_threads BIGINT NOT NULL DEFAULT 0 CHECK (retrieved_threads BETWEEN 0 AND 4294967295),
+    ai_analyzed_threads BIGINT NOT NULL DEFAULT 0 CHECK (ai_analyzed_threads BETWEEN 0 AND 4294967295),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (org_id, period_key)
 );
@@ -168,16 +168,16 @@ INSERT INTO billing.usage_ledger
 SELECT
     data->>'org_id',
     data->>'period_key',
-    COALESCE((data->>'runs_created')::integer, 0),
+    COALESCE((data->>'runs_created')::bigint, 0),
     COALESCE(
-        (data->>'retrieved_threads')::integer,
-        (data->>'candidate_threads')::integer,
-        (data->>'analyzed_threads')::integer,
+        (data->>'retrieved_threads')::bigint,
+        (data->>'candidate_threads')::bigint,
+        (data->>'analyzed_threads')::bigint,
         0
     ),
     COALESCE(
-        (data->>'ai_analyzed_threads')::integer,
-        (data->>'ai_audited_threads')::integer,
+        (data->>'ai_analyzed_threads')::bigint,
+        (data->>'ai_audited_threads')::bigint,
         0
     ),
     (data->>'updated_at')::timestamptz

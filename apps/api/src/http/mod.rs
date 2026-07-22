@@ -4342,7 +4342,14 @@ async fn check_quota_alerts(state: &AppState, org_id: &str, period_key: &str, ac
                 .await
             {
                 Ok(true) => {
-                    send_quota_alert_email(state, account_email, &plan, axis, threshold).await
+                    if !send_quota_alert_email(state, account_email, &plan, axis, threshold).await
+                        && let Err(error) = state
+                            .storage
+                            .release_quota_alert(org_id, period_key, axis, threshold)
+                            .await
+                    {
+                        tracing::warn!(%error, %org_id, axis, threshold, "no se pudo liberar el aviso fallido")
+                    }
                 }
                 Ok(false) => {}
                 Err(error) => {
@@ -4368,12 +4375,12 @@ async fn send_quota_alert_email(
     plan: &BillingPlan,
     axis: &str,
     threshold: u16,
-) {
+) -> bool {
     let mailer = match ResendMailer::from_config(&state.config.report) {
         Ok(mailer) => mailer,
         Err(error) => {
             tracing::warn!(%error, "Resend no configurado; se omite el aviso de cuota");
-            return;
+            return false;
         }
     };
     let axis_label = quota_axis_label(axis);
@@ -4398,7 +4405,9 @@ async fn send_quota_alert_email(
         .await
     {
         tracing::warn!(%error, %account_email, "no se pudo enviar el aviso de cuota");
+        return false;
     }
+    true
 }
 
 #[derive(Debug, Deserialize)]
@@ -6329,7 +6338,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn quota_alert_fires_once_at_eighty_percent_and_not_at_a_hundred() {
+    async fn failed_quota_alert_is_released_for_retry() {
         let storage = MemoryStorage::default();
         let state = AppState::new(test_app_config(), Arc::new(storage));
         let org_id = "org-quota-test";
@@ -6344,12 +6353,11 @@ mod tests {
         check_quota_alerts(&state, org_id, &period_key, "owner@example.com").await;
 
         assert!(
-            !state
+            state
                 .storage
                 .record_quota_alert_if_new(org_id, &period_key, "runs", 80)
                 .await
-                .unwrap(),
-            "el aviso de 80% ya debió quedar registrado por check_quota_alerts"
+                .unwrap()
         );
         assert!(
             state
@@ -6360,10 +6368,14 @@ mod tests {
             "al 80% de uso no debió dispararse (ni quedar registrado) el aviso de 100%"
         );
 
-        // Repetir la misma pasada de uso no debe volver a marcar el 80% (dedup).
+        state
+            .storage
+            .release_quota_alert(org_id, &period_key, "runs", 80)
+            .await
+            .unwrap();
         check_quota_alerts(&state, org_id, &period_key, "owner@example.com").await;
         assert!(
-            !state
+            state
                 .storage
                 .record_quota_alert_if_new(org_id, &period_key, "runs", 80)
                 .await

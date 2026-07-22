@@ -41,8 +41,12 @@ pg_dump "$POSTGRES_DATABASE_URL" \
 # Verificación de integridad: un dump truncado o corrupto no pasa el listado.
 pg_restore --list "$file" >/dev/null
 
-# El dump debe contener las tablas conocidas de ambos schemas.
-for table in "mira records" "mira schema_migrations" "billing plans" "billing subscriptions" "billing checkout_sessions" "billing usage_ledger"; do
+# Antes de 0002, `billing` todavía no existe: ese respaldo sigue siendo válido.
+tables=("mira records" "mira schema_migrations")
+if pg_restore --list "$file" | grep -q "SCHEMA - billing"; then
+  tables+=("billing plans" "billing subscriptions" "billing checkout_sessions" "billing usage_ledger" "billing quota_alerts")
+fi
+for table in "${tables[@]}"; do
   if ! pg_restore --list "$file" | grep -q "TABLE DATA $table"; then
     echo "ERROR: el dump no contiene ${table/ /.}" >&2
     exit 1

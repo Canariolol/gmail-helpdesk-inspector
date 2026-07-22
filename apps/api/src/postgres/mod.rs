@@ -760,16 +760,16 @@ impl StorageRepository for PostgresStorage {
             "INSERT INTO billing.usage_ledger (org_id, period_key, runs_created, retrieved_threads, ai_analyzed_threads, updated_at) \
              VALUES ($1,$2,$3,$4,$5,now()) \
              ON CONFLICT (org_id, period_key) DO UPDATE SET \
-               runs_created = billing.usage_ledger.runs_created + EXCLUDED.runs_created, \
-               retrieved_threads = billing.usage_ledger.retrieved_threads + EXCLUDED.retrieved_threads, \
-               ai_analyzed_threads = billing.usage_ledger.ai_analyzed_threads + EXCLUDED.ai_analyzed_threads, \
+               runs_created = LEAST(4294967295, billing.usage_ledger.runs_created + EXCLUDED.runs_created), \
+               retrieved_threads = LEAST(4294967295, billing.usage_ledger.retrieved_threads + EXCLUDED.retrieved_threads), \
+               ai_analyzed_threads = LEAST(4294967295, billing.usage_ledger.ai_analyzed_threads + EXCLUDED.ai_analyzed_threads), \
                updated_at = now()",
         )
         .bind(org_id)
         .bind(period_key)
-        .bind(runs_created as i32)
-        .bind(retrieved_threads as i32)
-        .bind(ai_analyzed_threads as i32)
+        .bind(i64::from(runs_created))
+        .bind(i64::from(retrieved_threads))
+        .bind(i64::from(ai_analyzed_threads))
         .execute(&self.pool)
         .await
         .context("failed to add usage")?;
@@ -812,6 +812,27 @@ impl StorageRepository for PostgresStorage {
         .await
         .context("failed to record quota alert")?;
         Ok(inserted.rows_affected() == 1)
+    }
+
+    async fn release_quota_alert(
+        &self,
+        org_id: &str,
+        period_key: &str,
+        axis: &str,
+        threshold: u16,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            "DELETE FROM billing.quota_alerts \
+             WHERE org_id=$1 AND period_key=$2 AND axis=$3 AND threshold=$4",
+        )
+        .bind(org_id)
+        .bind(period_key)
+        .bind(axis)
+        .bind(threshold as i16)
+        .execute(&self.pool)
+        .await
+        .context("failed to release quota alert")?;
+        Ok(())
     }
 
     async fn create_analysis_run(&self, run: &AnalysisRun) -> anyhow::Result<()> {
@@ -1240,9 +1261,9 @@ fn usage_ledger_from_row(row: &sqlx::postgres::PgRow) -> anyhow::Result<UsageLed
     Ok(UsageLedger {
         org_id: row.try_get("org_id")?,
         period_key: row.try_get("period_key")?,
-        runs_created: row.try_get::<i32, _>("runs_created")? as u32,
-        retrieved_threads: row.try_get::<i32, _>("retrieved_threads")? as u32,
-        ai_analyzed_threads: row.try_get::<i32, _>("ai_analyzed_threads")? as u32,
+        runs_created: row.try_get::<i64, _>("runs_created")?.try_into()?,
+        retrieved_threads: row.try_get::<i64, _>("retrieved_threads")?.try_into()?,
+        ai_analyzed_threads: row.try_get::<i64, _>("ai_analyzed_threads")?.try_into()?,
         updated_at: row.try_get("updated_at")?,
     })
 }
