@@ -67,12 +67,10 @@ impl MailboxProvider for GraphClient {
         let page_size = max_threads.saturating_mul(4).clamp(1, MAX_PAGE_SIZE);
         let response: MessageListResponse = self
             .client
-            .get(format!(
-                "{GRAPH_BASE}/me/mailFolders/{INBOX_FOLDER}/messages"
-            ))
+            .get(message_list_url(config))
             .bearer_auth(access_token)
             .query(&[
-                ("$filter", received_window_filter(config)?),
+                ("$filter", message_list_filter(config)?),
                 ("$select", "id,conversationId".to_string()),
                 ("$orderby", "receivedDateTime desc".to_string()),
                 ("$top", page_size.to_string()),
@@ -132,7 +130,6 @@ impl MailboxProvider for GraphClient {
                      receivedDateTime,bodyPreview,body,internetMessageHeaders"
                         .to_string(),
                 ),
-                ("$orderby", "receivedDateTime asc".to_string()),
                 ("$top", MAX_PAGE_SIZE.to_string()),
             ])
             .send()
@@ -143,11 +140,15 @@ impl MailboxProvider for GraphClient {
             .await?;
 
         let folder_ids = collect_folder_ids(&response.value);
-        let messages = response
+        let mut messages = response
             .value
             .into_iter()
             .map(|message| normalize_message(message, config))
             .collect::<anyhow::Result<Vec<_>>>()?;
+        // Graph rechaza combinar `conversationId` en `$filter` con
+        // `$orderby=receivedDateTime` (`InefficientFilter`), así que el orden
+        // cronológico se aplica localmente.
+        messages.sort_by_key(|message| message.date);
 
         Ok(ProviderThread {
             id: thread_id.to_string(),
@@ -244,6 +245,42 @@ fn received_window_filter(config: &AnalysisConfig) -> anyhow::Result<String> {
         from.to_rfc3339(),
         to.to_rfc3339()
     ))
+}
+
+fn message_list_url(config: &AnalysisConfig) -> String {
+    if config.include_labels.is_empty() && config.exclude_labels.is_empty() {
+        format!("{GRAPH_BASE}/me/mailFolders/{INBOX_FOLDER}/messages")
+    } else {
+        format!("{GRAPH_BASE}/me/messages")
+    }
+}
+
+/// Conserva `receivedDateTime` primero porque Graph lo exige al combinar
+/// `$filter` y `$orderby`. Los IDs vienen de Graph y se escapan como OData.
+fn message_list_filter(config: &AnalysisConfig) -> anyhow::Result<String> {
+    let mut filter = received_window_filter(config)?;
+    if !config.include_labels.is_empty() {
+        let folders = config
+            .include_labels
+            .iter()
+            .filter(|folder| !folder.trim().is_empty())
+            .map(|folder| format!("parentFolderId eq '{}'", escape_odata(folder.trim())))
+            .collect::<Vec<_>>();
+        if !folders.is_empty() {
+            filter.push_str(&format!(" and ({})", folders.join(" or ")));
+        }
+    }
+    for folder in config
+        .exclude_labels
+        .iter()
+        .filter(|folder| !folder.trim().is_empty())
+    {
+        filter.push_str(&format!(
+            " and parentFolderId ne '{}'",
+            escape_odata(folder.trim())
+        ));
+    }
+    Ok(filter)
 }
 
 fn parse_day_start(value: &str) -> Option<DateTime<Utc>> {
@@ -441,6 +478,22 @@ mod tests {
         assert!(filter.contains("receivedDateTime ge 2026-03-01T00:00:00+00:00"));
         // 2026-03-31 es inclusivo para el usuario: la cota es el 1 de abril.
         assert!(filter.contains("receivedDateTime lt 2026-04-01T00:00:00+00:00"));
+    }
+
+    #[test]
+    fn folder_filters_use_all_messages_and_keep_date_filter_first() {
+        let mut config = config();
+        config.include_labels = vec!["inbox-id".to_string(), "team's-folder".to_string()];
+        config.exclude_labels = vec!["deleted-id".to_string()];
+
+        assert_eq!(
+            message_list_url(&config),
+            format!("{GRAPH_BASE}/me/messages")
+        );
+        assert_eq!(
+            message_list_filter(&config).unwrap(),
+            "receivedDateTime ge 2026-03-01T00:00:00+00:00 and receivedDateTime lt 2026-04-01T00:00:00+00:00 and (parentFolderId eq 'inbox-id' or parentFolderId eq 'team''s-folder') and parentFolderId ne 'deleted-id'"
+        );
     }
 
     #[test]

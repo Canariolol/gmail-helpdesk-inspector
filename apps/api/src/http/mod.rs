@@ -639,6 +639,11 @@ async fn gmail_connect_callback(
         .storage
         .get_gmail_connection(&existing_session.google_account_email)
         .await?;
+    let previous_same_mailbox = matching_previous_connection(
+        &previous,
+        MailboxProviderKind::Google,
+        &profile.email_address,
+    );
     let connection = MailboxConnection {
         owner_email: existing_session.google_account_email.clone(),
         provider: MailboxProviderKind::Google,
@@ -650,13 +655,10 @@ async fn gmail_connect_callback(
             .map(|refresh| encrypt_token(refresh, &state.config.encryption_key))
             .transpose()?
             .or_else(|| {
-                previous
-                    .as_ref()
+                previous_same_mailbox
                     .and_then(|connection| connection.refresh_token_encrypted.clone())
             }),
-        connected_at: previous
-            .as_ref()
-            .map_or(now, |connection| connection.connected_at),
+        connected_at: previous_same_mailbox.map_or(now, |connection| connection.connected_at),
         updated_at: now,
         revoked_at: None,
     };
@@ -911,6 +913,11 @@ async fn microsoft_connect_callback(
         .storage
         .get_gmail_connection(&existing_session.google_account_email)
         .await?;
+    let previous_same_mailbox = matching_previous_connection(
+        &previous,
+        MailboxProviderKind::Microsoft,
+        &profile.email_address,
+    );
     let connection = MailboxConnection {
         owner_email: existing_session.google_account_email.clone(),
         provider: MailboxProviderKind::Microsoft,
@@ -924,14 +931,10 @@ async fn microsoft_connect_callback(
             .map(|refresh| encrypt_token(refresh, &state.config.encryption_key))
             .transpose()?
             .or_else(|| {
-                previous
-                    .as_ref()
+                previous_same_mailbox
                     .and_then(|connection| connection.refresh_token_encrypted.clone())
             }),
-        connected_at: previous
-            .as_ref()
-            .map(|connection| connection.connected_at)
-            .unwrap_or(now),
+        connected_at: previous_same_mailbox.map_or(now, |connection| connection.connected_at),
         updated_at: now,
         revoked_at: None,
     };
@@ -1021,6 +1024,31 @@ fn verified_oauth_code_verifier(
     Ok(code_verifier.to_string())
 }
 
+/// Un token sólo puede reutilizarse al reconectar el mismo proveedor. Al
+/// reemplazar Google por Microsoft (o viceversa), el token anterior es inválido.
+fn matching_previous_connection<'a>(
+    previous: &'a Option<MailboxConnection>,
+    provider: MailboxProviderKind,
+    mailbox_email: &str,
+) -> Option<&'a MailboxConnection> {
+    previous.as_ref().filter(|connection| {
+        connection.provider == provider
+            && connection.mailbox_email.eq_ignore_ascii_case(mailbox_email)
+    })
+}
+
+fn google_revocation_token(connection: Option<&MailboxConnection>) -> Option<&str> {
+    connection
+        .filter(|connection| connection.provider == MailboxProviderKind::Google)
+        .and_then(|connection| {
+            connection
+                .refresh_token_encrypted
+                .as_deref()
+                .or((!connection.access_token_encrypted.trim().is_empty())
+                    .then_some(connection.access_token_encrypted.as_str()))
+        })
+}
+
 async fn gmail_disconnect(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1030,13 +1058,9 @@ async fn gmail_disconnect(
         .storage
         .get_gmail_connection(&session.google_account_email)
         .await?;
-    let encrypted_token = connection.as_ref().and_then(|connection| {
-        connection
-            .refresh_token_encrypted
-            .as_deref()
-            .or((!connection.access_token_encrypted.trim().is_empty())
-                .then_some(connection.access_token_encrypted.as_str()))
-    });
+    // Google ofrece revocación OAuth directa. Microsoft no tiene un endpoint
+    // equivalente para este flujo; en ese caso se revoca sólo la conexión local.
+    let encrypted_token = google_revocation_token(connection.as_ref());
 
     if let Some(encrypted_token) = encrypted_token {
         let token = decrypt_token(encrypted_token, &state.config.encryption_key).map_err(|_| {
@@ -2504,7 +2528,7 @@ async fn create_analysis_run(
     let session = require_session(&state, &headers).await?;
     let bundle = require_active_entitlement(&state, &session).await?;
     enforce_usage_allows_run(&state, &bundle.org.id).await?;
-    require_gmail_connected(
+    require_mailbox_connected(
         state
             .storage
             .get_gmail_connection(&session.google_account_email)
@@ -2695,7 +2719,7 @@ async fn start_analysis_run(
         .get_gmail_connection(&session.google_account_email)
         .await?
         .filter(|connection| mailbox_connection_is_active(Some(connection)))
-        .ok_or_else(|| ApiError::forbidden("conecta Gmail antes de analizar"))?;
+        .ok_or_else(|| ApiError::forbidden("conecta una casilla antes de analizar"))?;
     let run = require_owned_run(&state, &id, &session).await?;
     if run.status != AnalysisStatus::Pending {
         return Err(ApiError::conflict(
@@ -2709,7 +2733,7 @@ async fn start_analysis_run(
         state.config.rate_limit.analysis_start_per_hour,
     )
     .await?;
-    let access_token = fresh_gmail_access_token(&state, &connection).await?;
+    let access_token = fresh_mailbox_access_token(&state, &connection).await?;
     let run = state
         .storage
         .claim_pending_analysis_run(&run.id)
@@ -3144,11 +3168,11 @@ pub(crate) async fn execute_analysis(
     let page = provider
         .list_thread_ids(&access_token, &run.config, retrieval_max)
         .await
-        .context(AnalysisFailureStage("gmail_list_threads"))?;
+        .context(AnalysisFailureStage("mailbox_list_threads"))?;
     let more_beyond_retrieved = page.next_page_token.is_some();
     let thread_ids = page.ids;
     run.total_candidate_threads = thread_ids.len() as u64;
-    run.progress_message = format!("{} hilos encontrados en Gmail", thread_ids.len());
+    run.progress_message = format!("{} hilos encontrados en la casilla", thread_ids.len());
     state
         .storage
         .update_analysis_run(&run)
@@ -3163,7 +3187,7 @@ pub(crate) async fn execute_analysis(
     // el usuario vea CUÁLES hilos se cayeron y por qué.
     let mut funnel = AnalysisFunnel::default();
 
-    // Primera fase: Gmail + filtros + heurística local. No se llama a IA todavía,
+    // Primera fase: casilla + filtros + heurística local. No se llama a IA todavía,
     // para poder agrupar los candidatos humanos y reutilizar la política por lote.
     let config = run.config.clone();
     let policy_snapshot = run.policy_snapshot.clone();
@@ -3382,7 +3406,7 @@ fn split_by_ai_budget(candidates: usize, budget: usize) -> (usize, usize) {
     (audited, candidates - audited)
 }
 
-/// Cuántos candidatos recuperar de Gmail. Con tope finito (Free) recuperamos con
+/// Cuántos candidatos recuperar de la casilla. Con tope finito (Free) recuperamos con
 /// holgura para que el tope de analizados pueda llenarse pese a los descartes del
 /// embudo; sin tope (planes de pago) respetamos el `max_threads_per_run` de policy.
 fn retrieval_max_for(has_finite_run_cap: bool, reported_cap: u32, policy_max: u32) -> u32 {
@@ -3398,7 +3422,7 @@ fn retrieval_max_for(has_finite_run_cap: bool, reported_cap: u32, policy_max: u3
 
 /// Holgura de recuperación para planes con tope finito de analizados.
 const FREE_RETRIEVAL_FACTOR: u32 = 3;
-/// Techo duro de recuperación para no disparar las llamadas a Gmail en Free.
+/// Techo duro de recuperación para no disparar las llamadas al proveedor en Free.
 const FREE_RETRIEVAL_HARD_MAX: u32 = 300;
 
 /// Maximum number of threads processed concurrently in a single analysis run.
@@ -4010,7 +4034,7 @@ async fn enforce_rate_limit(
     }
 }
 
-async fn fresh_gmail_access_token(
+async fn fresh_mailbox_access_token(
     state: &AppState,
     connection: &MailboxConnection,
 ) -> Result<String, ApiError> {
@@ -4029,7 +4053,7 @@ async fn fresh_gmail_access_token(
         &refresh_token,
     )
     .await
-    .map_err(gmail_refresh_error)?;
+    .map_err(mailbox_refresh_error)?;
 
     let mut updated = connection.clone();
     updated.access_token_encrypted =
@@ -4052,22 +4076,22 @@ async fn fresh_gmail_access_token(
     Ok(token.access_token)
 }
 
-fn gmail_refresh_error(error: RefreshError) -> ApiError {
+fn mailbox_refresh_error(error: RefreshError) -> ApiError {
     match error {
         RefreshError::InvalidGrant => {
-            ApiError::forbidden("Google rechazó la conexión; vuelve a conectar la casilla")
+            ApiError::forbidden("el proveedor rechazó la conexión; vuelve a conectar la casilla")
         }
         RefreshError::Other(_) => ApiError::service_unavailable(
-            "no se pudo renovar la conexión con Gmail; inténtalo nuevamente",
+            "no se pudo renovar la conexión con la casilla; inténtalo nuevamente",
         ),
     }
 }
 
-fn require_gmail_connected(connection: Option<&MailboxConnection>) -> Result<(), ApiError> {
+fn require_mailbox_connected(connection: Option<&MailboxConnection>) -> Result<(), ApiError> {
     if mailbox_connection_is_active(connection) {
         Ok(())
     } else {
-        Err(ApiError::forbidden("conecta Gmail antes de analizar"))
+        Err(ApiError::forbidden("conecta una casilla antes de analizar"))
     }
 }
 
@@ -5004,9 +5028,9 @@ mod tests {
     #[test]
     fn analysis_failure_stage_is_safe_and_specific() {
         let staged = anyhow::anyhow!("provider body contains secret-token")
-            .context(AnalysisFailureStage("gmail_list_threads"));
+            .context(AnalysisFailureStage("mailbox_list_threads"));
 
-        assert_eq!(analysis_failure_stage(&staged), "gmail_list_threads");
+        assert_eq!(analysis_failure_stage(&staged), "mailbox_list_threads");
         assert_eq!(
             analysis_failure_stage(&anyhow::anyhow!("provider body contains secret-token")),
             "unknown"
@@ -5014,16 +5038,64 @@ mod tests {
     }
 
     #[test]
-    fn gmail_refresh_errors_are_safe_and_actionable() {
-        let rejected = gmail_refresh_error(RefreshError::InvalidGrant);
+    fn mailbox_refresh_errors_are_safe_and_actionable() {
+        let rejected = mailbox_refresh_error(RefreshError::InvalidGrant);
         assert_eq!(rejected.status, StatusCode::FORBIDDEN);
         assert!(rejected.message.contains("vuelve a conectar"));
 
-        let unavailable = gmail_refresh_error(RefreshError::Other(anyhow::anyhow!(
+        let unavailable = mailbox_refresh_error(RefreshError::Other(anyhow::anyhow!(
             "provider body contains secret-token"
         )));
         assert_eq!(unavailable.status, StatusCode::SERVICE_UNAVAILABLE);
         assert!(!unavailable.message.contains("secret-token"));
+    }
+
+    #[test]
+    fn credentials_are_reused_only_for_the_same_provider_and_mailbox() {
+        let mut previous = Some(MailboxConnection {
+            owner_email: "owner@example.com".to_string(),
+            provider: MailboxProviderKind::Google,
+            mailbox_email: "mailbox@example.com".to_string(),
+            access_token_encrypted: "access".to_string(),
+            refresh_token_encrypted: Some("google-refresh".to_string()),
+            connected_at: Utc::now(),
+            updated_at: Utc::now(),
+            revoked_at: None,
+        });
+
+        let same = matching_previous_connection(
+            &previous,
+            MailboxProviderKind::Google,
+            "MAILBOX@example.com",
+        )
+        .unwrap();
+        assert_eq!(
+            same.refresh_token_encrypted.as_deref(),
+            Some("google-refresh")
+        );
+        assert!(
+            matching_previous_connection(
+                &previous,
+                MailboxProviderKind::Microsoft,
+                "mailbox@example.com"
+            )
+            .is_none()
+        );
+        assert!(
+            matching_previous_connection(
+                &previous,
+                MailboxProviderKind::Google,
+                "other@example.com"
+            )
+            .is_none()
+        );
+
+        assert_eq!(
+            google_revocation_token(previous.as_ref()),
+            Some("google-refresh")
+        );
+        previous.as_mut().unwrap().provider = MailboxProviderKind::Microsoft;
+        assert_eq!(google_revocation_token(previous.as_ref()), None);
     }
 
     #[tokio::test]

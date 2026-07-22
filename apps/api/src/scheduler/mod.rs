@@ -418,7 +418,7 @@ async fn fresh_access_token(state: &AppState, config: &ScheduleConfig) -> anyhow
         != crate::storage::MailboxConnectionRefresh::Updated
     {
         return Err(anyhow::anyhow!(
-            "la conexión Gmail cambió durante el refresh; se canceló el análisis programado"
+            "la conexión de la casilla cambió durante el refresh; se canceló el análisis programado"
         ));
     }
     Ok(token.access_token)
