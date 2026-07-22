@@ -3253,9 +3253,9 @@ el runbook, y recién entonces probar un connect real contra Microsoft.
 
 ## 2026-07-22 — Schema `billing` normalizado + facturación anual + avisos de cuota
 
-**Estado:** implementado y probado contra Postgres real (Docker); migración
-sin aplicar todavía en Supabase (pendiente de `SUPABASE_ACCESS_TOKEN`/
-`SUPABASE_PROJECT_REF`).
+**Estado:** aplicado en Supabase el 2026-07-22. `0002_billing_schema` normalizó
+billing y `0003_legacy_equipo_to_pro` conservó como Pro la única suscripción
+activa del plan Equipo retirado.
 
 **Qué se hizo:** `subscription`/`checkout_session`/`usage_ledger` dejaron de
 vivir como filas JSONB en `mira.records` y pasaron a tablas normalizadas en un
@@ -3292,7 +3292,9 @@ punta a punta contra Postgres 16 en Docker con datos legacy sintéticos
 el backfill, y `scripts/backup-postgres.sh` corrido contra esa misma base
 para confirmar que el dump incluye ambos schemas.
 
-**Qué sigue:** aplicar la migración en Supabase con
-`scripts/apply-supabase-migrations.sh` (correr `scripts/backup-postgres.sh`
-antes), y decidir cuándo limpiar las filas viejas de `subscription`/
+**Evidencia de producción:** respaldo previo verificado; checksums de `0001`–
+`0003` coincidentes; 1/1 suscripciones y 5/5 ledgers migrados; RLS activo en
+las cinco tablas de `billing`; respaldo posterior verificado (14 MB).
+
+**Qué sigue:** decidir cuándo limpiar las filas viejas de `subscription`/
 `checkout`/`usage_ledger` que quedaron inertes en `mira.records`.
