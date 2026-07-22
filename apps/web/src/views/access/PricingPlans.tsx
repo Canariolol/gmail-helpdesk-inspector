@@ -58,7 +58,7 @@ export function PricingPlans({
                 <Check size={15} /> {formatClp(plan.limits.retrieved_threads_per_month)} correos revisados/mes
               </li>
               <li>
-                <Check size={15} /> {formatClp(plan.limits.ai_analyzed_threads_per_month)} hilos auditados por Ninfa/mes
+                <Check size={15} /> {formatClp(plan.limits.ai_analyzed_threads_per_month)} conversaciones revisadas por Mira/mes
               </li>
               <li>
                 <Check size={15} /> {plan.limits.mailboxes} casilla{plan.limits.mailboxes > 1 ? "s" : ""} ·{" "}

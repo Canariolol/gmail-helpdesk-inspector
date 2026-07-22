@@ -33,7 +33,7 @@ export function AyudaView() {
             clasificación.
           </li>
           <li>
-            <strong>Revisa manualmente.</strong> En <em>Revisión manual</em> encontrarás los hilos donde la IA tuvo dudas.
+            <strong>Revisa manualmente.</strong> En <em>Revisión manual</em> encontrarás las conversaciones donde Mira necesita tu confirmación.
             Corrige la clasificación, marca si fue respondido y guarda la revisión: las métricas se recalculan.
           </li>
           <li>
@@ -62,7 +62,7 @@ export function AyudaView() {
           </li>
           <li><strong>P90 respuesta:</strong> el 90% de las solicitudes se respondió en este tiempo o menos.</li>
           <li><strong>Cierre medio:</strong> promedio entre la recepción y el último envío interno del hilo.</li>
-          <li><strong>Pendientes de revisión:</strong> hilos donde reglas o IA requieren confirmación humana; pueden tener un estado tentativo mientras esperan revisión.</li>
+          <li><strong>Pendientes de revisión:</strong> conversaciones donde Mira necesita tu confirmación; pueden tener un estado tentativo mientras esperan revisión.</li>
           <li><strong>Confianza:</strong> proporción de hilos que no están pendientes de revisión manual.</li>
         </ul>
       </section>
@@ -74,7 +74,7 @@ export function AyudaView() {
           <li>Mira no envía, etiqueta, archiva, edita ni elimina correos.</li>
           <li>Los cuerpos completos se usan solo durante el análisis/auditoría y no se conservan como datos de producto.</li>
           <li>
-            La auditoría IA viene activa para mejorar la clasificación. Puedes desactivarla desde
+            Mira viene activa para mejorar la clasificación. Puedes desactivarla desde
             <em> Configuración</em>; los casos inciertos pasarán a revisión manual y el cambio se aplicará al próximo análisis.
           </li>
           <li>Las métricas guardan trazabilidad: puedes revisar qué hilos componen cada número.</li>
@@ -91,5 +91,5 @@ const classificationDescriptions: Record<Classification, string> = {
   newsletter: "Boletines y correos de marketing.",
   spam: "Correo no deseado.",
   misc: "Correo ignorado según los filtros configurados.",
-  ambiguous: "La IA no pudo clasificarlo con certeza; requiere revisión manual.",
+  ambiguous: "Mira necesita una revisión manual para confirmar esta clasificación.",
 };

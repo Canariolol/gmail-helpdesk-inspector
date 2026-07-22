@@ -48,7 +48,7 @@ export function ReportesView({ runs }: Props) {
         <div>
           <h2>Reporte consolidado</h2>
           <p className="muted-note">
-            Métricas agregadas de los análisis completados cuyo periodo auditado intersecta el rango seleccionado.
+            Resumen de los análisis completados que coinciden con el período seleccionado.
           </p>
         </div>
         <RangeField label="Periodo del reporte" type="date" fromValue={from} toValue={to} onFromChange={setFromOverride} onToChange={setToOverride} />
@@ -70,8 +70,8 @@ export function ReportesView({ runs }: Props) {
           </div>
           <div className="metric-grid primary">
             <MetricCard icon={Ban} label="Ignoradas" value={totals.ignored} tone="gray" />
-            <MetricCard icon={ClipboardList} label="Overrides manuales" value={totals.manualOverrides} tone="purple" />
-            <MetricCard icon={ShieldCheck} label="Confianza ponderada" value={formatPercent(totals.reportConfidence)} tone="purple" />
+            <MetricCard icon={ClipboardList} label="Correcciones manuales" value={totals.manualOverrides} tone="purple" />
+            <MetricCard icon={ShieldCheck} label="Confianza" value={formatPercent(totals.reportConfidence)} tone="purple" description="Porcentaje de conversaciones que Mira pudo clasificar sin pedir una revisión manual, considerando todos los análisis incluidos." />
             <MetricCard icon={Timer} label="T. medio respuesta" value={formatDuration(totals.avgFirstResponseMinutes)} tone="gray" />
             <MetricCard icon={CheckCheck} label="Cierre medio" value={formatDuration(totals.avgResolutionMinutes)} tone="gray" />
           </div>

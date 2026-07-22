@@ -202,8 +202,7 @@ export function FilterBar({
         <div className="filter-bar-policy">
           <CheckCircle2 size={14} />
           <span>
-            Política activa
-            {orgConfig.policy_version ? ` v${orgConfig.policy_version.version}` : ""}
+            Configuración lista
             {" · "}
             {orgConfig.mailbox.workspace_domain}
           </span>

@@ -160,7 +160,7 @@ export function PrivacidadDatosView() {
           <AlertTriangle size={20} />
           <div>
             <strong>No se pudo cargar privacidad y datos</strong>
-            <p>Intenta nuevamente. Esta pantalla solo consulta metadata y no ejecuta acciones destructivas.</p>
+            <p>Intenta nuevamente. Esta pantalla solo muestra información y no modifica ni elimina datos.</p>
           </div>
         </div>
       </div>
@@ -182,7 +182,7 @@ export function PrivacidadDatosView() {
           <span className="privacy-kicker"><ShieldCheck size={15} /> Centro de confianza</span>
           <h2>Privacidad y datos</h2>
           <p>
-            Revisa qué acceso tiene la app, qué datos derivados conserva y qué acciones de desconexión o borrado
+            Revisa qué acceso tiene Mira, qué resultados conserva y qué acciones de desconexión o borrado
             requieren confirmaciones explícitas antes de ejecutarse.
           </p>
         </div>
@@ -203,10 +203,9 @@ export function PrivacidadDatosView() {
         </section>
 
         <section className="card privacy-panel">
-          <h3><Lock size={18} /> Organización y política</h3>
+          <h3><Lock size={18} /> Organización y configuración</h3>
           <DataRow label="Organización" value={data.org.name} />
           <DataRow label="Rol" value={formatRole(data.org.role)} />
-          <DataRow label="Política activa" value={`v${data.org.policy_version}`} />
           <DataRow label="Configuración" value={<BoolBadge value={data.org.setup_ready} trueLabel="Lista" falseLabel="Pendiente" />} />
           {!data.org.setup_ready && data.org.setup_missing.length > 0 && (
             <p className="privacy-note warning">Falta completar: {data.org.setup_missing.map(formatMissingSetupItem).join(", ")}</p>
@@ -215,17 +214,16 @@ export function PrivacidadDatosView() {
       </div>
 
       <section className="card privacy-panel">
-        <h3><Bot size={18} /> Uso de datos e IA</h3>
+        <h3><Bot size={18} /> Uso de datos con Mira</h3>
         <div className="privacy-grid two compact">
-          <DataRow label="Uso mínimo de datos" value="Metadatos y extractos mínimos" />
-          <DataRow label="Auditoría IA" value={<BoolBadge value={data.privacy.ai_enabled} trueLabel="Activa" falseLabel="Desactivada" />} />
-          <DataRow label="Consentimiento IA" value={formatDate(data.privacy.ai_consent_granted_at)} />
+          <DataRow label="Información utilizada" value="Datos básicos y fragmentos de mensajes" />
+          <DataRow label="Mira" value={<BoolBadge value={data.privacy.ai_enabled} trueLabel="Activa" falseLabel="Desactivada" />} />
+          <DataRow label="Activada el" value={formatDate(data.privacy.ai_consent_granted_at)} />
           <DataRow label="Plazo configurado" value={`${data.privacy.retention_days} días`} />
           <DataRow label="Reportes" value={data.privacy.report_mode === "metrics_only" ? "Solo métricas" : "Métricas + elementos en revisión"} />
         </div>
         <p className="privacy-note">
-          Los cuerpos completos no se conservan como datos de producto. Los extractos usados para IA se minimizan
-          según la política vigente del análisis.
+          Los mensajes completos no se conservan. Mira usa solo los fragmentos necesarios para revisar cada conversación.
         </p>
         <p className="privacy-note warning">
           El plazo configurado todavía no activa un borrado automático. Puedes solicitar el borrado de tus análisis desde
@@ -235,9 +233,9 @@ export function PrivacidadDatosView() {
 
       <section className="privacy-stats">
         <StatCard icon={<FileText size={20} />} label="Análisis" value={data.stored_data.analysis_runs_count} />
-        <StatCard icon={<MessageSquare size={20} />} label="Hilos derivados" value={data.stored_data.threads_count} />
-        <StatCard icon={<Database size={20} />} label="Mensajes derivados" value={data.stored_data.messages_count} />
-        <StatCard icon={<Clock size={20} />} label="Auditorías IA" value={data.stored_data.ai_audit_records_count ?? "No disponible"} />
+        <StatCard icon={<MessageSquare size={20} />} label="Conversaciones" value={data.stored_data.threads_count} />
+        <StatCard icon={<Database size={20} />} label="Mensajes" value={data.stored_data.messages_count} />
+        <StatCard icon={<Clock size={20} />} label="Revisiones de Mira" value={data.stored_data.ai_audit_records_count ?? "No disponible"} />
       </section>
 
       <section className="card privacy-panel">
@@ -253,7 +251,7 @@ export function PrivacidadDatosView() {
                 <div className="privacy-action-icon" aria-hidden="true"><Unplug size={19} /></div>
                 <div>
                   <strong>Desconectar la casilla</strong>
-                  <p>Revoca acceso OAuth y detiene nuevos análisis automáticos.</p>
+                  <p>Quita el permiso de acceso y detiene los análisis automáticos.</p>
                 </div>
               </div>
               {!confirmingGmailDisconnect ? (
@@ -284,7 +282,7 @@ export function PrivacidadDatosView() {
             <DisabledActionCard
               icon={<Unplug size={19} />}
               title="Desconectar la casilla"
-              description="Revoca acceso OAuth y detiene nuevos análisis automáticos."
+              description="Quita el permiso de acceso y detiene los análisis automáticos."
               reason={data.actions.disconnect_gmail.reason}
               tone="warning"
             />
@@ -295,7 +293,7 @@ export function PrivacidadDatosView() {
                 <div className="privacy-action-icon" aria-hidden="true"><Trash2 size={19} /></div>
                 <div>
                   <strong>Borrar todos mis análisis</strong>
-                  <p>Elimina análisis, hilos, mensajes derivados, auditorías IA y revisiones. No devuelve cuota ni borra tu cuenta.</p>
+                  <p>Elimina análisis, conversaciones, mensajes y revisiones de Mira. No devuelve cuota ni borra tu cuenta.</p>
                 </div>
               </div>
               {!confirmingDeletion ? (
@@ -332,7 +330,7 @@ export function PrivacidadDatosView() {
             <DisabledActionCard
               icon={<Trash2 size={19} />}
               title="Borrar análisis"
-              description="Eliminar resultados derivados de análisis. Estamos definiendo si esta acción será por análisis individual o para todos."
+              description="Eliminar los resultados de tus análisis. Estamos definiendo si esta acción será por análisis individual o para todos."
               reason={data.actions.delete_analysis_data.reason}
               tone="danger"
             />
@@ -340,7 +338,7 @@ export function PrivacidadDatosView() {
           <DisabledActionCard
             icon={<Trash2 size={19} />}
             title="Borrar datos/cuenta"
-            description="Eliminar configuración, políticas y datos derivados de la organización. Requiere confirmación fuerte."
+            description="Eliminar la configuración y los datos de la organización. Requiere una confirmación adicional."
             reason={data.actions.delete_account_data.reason}
             tone="danger"
           />

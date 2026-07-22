@@ -29,7 +29,7 @@ const SECTIONS: Array<{ key: SectionKey; label: string; optional: boolean }> = [
   { key: "org", label: "Organización", optional: false },
   { key: "equipo", label: "Equipo", optional: false },
   { key: "cuenta", label: "Qué cuenta", optional: false },
-  { key: "ia", label: "Auditoría IA", optional: false },
+  { key: "ia", label: "Mira", optional: false },
   { key: "programacion", label: "Programación", optional: true },
   { key: "retencion", label: "Retención", optional: true },
 ];
@@ -186,7 +186,7 @@ function SchedulerStatusPanel({ status }: { status: OperationsStatus | undefined
     <div className={`scheduler-status-panel${failed ? " warning" : ""}`}>
       <div className="scheduler-status-head">
         <div>
-          <span className="mono-label">Operación automática</span>
+          <span className="mono-label">Análisis automático</span>
           <h3>
             {status.scheduler.enabled ? <Activity size={18} /> : <PauseCircle size={18} />}
             {status.scheduler.enabled ? "Análisis programado activo" : "Análisis programado desactivado"}
@@ -198,13 +198,13 @@ function SchedulerStatusPanel({ status }: { status: OperationsStatus | undefined
       </div>
       <div className="scheduler-status-grid">
         <div><span>Zona horaria</span><strong>{status.scheduler.timezone}</strong></div>
-        <div><span>Próximo intento</span><strong>{formatDateTime(status.scheduler.next_run_estimate)}</strong></div>
+        <div><span>Próximo análisis</span><strong>{formatDateTime(status.scheduler.next_run_estimate)}</strong></div>
         <div><span>Destinatarios</span><strong>{status.scheduler.recipients_count}</strong></div>
-        <div><span>Reglas de análisis</span><strong>v{status.policy.policy_version}</strong></div>
+        <div><span>Configuración</span><strong>Activa</strong></div>
       </div>
       {last ? (
         <p className="scheduler-status-copy">
-          Última ejecución: <strong>{last.window_date_from} → {last.window_date_to}</strong> · estado <strong>{formatExecutionStatus(last.status)}</strong>
+          Último análisis: <strong>{last.window_date_from} → {last.window_date_to}</strong> · <strong>{formatExecutionStatus(last.status)}</strong>
         </p>
       ) : (
         <p className="scheduler-status-copy">Aún no hay ejecuciones automáticas registradas.</p>
@@ -226,9 +226,9 @@ function OperationsHistoryPanel({ history }: { history: OperationsHistory | unde
     <div className="operations-history-panel">
       <div className="scheduler-status-head">
         <div>
-          <span className="mono-label">Historial operativo</span>
+          <span className="mono-label">Historial de análisis</span>
           <h3>
-            <Activity size={18} /> Últimos eventos
+            <Activity size={18} /> Últimos análisis
           </h3>
         </div>
         <span className="wizard-ready-badge">{history.total_count} registrados</span>
@@ -555,7 +555,7 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
               />
               <span className="cfg-hint">
                 Si la respuesta del equipo menciona alguna de estas palabras, el correo se cuenta
-                como solicitud válida y la IA confirma el veredicto. Una por línea.
+                como solicitud válida y Mira confirma el resultado. Una por línea.
               </span>
             </div>
             <div className="field">
@@ -591,34 +591,34 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
                 placeholder={"newsletter\nboletín\npromoción"}
               />
               <span className="cfg-hint">
-                Hilos cuyo asunto contenga estas palabras se clasifican como misc. Uno por línea.
+                Las conversaciones cuyo asunto contenga estas palabras se ignorarán. Una por línea.
               </span>
             </div>
           </section>
 
           <section className="cfg-section" data-section="ia" ref={registerSection("ia")}>
             <div className="cfg-section-head">
-              <span className="mono-label">04 · Auditoría IA</span>
-              <h3>Auditoría con IA</h3>
+              <span className="mono-label">04 · Mira</span>
+              <h3>Revisión con Mira</h3>
               <p>
-                La IA clasifica hilos para detectar casos ambiguos que necesitan revisión manual.
+                Mira revisa las conversaciones para detectar casos que necesitan revisión manual.
                 Viene activada para potenciar la calidad del servicio; puedes desactivarla cuando
                 quieras.
               </p>
             </div>
             <div className="wizard-ai-card">
-              <h4>¿Qué datos procesa?</h4>
+              <h4>¿Qué información usa Mira?</h4>
               <ul>
-                <li>Participantes, fecha, asunto y texto del mensaje reducido a un máximo de {draft.maxBodyCharsPerMessage} caracteres</li>
-                <li>Hasta 4 mensajes clave por hilo, sin duplicados</li>
+                <li>Participantes, fecha, asunto y hasta {draft.maxBodyCharsPerMessage} caracteres de cada mensaje</li>
+                <li>Hasta 4 mensajes clave por conversación, sin duplicados</li>
                 <li>
                   Un mensaje corto puede incluirse completo dentro de ese límite; los extractos pueden contener texto sensible
                 </li>
                 <li>
-                  <strong>NO</strong> se procesan adjuntos, imágenes ni headers completos
+                  <strong>NO</strong> se procesan adjuntos, imágenes ni encabezados completos
                 </li>
               </ul>
-              <p>Procesado por Amazon Bedrock. Puedes desactivarla en cualquier momento desde esta pantalla.</p>
+              <p>Puedes desactivar a Mira en cualquier momento desde esta pantalla.</p>
             </div>
             <label className="checkline" style={{ cursor: "pointer" }}>
               <input
@@ -630,17 +630,16 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
                   set("aiConsentChecked", e.target.checked);
                 }}
               />
-              <span>Auditoría IA activada</span>
+              <span>Mira activada</span>
             </label>
             {draft.aiEnabled ? (
               <p className="wizard-help">
-                Mientras esté activa, fragmentos minimizados de tus hilos de soporte se procesan
-                mediante el proveedor Amazon Bedrock para clasificación automática. El cambio aplica
-                al próximo análisis.
+                Mientras esté activa, Mira revisa fragmentos de tus conversaciones de soporte para
+                clasificarlas. El cambio se aplica al próximo análisis.
               </p>
             ) : (
               <p className="wizard-help">
-                Desactivaste la auditoría IA. Los hilos con clasificación incierta irán a revisión
+                Desactivaste a Mira. Las conversaciones con una clasificación incierta irán a revisión
                 manual. Puedes reactivarla cuando quieras; al hacerlo confirmas su uso para los
                 próximos análisis.
               </p>

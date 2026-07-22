@@ -46,10 +46,10 @@ export function AnalysisFunnelPanel({ run }: Props) {
       >
         <span className="funnel-kicker">
           <Filter size={16} />
-          Embudo del análisis
+          Resumen del análisis
         </span>
         <span className="funnel-subtitle">
-          Se encontraron {candidates}; se analizaron {analyzed} y {aiUnique} requirieron revisión con IA.
+          Se encontraron {candidates}; se analizaron {analyzed} y Mira pidió revisar {aiUnique}.
         </span>
         <ChevronDown size={18} className={open ? "funnel-chevron open" : "funnel-chevron"} />
       </button>
@@ -77,7 +77,7 @@ export function AnalysisFunnelPanel({ run }: Props) {
           {skippedByPlan > 0 && (
             <p className="funnel-hint">
               {skippedByPlan} hilos analizables quedaron fuera por el límite del plan
-              {funnel.more_beyond_retrieved ? "; el proveedor además indicó que había más resultados" : ""}.
+              {funnel.more_beyond_retrieved ? "; había más correos disponibles" : ""}.
             </p>
           )}
 

@@ -21,7 +21,7 @@ export function PrivacyCallout({ compact = false }: Props) {
             <LockKeyhole size={15} /> Tu acceso se almacena cifrado.
           </li>
           <li>
-            <CheckCircle2 size={15} /> Métricas auditables hasta los hilos que las originan.
+            <CheckCircle2 size={15} /> Puedes ver las conversaciones que componen cada métrica.
           </li>
           <li>
             <CheckCircle2 size={15} /> No conservamos cuerpos completos de correos.

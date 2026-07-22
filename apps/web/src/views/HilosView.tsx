@@ -23,7 +23,7 @@ type Props = {
 export function HilosView(props: Props) {
   const effectiveFilter = props.forcedFilter ?? props.filter;
   const visibleThreads = filterThreads(props.threads, effectiveFilter);
-  const title = props.forcedFilter === "review" ? "Revisión manual" : "Hilos auditables";
+  const title = props.forcedFilter === "review" ? "Revisión manual" : "Conversaciones";
 
   if (!props.hasRun) {
     return (

@@ -40,13 +40,13 @@ export function PlanCapBanner({ run, planName, onUpgrade }: Props) {
             </span>
           </>
         ) : (
-          <strong>Se agotó tu cupo mensual de auditoría con Ninfa.</strong>
+          <strong>Se agotó tu cupo mensual de revisiones con Mira.</strong>
         )}
         {aiSkipped > 0 && (
           <span>
             {aiSkipped} {aiSkipped === 1 ? "hilo quedó" : "hilos quedaron"} sin revisar por
-            Ninfa: agotaste el cupo de IA de tu plan{planLabel} este mes. Se clasificaron con
-            reglas, así que pueden perder precisión.
+            Mira: agotaste el cupo de revisiones de tu plan{planLabel} este mes. Se clasificaron
+            automáticamente, así que pueden perder precisión.
           </span>
         )}
       </div>
