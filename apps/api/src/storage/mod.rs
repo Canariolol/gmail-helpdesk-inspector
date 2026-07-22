@@ -159,6 +159,17 @@ pub trait StorageRepository: Send + Sync {
         org_id: &str,
         period_key: &str,
     ) -> anyhow::Result<Option<UsageLedger>>;
+    /// Registra que se avisó a una org por haber cruzado un umbral de cuota
+    /// (80/100) en un eje dado del período. Devuelve `true` solo la primera
+    /// vez que se registra para esa combinación — dedup para no reenviar el
+    /// mismo aviso en cada run.
+    async fn record_quota_alert_if_new(
+        &self,
+        org_id: &str,
+        period_key: &str,
+        axis: &str,
+        threshold: u16,
+    ) -> anyhow::Result<bool>;
     async fn create_analysis_run(&self, run: &AnalysisRun) -> anyhow::Result<()>;
     async fn claim_pending_analysis_run(&self, id: &str) -> anyhow::Result<Option<AnalysisRun>>;
     async fn update_analysis_run(&self, run: &AnalysisRun) -> anyhow::Result<()>;
@@ -250,6 +261,7 @@ struct MemoryInner {
     subscriptions: HashMap<String, Subscription>,
     checkout_sessions: HashMap<String, CheckoutSession>,
     usage_ledgers: HashMap<String, UsageLedger>,
+    quota_alerts: std::collections::HashSet<String>,
     mailbox_metadata: HashMap<String, MailboxMetadata>,
     filter_presets: HashMap<String, FilterPreset>,
     manual_review_overrides: HashMap<String, ManualReviewOverride>,
@@ -754,6 +766,17 @@ impl StorageRepository for MemoryStorage {
             .usage_ledgers
             .get(&format!("{org_id}:{period_key}"))
             .cloned())
+    }
+
+    async fn record_quota_alert_if_new(
+        &self,
+        org_id: &str,
+        period_key: &str,
+        axis: &str,
+        threshold: u16,
+    ) -> anyhow::Result<bool> {
+        let key = format!("{org_id}:{period_key}:{axis}:{threshold}");
+        Ok(self.inner.write().await.quota_alerts.insert(key))
     }
 
     async fn create_analysis_run(&self, run: &AnalysisRun) -> anyhow::Result<()> {
@@ -1984,6 +2007,53 @@ mod tests {
         assert_eq!(usage.runs_created, 2);
         assert_eq!(usage.retrieved_threads, 18);
         assert_eq!(usage.ai_analyzed_threads, 8);
+    }
+
+    #[tokio::test]
+    async fn quota_alert_is_only_new_the_first_time() {
+        let storage = MemoryStorage::default();
+        let first = storage
+            .record_quota_alert_if_new("org-1", "2026-07", "runs", 80)
+            .await
+            .unwrap();
+        let second = storage
+            .record_quota_alert_if_new("org-1", "2026-07", "runs", 80)
+            .await
+            .unwrap();
+        assert!(first, "el primer registro debe ser nuevo");
+        assert!(!second, "el mismo umbral no debe reenviarse en el período");
+    }
+
+    #[tokio::test]
+    async fn quota_alert_is_tracked_independently_per_axis_and_threshold() {
+        let storage = MemoryStorage::default();
+        assert!(
+            storage
+                .record_quota_alert_if_new("org-1", "2026-07", "runs", 80)
+                .await
+                .unwrap()
+        );
+        assert!(
+            storage
+                .record_quota_alert_if_new("org-1", "2026-07", "runs", 100)
+                .await
+                .unwrap(),
+            "80% y 100% son avisos distintos"
+        );
+        assert!(
+            storage
+                .record_quota_alert_if_new("org-1", "2026-07", "ai_analyzed_threads", 80)
+                .await
+                .unwrap(),
+            "cada eje se avisa por separado"
+        );
+        assert!(
+            storage
+                .record_quota_alert_if_new("org-1", "2026-08", "runs", 80)
+                .await
+                .unwrap(),
+            "un período nuevo puede volver a avisar"
+        );
     }
 
     #[tokio::test]

@@ -2,6 +2,7 @@ import { ArrowUpRight, Ban, Check, LogOut, RefreshCw, ShieldAlert } from "lucide
 import { useState } from "react";
 import type {
   AccountStatus,
+  BillingInterval,
   BillingPlan,
   BillingPlanId,
   MailboxProviderId,
@@ -21,7 +22,7 @@ interface CuentaViewProps {
   account: AccountStatus;
   plans: BillingPlan[];
   /** Checkout nuevo (reactivar plan bloqueado o reanudar tras cancelar). */
-  onChoosePlan: (planId: BillingPlanId) => void;
+  onChoosePlan: (planId: BillingPlanId, billingInterval: BillingInterval) => void;
   checkoutLoadingPlanId: string | null;
   /** Abre el modal de cambio de plan (suscripción activa). */
   onOpenChangePlan: () => void;
@@ -141,7 +142,7 @@ export function CuentaView({
                   type="button"
                   className="btn-primary"
                   disabled={!planId || checkoutLoadingPlanId === planId}
-                  onClick={() => planId && onChoosePlan(planId)}
+                  onClick={() => planId && onChoosePlan(planId, "monthly")}
                 >
                   <RefreshCw size={16} />
                   {planId && checkoutLoadingPlanId === planId ? "Reanudando…" : "Reanudar suscripción"}

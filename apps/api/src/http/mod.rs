@@ -48,10 +48,10 @@ use crate::{
         verify_session_cookie,
     },
     billing::{
-        Account, BillingPlan, BillingPlanId, CheckoutSession, CheckoutSessionStatus,
-        EntitlementSnapshot, Subscription, SubscriptionStatus, UNLIMITED_REPORTED_PER_RUN,
-        UsageLedger, active_subscription_for_trial, free_plan, plan_by_id, public_plans,
-        subscription_allows_access,
+        Account, BillingInterval, BillingPlan, BillingPlanId, CheckoutSession,
+        CheckoutSessionStatus, EntitlementSnapshot, Subscription, SubscriptionStatus,
+        UNLIMITED_REPORTED_PER_RUN, UsageLedger, active_subscription_for_trial, free_plan,
+        plan_by_id, public_plans, subscription_allows_access,
     },
     config::{AppConfig, MicrosoftConfig},
     gmail::GmailClient,
@@ -67,6 +67,7 @@ use crate::{
         retention_expires_at, setup_state, validate_timezone,
     },
     provider_detect::{self, DetectedProvider},
+    report::{ReportMailer, ResendMailer},
     scheduler::{
         model::{ScheduleConfig, ScheduleState},
         window::next_fire_time_label,
@@ -1241,6 +1242,10 @@ struct CreateCheckoutSubscriptionRequest {
     /// Email del pagador capturado por el Brick; puede diferir de la cuenta.
     #[serde(default)]
     payer_email: Option<String>,
+    /// "monthly" (default) o "annual". Ausente = mensual, para no romper
+    /// clientes viejos del checkout embebido.
+    #[serde(default)]
+    billing_interval: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1257,6 +1262,11 @@ async fn create_checkout_subscription(
     let bundle = get_or_provision_org_config(&state, &session.google_account_email).await?;
     let plan_id = BillingPlanId::parse(&request.plan_id)
         .ok_or_else(|| ApiError::bad_request("plan_id inválido"))?;
+    let billing_interval = match request.billing_interval.as_deref() {
+        None => BillingInterval::Monthly,
+        Some(value) => BillingInterval::parse(value)
+            .ok_or_else(|| ApiError::bad_request("billing_interval inválido"))?,
+    };
     let card_token_id = request
         .card_token_id
         .as_deref()
@@ -1273,6 +1283,12 @@ async fn create_checkout_subscription(
         ));
     }
     let plan = plan_by_id(&plan_id);
+    let amount_clp = match billing_interval {
+        BillingInterval::Monthly => plan.clp_monthly,
+        BillingInterval::Annual => plan
+            .clp_annual
+            .ok_or_else(|| ApiError::bad_request("este plan no ofrece facturación anual"))?,
+    };
     let now = Utc::now();
     let mut checkout = CheckoutSession {
         id: Uuid::new_v4().to_string(),
@@ -1282,8 +1298,9 @@ async fn create_checkout_subscription(
         status: CheckoutSessionStatus::Pending,
         provider: "mercadopago".to_string(),
         provider_subscription_id: None,
+        billing_interval: billing_interval.clone(),
         currency_id: "CLP".to_string(),
-        amount_clp: plan.clp_monthly,
+        amount_clp,
         usd_reference_monthly: plan.usd_reference_monthly,
         trial_days: plan.trial_days,
         created_at: now,
@@ -1327,6 +1344,7 @@ async fn create_checkout_subscription(
         checkout.org_id.clone(),
         checkout.plan_id.clone(),
         Some(mp.id),
+        checkout.billing_interval.clone(),
         now,
     );
     if !matches!(subscription.status, SubscriptionStatus::Trialing) {
@@ -1510,6 +1528,7 @@ async fn mercadopago_webhook(
                 checkout.org_id.clone(),
                 checkout.plan_id.clone(),
                 Some(provider_id.clone()),
+                checkout.billing_interval.clone(),
                 now,
             )
         });
@@ -2560,7 +2579,7 @@ async fn create_analysis_run(
         run_id = %run.id,
         "analysis run created"
     );
-    increment_runs_usage(&state, run.org_id.as_deref()).await?;
+    increment_runs_usage(&state, run.org_id.as_deref(), &run.user_email).await?;
     Ok(Json(run))
 }
 
@@ -3376,6 +3395,7 @@ pub(crate) async fn execute_analysis(
     add_analysis_usage(
         &state,
         run.org_id.as_deref(),
+        &run.user_email,
         run.total_candidate_threads as u32,
         ai_unique_thread_ids.len() as u32,
     )
@@ -4229,7 +4249,11 @@ async fn enforce_usage_allows_run(state: &AppState, org_id: &str) -> Result<(), 
     Ok(())
 }
 
-async fn increment_runs_usage(state: &AppState, org_id: Option<&str>) -> Result<(), ApiError> {
+async fn increment_runs_usage(
+    state: &AppState,
+    org_id: Option<&str>,
+    account_email: &str,
+) -> Result<(), ApiError> {
     let Some(org_id) = org_id else {
         return Ok(());
     };
@@ -4238,12 +4262,14 @@ async fn increment_runs_usage(state: &AppState, org_id: Option<&str>) -> Result<
         .storage
         .add_usage(org_id, &period_key, 1, 0, 0)
         .await?;
+    check_quota_alerts(state, org_id, &period_key, account_email).await;
     Ok(())
 }
 
 async fn add_analysis_usage(
     state: &AppState,
     org_id: Option<&str>,
+    account_email: &str,
     retrieved_threads: u32,
     ai_analyzed_threads: u32,
 ) -> anyhow::Result<()> {
@@ -4260,7 +4286,119 @@ async fn add_analysis_usage(
             retrieved_threads,
             ai_analyzed_threads,
         )
+        .await?;
+    check_quota_alerts(state, org_id, &period_key, account_email).await;
+    Ok(())
+}
+
+/// Avisos de consumo al 80% y 100% de cada eje con cupo mensual (plan §8 de
+/// docs/plan-monetizacion-mira-helpdesk.md). Nunca falla el run que lo dispara:
+/// un email que no sale es una degradación silenciosa aceptable, un run que
+/// se cae por eso no lo es.
+async fn check_quota_alerts(state: &AppState, org_id: &str, period_key: &str, account_email: &str) {
+    if !state.config.billing.enforcement_enabled {
+        return;
+    }
+    let plan = match effective_plan_for_org(state, org_id).await {
+        Ok(plan) => plan,
+        Err(error) => {
+            tracing::warn!(?error, %org_id, "no se pudo resolver el plan para avisos de cuota");
+            return;
+        }
+    };
+    let usage = match state.storage.get_usage_ledger(org_id, period_key).await {
+        Ok(Some(usage)) => usage,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::warn!(%error, %org_id, "no se pudo leer el consumo para avisos de cuota");
+            return;
+        }
+    };
+    let axes: [(&str, u32, u32); 3] = [
+        ("runs", usage.runs_created, plan.limits.runs_per_month),
+        (
+            "retrieved_threads",
+            usage.retrieved_threads,
+            plan.limits.retrieved_threads_per_month,
+        ),
+        (
+            "ai_analyzed_threads",
+            usage.ai_analyzed_threads,
+            plan.limits.ai_analyzed_threads_per_month,
+        ),
+    ];
+    for (axis, used, limit) in axes {
+        if limit == 0 {
+            continue;
+        }
+        let percent = (u64::from(used) * 100) / u64::from(limit);
+        for threshold in [80u16, 100u16] {
+            if percent < u64::from(threshold) {
+                continue;
+            }
+            match state
+                .storage
+                .record_quota_alert_if_new(org_id, period_key, axis, threshold)
+                .await
+            {
+                Ok(true) => {
+                    send_quota_alert_email(state, account_email, &plan, axis, threshold).await
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(%error, %org_id, axis, threshold, "no se pudo registrar el aviso de cuota")
+                }
+            }
+        }
+    }
+}
+
+fn quota_axis_label(axis: &str) -> &'static str {
+    match axis {
+        "runs" => "análisis mensuales",
+        "retrieved_threads" => "correos sincronizados",
+        "ai_analyzed_threads" => "conversaciones clasificadas por IA",
+        _ => "consumo del plan",
+    }
+}
+
+async fn send_quota_alert_email(
+    state: &AppState,
+    account_email: &str,
+    plan: &BillingPlan,
+    axis: &str,
+    threshold: u16,
+) {
+    let mailer = match ResendMailer::from_config(&state.config.report) {
+        Ok(mailer) => mailer,
+        Err(error) => {
+            tracing::warn!(%error, "Resend no configurado; se omite el aviso de cuota");
+            return;
+        }
+    };
+    let axis_label = quota_axis_label(axis);
+    let subject = format!(
+        "Mira Helpdesk: {threshold}% de tu cuota de {axis_label} ({})",
+        plan.name
+    );
+    let html = if threshold >= 100 {
+        format!(
+            "<p>Tu organización alcanzó el 100% de la cuota mensual de <strong>{axis_label}</strong> del plan {}. \
+             No se procesarán más análisis en este eje hasta el próximo ciclo o hasta subir de plan.</p>",
+            plan.name
+        )
+    } else {
+        format!(
+            "<p>Tu organización usó el {threshold}% de la cuota mensual de <strong>{axis_label}</strong> del plan {}.</p>",
+            plan.name
+        )
+    };
+    if let Err(error) = mailer
+        .send(&[account_email.to_string()], &subject, &html)
         .await
+    {
+        tracing::warn!(%error, %account_email, "no se pudo enviar el aviso de cuota");
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -4303,8 +4441,12 @@ fn mercadopago_preapproval_body(
     api_base_url: &str,
 ) -> serde_json::Value {
     let plan = plan_by_id(&checkout.plan_id);
+    let frequency = match checkout.billing_interval {
+        BillingInterval::Monthly => 1,
+        BillingInterval::Annual => 12,
+    };
     let mut auto_recurring = json!({
-        "frequency": 1,
+        "frequency": frequency,
         "frequency_type": "months",
         "start_date": Utc::now().to_rfc3339(),
         "transaction_amount": checkout.amount_clp,
@@ -5398,6 +5540,7 @@ mod tests {
             status: SubscriptionStatus::Active,
             provider: "test".to_string(),
             provider_subscription_id: Some(format!("provider-{email}")),
+            billing_interval: BillingInterval::Monthly,
             current_period_start: Some(now),
             current_period_end: Some(now + chrono::Duration::days(30)),
             trial_ends_at: None,
@@ -6123,6 +6266,7 @@ mod tests {
             status: CheckoutSessionStatus::Pending,
             provider: "mercadopago".to_string(),
             provider_subscription_id: None,
+            billing_interval: BillingInterval::Monthly,
             currency_id: "CLP".to_string(),
             amount_clp: 29_990,
             usd_reference_monthly: 29,
@@ -6141,6 +6285,7 @@ mod tests {
 
         assert_eq!(body["status"], "authorized");
         assert_eq!(body["card_token_id"], "card-token");
+        assert_eq!(body["auto_recurring"]["frequency"], 1);
         assert_eq!(body["auto_recurring"]["free_trial"]["frequency"], 30);
         assert_eq!(
             body["auto_recurring"]["free_trial"]["frequency_type"],
@@ -6148,6 +6293,82 @@ mod tests {
         );
         assert_eq!(body["back_url"], "https://mira.example");
         assert!(body.get("init_point").is_none());
+    }
+
+    #[test]
+    fn annual_checkout_bills_every_twelve_months() {
+        let now = Utc::now();
+        let checkout = CheckoutSession {
+            id: "checkout-annual".to_string(),
+            org_id: "org-1".to_string(),
+            account_email: "owner@example.com".to_string(),
+            plan_id: BillingPlanId::Pro,
+            status: CheckoutSessionStatus::Pending,
+            provider: "mercadopago".to_string(),
+            provider_subscription_id: None,
+            billing_interval: BillingInterval::Annual,
+            currency_id: "CLP".to_string(),
+            amount_clp: 299_900,
+            usd_reference_monthly: 29,
+            trial_days: 30,
+            created_at: now,
+            updated_at: now,
+        };
+
+        let body = mercadopago_preapproval_body(
+            &checkout,
+            "payer@example.com",
+            "card-token",
+            "https://mira.example",
+            "https://api.example",
+        );
+
+        assert_eq!(body["auto_recurring"]["frequency"], 12);
+        assert_eq!(body["auto_recurring"]["frequency_type"], "months");
+        assert_eq!(body["auto_recurring"]["transaction_amount"], 299_900);
+    }
+
+    #[tokio::test]
+    async fn quota_alert_fires_once_at_eighty_percent_and_not_at_a_hundred() {
+        let storage = MemoryStorage::default();
+        let state = AppState::new(test_app_config(), Arc::new(storage));
+        let org_id = "org-quota-test";
+        let period_key = current_period_key();
+        // Mira Free (sin suscripción) da 10 análisis/mes; 8 = 80%.
+        state
+            .storage
+            .add_usage(org_id, &period_key, 8, 0, 0)
+            .await
+            .unwrap();
+
+        check_quota_alerts(&state, org_id, &period_key, "owner@example.com").await;
+
+        assert!(
+            !state
+                .storage
+                .record_quota_alert_if_new(org_id, &period_key, "runs", 80)
+                .await
+                .unwrap(),
+            "el aviso de 80% ya debió quedar registrado por check_quota_alerts"
+        );
+        assert!(
+            state
+                .storage
+                .record_quota_alert_if_new(org_id, &period_key, "runs", 100)
+                .await
+                .unwrap(),
+            "al 80% de uso no debió dispararse (ni quedar registrado) el aviso de 100%"
+        );
+
+        // Repetir la misma pasada de uso no debe volver a marcar el 80% (dedup).
+        check_quota_alerts(&state, org_id, &period_key, "owner@example.com").await;
+        assert!(
+            !state
+                .storage
+                .record_quota_alert_if_new(org_id, &period_key, "runs", 80)
+                .await
+                .unwrap()
+        );
     }
 
     #[test]

@@ -4,6 +4,7 @@ import { API_BASE_URL, api } from "./api/client";
 import type {
   AccountStatus,
   AnalysisRun,
+  BillingInterval,
   BillingPlan,
   BillingPlanId,
   CheckoutSessionResponse,
@@ -65,6 +66,7 @@ export function App() {
   const [plansModalMode, setPlansModalMode] = useState<PlansModalMode | null>(null);
   // Plan elegido para el checkout embebido; muestra el formulario de tarjeta.
   const [checkoutPlan, setCheckoutPlan] = useState<BillingPlan | null>(null);
+  const [checkoutInterval, setCheckoutInterval] = useState<BillingInterval>("monthly");
   // Marca de tiempo del último guardado de revisión exitoso; alimenta la
   // confirmación transitoria del formulario de revisión.
   const [reviewSavedAt, setReviewSavedAt] = useState<number | null>(null);
@@ -246,11 +248,17 @@ export function App() {
   });
 
   const checkout = useMutation({
-    mutationFn: (payload: { planId: BillingPlanId; cardTokenId: string; payerEmail: string }) =>
+    mutationFn: (payload: {
+      planId: BillingPlanId;
+      billingInterval: BillingInterval;
+      cardTokenId: string;
+      payerEmail: string;
+    }) =>
       api<CheckoutSessionResponse>("/checkout/subscriptions", {
         method: "POST",
         body: JSON.stringify({
           plan_id: payload.planId,
+          billing_interval: payload.billingInterval,
           card_token_id: payload.cardTokenId,
           payer_email: payload.payerEmail,
         }),
@@ -346,18 +354,20 @@ export function App() {
 
   const handleGoToSetup = () => setView("configuracion");
 
-  const handleChoosePlan = (planId: BillingPlanId) => {
+  const handleChoosePlan = (planId: BillingPlanId, billingInterval: BillingInterval) => {
     const plan = plans.data?.find((item) => item.id === planId);
     if (!plan) return;
     checkout.reset();
     setPlansModalMode(null);
     setCheckoutPlan(plan);
+    setCheckoutInterval(billingInterval);
   };
 
   const handlePayCheckout = (data: { cardTokenId: string; payerEmail: string }) => {
     if (!checkoutPlan) return;
     checkout.mutate({
       planId: checkoutPlan.id,
+      billingInterval: checkoutInterval,
       cardTokenId: data.cardTokenId,
       payerEmail: data.payerEmail,
     });
@@ -368,6 +378,9 @@ export function App() {
     checkout.reset();
   };
 
+  // ponytail: cambiar el intervalo (mensual↔anual) de una suscripción ya
+  // activa no está soportado — change-plan solo cambia plan_id/monto, igual
+  // que hoy no recolecta tarjeta nueva. Agregar cuando haya una necesidad real.
   const handleChangePlan = (planId: BillingPlanId) => {
     changePlan.mutate(planId);
   };
@@ -429,6 +442,7 @@ export function App() {
     return (
       <CheckoutView
         plan={checkoutPlan}
+        billingInterval={checkoutInterval}
         onPay={handlePayCheckout}
         onBack={handleBackFromCheckout}
         isSubmitting={checkout.isPending}

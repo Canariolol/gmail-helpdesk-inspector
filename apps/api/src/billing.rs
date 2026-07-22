@@ -28,12 +28,83 @@ impl BillingPlanId {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BillingInterval {
+    #[default]
+    Monthly,
+    Annual,
+}
+
+impl BillingInterval {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Monthly => "monthly",
+            Self::Annual => "annual",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "monthly" => Some(Self::Monthly),
+            "annual" => Some(Self::Annual),
+            _ => None,
+        }
+    }
+
+    fn period_days(&self) -> i64 {
+        match self {
+            Self::Monthly => 30,
+            Self::Annual => 365,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SubscriptionStatus {
+    Pending,
+    Trialing,
+    Active,
+    PastDue,
+    Cancelled,
+    Expired,
+}
+
+impl SubscriptionStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Trialing => "trialing",
+            Self::Active => "active",
+            Self::PastDue => "past_due",
+            Self::Cancelled => "cancelled",
+            Self::Expired => "expired",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "pending" => Some(Self::Pending),
+            "trialing" => Some(Self::Trialing),
+            "active" => Some(Self::Active),
+            "past_due" => Some(Self::PastDue),
+            "cancelled" => Some(Self::Cancelled),
+            "expired" => Some(Self::Expired),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BillingPlan {
     pub id: BillingPlanId,
     pub name: String,
     pub usd_reference_monthly: u32,
     pub clp_monthly: u32,
+    /// Precio del ciclo anual (2 meses gratis frente al mensual). `None` cuando
+    /// el plan no ofrece facturación anual (Free).
+    pub clp_annual: Option<u32>,
     pub trial_days: u32,
     pub limits: PlanLimits,
     pub highlighted: bool,
@@ -76,17 +147,6 @@ pub struct Account {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum SubscriptionStatus {
-    Pending,
-    Trialing,
-    Active,
-    PastDue,
-    Cancelled,
-    Expired,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Subscription {
     pub id: String,
@@ -95,6 +155,8 @@ pub struct Subscription {
     pub status: SubscriptionStatus,
     pub provider: String,
     pub provider_subscription_id: Option<String>,
+    #[serde(default)]
+    pub billing_interval: BillingInterval,
     pub current_period_start: Option<DateTime<Utc>>,
     pub current_period_end: Option<DateTime<Utc>>,
     pub trial_ends_at: Option<DateTime<Utc>>,
@@ -114,6 +176,27 @@ pub enum CheckoutSessionStatus {
     Failed,
 }
 
+impl CheckoutSessionStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::ProviderCreated => "provider_created",
+            Self::Activated => "activated",
+            Self::Failed => "failed",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "pending" => Some(Self::Pending),
+            "provider_created" => Some(Self::ProviderCreated),
+            "activated" => Some(Self::Activated),
+            "failed" => Some(Self::Failed),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckoutSession {
     pub id: String,
@@ -123,6 +206,8 @@ pub struct CheckoutSession {
     pub status: CheckoutSessionStatus,
     pub provider: String,
     pub provider_subscription_id: Option<String>,
+    #[serde(default)]
+    pub billing_interval: BillingInterval,
     pub currency_id: String,
     pub amount_clp: u32,
     pub usd_reference_monthly: u32,
@@ -164,6 +249,8 @@ pub fn public_plans() -> Vec<BillingPlan> {
             name: "Inicial".to_string(),
             usd_reference_monthly: 9,
             clp_monthly: 9_990,
+            // Dos meses gratis frente al mensual (9_990 * 10).
+            clp_annual: Some(99_900),
             trial_days: 0,
             highlighted: false,
             limits: PlanLimits {
@@ -182,6 +269,8 @@ pub fn public_plans() -> Vec<BillingPlan> {
             name: "Pro".to_string(),
             usd_reference_monthly: 29,
             clp_monthly: 29_990,
+            // Dos meses gratis frente al mensual (29_990 * 10).
+            clp_annual: Some(299_900),
             trial_days: 30,
             highlighted: true,
             limits: PlanLimits {
@@ -207,6 +296,7 @@ pub fn free_plan() -> BillingPlan {
         name: "Mira Free".to_string(),
         usd_reference_monthly: 0,
         clp_monthly: 0,
+        clp_annual: None,
         trial_days: 0,
         highlighted: false,
         limits: PlanLimits {
@@ -254,6 +344,7 @@ pub fn active_subscription_for_trial(
     org_id: String,
     plan_id: BillingPlanId,
     provider_subscription_id: Option<String>,
+    billing_interval: BillingInterval,
     now: DateTime<Utc>,
 ) -> Subscription {
     let plan = plan_by_id(&plan_id);
@@ -269,10 +360,11 @@ pub fn active_subscription_for_trial(
         provider: "mercadopago".to_string(),
         provider_subscription_id,
         current_period_start: Some(now),
-        current_period_end: Some(now + Duration::days(30)),
+        current_period_end: Some(now + Duration::days(billing_interval.period_days())),
         trial_ends_at: (plan.trial_days > 0)
             .then_some(now + Duration::days(plan.trial_days as i64)),
         cancel_at_period_end: false,
+        billing_interval,
         created_at: now,
         updated_at: now,
     }
@@ -290,6 +382,7 @@ mod tests {
             status,
             provider: "mercadopago".to_string(),
             provider_subscription_id: Some("pre-1".to_string()),
+            billing_interval: BillingInterval::Monthly,
             current_period_start: Some(now),
             current_period_end: Some(now + Duration::days(30)),
             trial_ends_at: None,
@@ -377,5 +470,69 @@ mod tests {
                 plan.name
             );
         }
+    }
+
+    /// Dos meses gratis: el anual debe costar exactamente 10 mensualidades, nunca 12.
+    #[test]
+    fn paid_plans_offer_two_free_months_on_annual_billing() {
+        for plan in public_plans() {
+            let annual = plan
+                .clp_annual
+                .unwrap_or_else(|| panic!("{} debe ofrecer facturación anual", plan.name));
+            assert_eq!(
+                annual,
+                plan.clp_monthly * 10,
+                "{}: el anual debe equivaler a 10 mensualidades (2 meses gratis)",
+                plan.name
+            );
+        }
+    }
+
+    #[test]
+    fn free_plan_has_no_annual_price() {
+        assert_eq!(free_plan().clp_annual, None);
+    }
+
+    #[test]
+    fn billing_interval_round_trips_through_str() {
+        for interval in [BillingInterval::Monthly, BillingInterval::Annual] {
+            assert_eq!(
+                BillingInterval::parse(interval.as_str()),
+                Some(interval.clone())
+            );
+        }
+    }
+
+    #[test]
+    fn billing_interval_defaults_to_monthly() {
+        assert_eq!(BillingInterval::default(), BillingInterval::Monthly);
+    }
+
+    #[test]
+    fn annual_subscription_period_spans_a_year() {
+        let now = Utc::now();
+        let sub = active_subscription_for_trial(
+            "org-1".to_string(),
+            BillingPlanId::Inicial,
+            None,
+            BillingInterval::Annual,
+            now,
+        );
+        let period_end = sub.current_period_end.expect("period end expected");
+        assert_eq!((period_end - now).num_days(), 365);
+    }
+
+    #[test]
+    fn monthly_subscription_period_spans_thirty_days() {
+        let now = Utc::now();
+        let sub = active_subscription_for_trial(
+            "org-1".to_string(),
+            BillingPlanId::Inicial,
+            None,
+            BillingInterval::Monthly,
+            now,
+        );
+        let period_end = sub.current_period_end.expect("period end expected");
+        assert_eq!((period_end - now).num_days(), 30);
     }
 }

@@ -1,6 +1,7 @@
 import { Ban, X } from "lucide-react";
 import { useState } from "react";
-import type { BillingPlan, BillingPlanId } from "../../api/types";
+import type { BillingInterval, BillingPlan, BillingPlanId } from "../../api/types";
+import { EnterpriseContactCard } from "./EnterpriseContactCard";
 import { PaymentNotes } from "./PaymentNotes";
 import { PricingPlans } from "./PricingPlans";
 
@@ -10,7 +11,7 @@ interface PlansModalProps {
   plans: BillingPlan[];
   currentPlanId: BillingPlanId | null;
   currentPlanName: string | null;
-  onChoosePlan: (planId: BillingPlanId) => void;
+  onChoosePlan: (planId: BillingPlanId, billingInterval: BillingInterval) => void;
   loadingPlanId: string | null;
   error: string | null;
   onClose: () => void;
@@ -72,6 +73,7 @@ export function PlansModal({
           ctaLabel={isChange ? "Cambiar a este plan" : "Continuar con Mercado Pago"}
           loadingLabel={isChange ? "Cambiando…" : "Creando checkout…"}
         />
+        <EnterpriseContactCard />
 
         <PaymentNotes />
 

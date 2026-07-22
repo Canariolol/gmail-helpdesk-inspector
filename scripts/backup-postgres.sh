@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Respaldo manual de la base PostgreSQL de Mira (Supabase, schema `mira`).
+# Respaldo manual de la base PostgreSQL de Mira (Supabase, schemas `mira` y `billing`).
 #
 # Uso:
 #   POSTGRES_DATABASE_URL='postgresql://...' scripts/backup-postgres.sh [directorio_destino]
@@ -32,6 +32,7 @@ file="$DEST/mira-$stamp.dump"
 # sueltas. --no-owner/--no-acl para restaurar en cualquier rol destino.
 pg_dump "$POSTGRES_DATABASE_URL" \
   --schema=mira \
+  --schema=billing \
   --format=custom \
   --no-owner \
   --no-acl \
@@ -40,10 +41,10 @@ pg_dump "$POSTGRES_DATABASE_URL" \
 # Verificación de integridad: un dump truncado o corrupto no pasa el listado.
 pg_restore --list "$file" >/dev/null
 
-# El dump debe contener las dos tablas conocidas del schema.
-for table in records schema_migrations; do
-  if ! pg_restore --list "$file" | grep -q "TABLE DATA mira $table"; then
-    echo "ERROR: el dump no contiene mira.$table" >&2
+# El dump debe contener las tablas conocidas de ambos schemas.
+for table in "mira records" "mira schema_migrations" "billing plans" "billing subscriptions" "billing checkout_sessions" "billing usage_ledger"; do
+  if ! pg_restore --list "$file" | grep -q "TABLE DATA $table"; then
+    echo "ERROR: el dump no contiene ${table/ /.}" >&2
     exit 1
   fi
 done

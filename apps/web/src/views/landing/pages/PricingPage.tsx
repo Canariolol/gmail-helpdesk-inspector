@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import type { BillingPlan } from "../../../api/types";
+import { EnterpriseContactCard } from "../../access/EnterpriseContactCard";
 import { PricingPlans } from "../../access/PricingPlans";
 import { PublicPage } from "../PublicPage";
 
@@ -36,6 +37,8 @@ export function PricingPage({ onLogin, onSignup }: Props) {
             ctaLabel="Crear cuenta"
           />
         )}
+
+        <EnterpriseContactCard />
 
         <p className="lp-pricing-note">
           Los precios en USD son solo referencia internacional. El cobro se realiza en pesos chilenos

@@ -12,7 +12,7 @@ Browser
           │ VITE_API_BASE_URL
           ▼
       apps/api (Rust)
-          ├─► PostgreSQL (Supabase, schema `mira`)
+          ├─► PostgreSQL (Supabase, schemas `mira` y `billing`)
           ├─► Gmail API OAuth readonly
           ├─► Resend
           └─► apps/ai-worker (Python FastAPI, stateless)
@@ -39,7 +39,7 @@ Principios de producción beta:
 | `API_BASE_URL` | URL pública de API. También influye en cookie secure. |
 | `APP_COOKIE_SECURE` | Override de cookie secure. |
 | `APP_COOKIE_SAMESITE` | Override SameSite. Default `Lax`; mantenerlo con el proxy mismo-origen. `None` solo es necesario para una API llamada directamente desde otro sitio y exige revisar CSRF. |
-| `APP_STORAGE` | `postgres` (default) en producción: Supabase, schema `mira`. `memory` solo dev/local. Cualquier otro valor es error. |
+| `APP_STORAGE` | `postgres` (default) en producción: Supabase, schemas `mira` y `billing`. `memory` solo dev/local. Cualquier otro valor es error. |
 | `POSTGRES_DATABASE_URL` | Requerida con `APP_STORAGE=postgres`. En Cloud Run viene del secreto `mira-postgres-url`. |
 | `APP_ENCRYPTION_KEY` | Requerida en producción; no usar default dev. |
 | `APP_SESSION_SECRET` | Requerida en producción; no usar default dev. |

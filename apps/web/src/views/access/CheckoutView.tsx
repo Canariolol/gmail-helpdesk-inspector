@@ -1,6 +1,6 @@
 import { ArrowLeft, Loader2, Lock } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import type { BillingPlan } from "../../api/types";
+import type { BillingInterval, BillingPlan } from "../../api/types";
 import { AccessShell } from "./AccessShell";
 import { PaymentNotes } from "./PaymentNotes";
 import { formatClp } from "./PricingPlans";
@@ -13,6 +13,7 @@ export type CardSubmitData = { cardTokenId: string; payerEmail: string };
 
 type Props = {
   plan: BillingPlan;
+  billingInterval: BillingInterval;
   onPay: (data: CardSubmitData) => void;
   onBack: () => void;
   isSubmitting: boolean;
@@ -54,12 +55,13 @@ function loadMercadoPagoSdk(): Promise<void> {
   return sdkPromise;
 }
 
-export function CheckoutView({ plan, onPay, onBack, isSubmitting, error }: Props) {
+export function CheckoutView({ plan, billingInterval, onPay, onBack, isSubmitting, error }: Props) {
   const [isReady, setReady] = useState(false);
   const [brickError, setBrickError] = useState<string | null>(null);
   // Ref para no recrear el Brick cuando cambia `onPay` entre renders.
   const onPayRef = useRef(onPay);
   onPayRef.current = onPay;
+  const amount = billingInterval === "annual" ? (plan.clp_annual ?? plan.clp_monthly) : plan.clp_monthly;
 
   useEffect(() => {
     if (!MP_PUBLIC_KEY) return;
@@ -71,7 +73,7 @@ export function CheckoutView({ plan, onPay, onBack, isSubmitting, error }: Props
         if (cancelled || !window.MercadoPago) return undefined;
         const mp = new window.MercadoPago(MP_PUBLIC_KEY, { locale: "es-CL" });
         return mp.bricks().create("cardPayment", BRICK_CONTAINER_ID, {
-          initialization: { amount: plan.clp_monthly },
+          initialization: { amount },
           customization: { paymentMethods: { maxInstallments: 1 } },
           callbacks: {
             onReady: () => {
@@ -101,9 +103,10 @@ export function CheckoutView({ plan, onPay, onBack, isSubmitting, error }: Props
       cancelled = true;
       controller?.unmount?.();
     };
-  }, [plan.clp_monthly]);
+  }, [amount]);
 
-  const priceLabel = `$${formatClp(plan.clp_monthly)}`;
+  const priceLabel = `$${formatClp(amount)}`;
+  const periodLabel = billingInterval === "annual" ? "año" : "mes";
 
   return (
     <AccessShell>
@@ -125,14 +128,14 @@ export function CheckoutView({ plan, onPay, onBack, isSubmitting, error }: Props
           <span>Plan {plan.name}</span>
           {plan.trial_days > 0 ? (
             <small>
-              {plan.trial_days} días de prueba, luego {priceLabel} CLP/mes
+              {plan.trial_days} días de prueba, luego {priceLabel} CLP/{periodLabel}
             </small>
           ) : (
-            <small>Cobro mensual</small>
+            <small>Cobro {billingInterval === "annual" ? "anual" : "mensual"}, IVA incluido</small>
           )}
         </div>
         <strong>
-          {priceLabel} <em>CLP/mes</em>
+          {priceLabel} <em>CLP/{periodLabel}</em>
         </strong>
       </div>
 

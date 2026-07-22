@@ -187,9 +187,15 @@ para una base temporal, clona el punto de recuperación a una base nueva.
 
 ## Respaldo y restauración PostgreSQL (Supabase)
 
-Desde el cutover, la fuente de verdad es el schema `mira` en Supabase (plan
-Free: sin PITR gestionado). El respaldo es manual desde el equipo de la persona
-responsable con `scripts/backup-postgres.sh`; los dumps quedan en `backups/`
+Desde el cutover, la fuente de verdad son los schemas `mira` y `billing` en
+Supabase (plan Free: sin PITR gestionado). `mira.records` guarda todo lo que
+no es billing (cuentas, sesiones, conexiones de casilla, runs/hilos,
+scheduler, config de org, etc. — un único catch-all); `billing` (agregado
+2026-07-22, `apps/api/migrations/0002_billing_schema.sql`) tiene tablas
+normalizadas para suscripciones, checkout sessions, usage ledger, alertas de
+cuota y el espejo del catálogo de planes. El respaldo es manual desde el
+equipo de la persona responsable con `scripts/backup-postgres.sh` — el script
+vuelca **ambos schemas** en un mismo dump; los dumps quedan en `backups/`
 (fuera de Git) y rotan a los últimos 14.
 
 **Respaldar** (la URL es la de Secret Manager `mira-postgres-url`; no dejarla
@@ -201,8 +207,10 @@ POSTGRES_DATABASE_URL="$(gcloud secrets versions access latest --secret=mira-pos
 ```
 
 El script verifica la integridad del dump (`pg_restore --list`) y que
-contenga `mira.records` y `mira.schema_migrations`; si falla, el respaldo no
-es válido.
+contenga las tablas conocidas de ambos schemas (`mira.records`,
+`mira.schema_migrations`, `billing.plans`, `billing.subscriptions`,
+`billing.checkout_sessions`, `billing.usage_ledger`); si falla, el respaldo
+no es válido.
 
 **Restaurar (drill o recuperación a base limpia):**
 
@@ -231,6 +239,12 @@ es válido.
    ```bash
    psql "postgresql://postgres:test@127.0.0.1:55432/postgres" -tA \
      -c "SELECT kind, count(*) FROM mira.records GROUP BY kind ORDER BY kind"
+   psql "postgresql://postgres:test@127.0.0.1:55432/postgres" -tA \
+     -c "SELECT 'billing.plans', count(*) FROM billing.plans
+         UNION ALL SELECT 'billing.subscriptions', count(*) FROM billing.subscriptions
+         UNION ALL SELECT 'billing.checkout_sessions', count(*) FROM billing.checkout_sessions
+         UNION ALL SELECT 'billing.usage_ledger', count(*) FROM billing.usage_ledger
+         UNION ALL SELECT 'billing.quota_alerts', count(*) FROM billing.quota_alerts"
    ```
 
 4. Registrar en la bitácora fecha, dump usado, conteos y duración. No copiar
@@ -289,8 +303,12 @@ entrada de la bitácora, sin PII más allá del hash de la cuenta):
    con la confirmación `BORRAR MIS ANALISIS`.
 4. Revocar todas las sesiones de la cuenta.
 5. Eliminar manualmente en la base: configuración, presets, conexión Gmail,
-   estados de scheduler y la cuenta, conservando sólo los registros de
-   auditoría de borrado y los financieros/legales exigibles.
+   estados de scheduler y la cuenta (todo en `mira.records`), conservando
+   sólo los registros de auditoría de borrado y los financieros/legales
+   exigibles — en particular `billing.subscriptions` y
+   `billing.checkout_sessions` (schema `billing`, no `mira.records`) no se
+   borran por retención financiera; si corresponde anonimizar algo ahí,
+   coordinarlo aparte.
 6. Eliminar la persona usuaria en WorkOS (o documentar por qué se conserva).
 7. Verificar que un login nuevo con ese correo crearía una cuenta vacía.
 8. Enviar confirmación final por correo y registrar el cierre en la bitácora.

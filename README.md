@@ -20,7 +20,7 @@ Amazon Bedrock by default. Each organization can disable it from Configuration.
 
 - Web: React, TypeScript, Vite, TanStack Query, Recharts
 - API: Rust, Axum
-- Storage: PostgreSQL (Supabase, schema `mira`)
+- Storage: PostgreSQL (Supabase, schemas `mira` and `billing`)
 - AI worker: Python, FastAPI, Pydantic
 - Local runtime: Docker Compose
 
@@ -60,10 +60,46 @@ APP_ENV_OVERRIDE=.env.sandbox.local ./scripts/local-dev.sh
 
 ## Database Notes
 
-Runtime storage is PostgreSQL (Supabase). Everything lives in the `mira` schema,
-which is deliberately revoked from `anon`, `authenticated`, and `service_role`,
-so the Supabase Table Editor and the PostgREST API cannot read it. Use the SQL
-Editor (or a direct `psql`) to inspect it.
+Runtime storage is PostgreSQL (Supabase), split across two schemas. Both are
+deliberately revoked from `anon`, `authenticated`, and `service_role`, so the
+Supabase Table Editor and the PostgREST API cannot read them. Use the SQL
+Editor (or a direct `psql`) to inspect them.
+
+- **`mira`** — a single polymorphic table, `mira.records` (`kind`, `id`, plus
+  indexed lookup columns and a `data JSONB` payload). Everything that is
+  *not* billing lives here: accounts, user sessions, mailbox connections,
+  analysis runs/threads/messages, manual review overrides, schedule
+  config/state, org policy config, filter presets, and the provider
+  waitlist. One catch-all table by design — see
+  `apps/api/migrations/0001_mira_records.sql`.
+- **`billing`** — normalized tables for everything billing-related:
+  `billing.plans` (a read-only mirror of the plan catalog, see below),
+  `billing.subscriptions`, `billing.checkout_sessions`, `billing.usage_ledger`,
+  and `billing.quota_alerts`. Added in
+  `apps/api/migrations/0002_billing_schema.sql`, which also backfills any
+  pre-existing `mira.records` rows of `kind IN ('subscription', 'checkout',
+  'usage_ledger')` — those old rows are left in place afterwards (not
+  deleted) as a rollback safety net until a follow-up cleanup migration.
+
+**Why billing got its own schema:** subscriptions/checkouts/usage started out
+as JSONB rows in `mira.records` like everything else, but billing data
+benefits from real columns, foreign keys (`billing.subscriptions.plan_id`
+references `billing.plans.id`), and being easy to query/join directly in the
+SQL Editor for support and ops. This was a storage-layer change only — the
+`StorageRepository` trait in `apps/api/src/storage/mod.rs` already abstracted
+these operations, so `apps/api/src/http/mod.rs` and the rest of the business
+logic did not change; only the PostgreSQL implementation
+(`apps/api/src/postgres/mod.rs`) did.
+
+**`billing.plans` is a mirror, not the source of truth.** Plan prices and
+limits (Free/Inicial/Pro) are still hardcoded in `apps/api/src/billing.rs`
+(`public_plans()` / `free_plan()`), covered by unit tests that assert plan
+invariants (e.g. the AI quota is always the strictest one). The migration
+seeds `billing.plans` from those same values so `billing.subscriptions` can
+have a real foreign key and so ops can `JOIN` against plan names/prices in
+SQL — but the API never reads `billing.plans` to decide what to charge or
+enforce. Changing a price still means changing `billing.rs` and passing its
+tests, on purpose: no runtime-editable pricing without that safety net.
 
 Set the connection string in `.env`:
 

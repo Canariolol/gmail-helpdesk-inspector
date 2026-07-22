@@ -141,6 +141,7 @@ export interface ThreadDetail {
 
 export type BillingPlanId = "gratis" | "inicial" | "pro";
 export type SubscriptionStatus = "pending" | "trialing" | "active" | "past_due" | "cancelled" | "expired";
+export type BillingInterval = "monthly" | "annual";
 
 export interface PlanLimits {
   mailboxes: number;
@@ -161,6 +162,8 @@ export interface BillingPlan {
   name: string;
   usd_reference_monthly: number;
   clp_monthly: number;
+  /** Precio del ciclo anual (2 meses gratis). `null` si el plan no lo ofrece (Free). */
+  clp_annual: number | null;
   trial_days: number;
   limits: PlanLimits;
   highlighted: boolean;
@@ -193,6 +196,7 @@ export interface CheckoutSession {
   id: string;
   plan_id: BillingPlanId;
   status: "pending" | "activated" | "failed";
+  billing_interval: BillingInterval;
   currency_id: "CLP";
   amount_clp: number;
   usd_reference_monthly: number;

@@ -12,7 +12,7 @@ export type LegalDoc = {
   sections: LegalSection[];
 };
 
-const CONTACTO = "soporte@ninfasolutions.com";
+export const CONTACTO = "soporte@ninfasolutions.com";
 
 export const PRIVACY: LegalDoc = {
   title: "Política de privacidad",

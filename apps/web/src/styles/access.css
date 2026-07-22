@@ -382,6 +382,110 @@
   width: 100%;
 }
 
+.pricing-iva-note {
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+}
+
+.pricing-interval-toggle {
+  display: inline-flex;
+  gap: 2px;
+  margin: 0 0 var(--space-4);
+  padding: 3px;
+  background: var(--surface-muted, var(--surface));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+}
+
+.pricing-interval-toggle button {
+  padding: 6px 14px;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 150ms ease, color 150ms ease;
+}
+
+.pricing-interval-toggle button.is-active {
+  background: var(--primary-grad);
+  color: #fff;
+}
+
+/* ===========================================================================
+   Empresa — tarjeta de contacto, visualmente separada de la grilla de planes
+   =========================================================================== */
+.pricing-enterprise {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  margin-top: var(--space-5);
+  padding: var(--space-4) var(--space-5);
+  background: transparent;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-md);
+}
+
+.pricing-enterprise-icon {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius-md);
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+
+.pricing-enterprise-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.pricing-enterprise-body h3 {
+  font-size: var(--fs-md);
+  font-weight: 800;
+}
+
+.pricing-enterprise-body p {
+  margin: 4px 0 var(--space-2);
+  font-size: var(--fs-base);
+  color: var(--text-muted);
+}
+
+.pricing-enterprise-body ul {
+  list-style: none;
+  display: grid;
+  gap: 4px;
+  font-size: var(--fs-sm);
+  color: var(--text);
+}
+
+.pricing-enterprise-body ul li::before {
+  content: "—";
+  margin-right: 6px;
+  color: var(--text-muted);
+}
+
+.pricing-enterprise-cta {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+  .pricing-enterprise {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .pricing-enterprise-cta {
+    width: 100%;
+    text-align: center;
+  }
+}
+
 /* ===========================================================================
    Modal de planes (subir de plan)
    =========================================================================== */

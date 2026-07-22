@@ -3250,3 +3250,49 @@ requieren revisión del responsable antes de publicarse.
 **Qué sigue:** revisar los textos legales (cambió el alcance declarado del
 servicio y la lista de subprocesadores), registrar la app en Azure AD siguiendo
 el runbook, y recién entonces probar un connect real contra Microsoft.
+
+## 2026-07-22 — Schema `billing` normalizado + facturación anual + avisos de cuota
+
+**Estado:** implementado y probado contra Postgres real (Docker); migración
+sin aplicar todavía en Supabase (pendiente de `SUPABASE_ACCESS_TOKEN`/
+`SUPABASE_PROJECT_REF`).
+
+**Qué se hizo:** `subscription`/`checkout_session`/`usage_ledger` dejaron de
+vivir como filas JSONB en `mira.records` y pasaron a tablas normalizadas en un
+schema `billing` nuevo (`apps/api/migrations/0002_billing_schema.sql`):
+`billing.plans` (espejo del catálogo, sembrado desde
+`apps/api/src/billing.rs` — que sigue siendo la fuente de verdad de precios y
+límites, no la tabla), `billing.subscriptions`, `billing.checkout_sessions`,
+`billing.usage_ledger` y `billing.quota_alerts` (dedup de los avisos nuevos al
+80%/100% de cuota mensual). Las filas viejas en `mira.records` no se borraron
+— quedan como red de seguridad hasta una migración de limpieza posterior. El
+cambio quedó contenido en la capa de storage: `StorageRepository`
+(`apps/api/src/storage/mod.rs`) ya abstraía estas operaciones, así que solo se
+reescribió la implementación Postgres (`apps/api/src/postgres/mod.rs`);
+`apps/api/src/http/mod.rs` no cambió su lógica de negocio, solo ganó soporte
+para facturación anual (2 meses gratis, `BillingInterval::Annual`, cadencia
+Mercado Pago 12/months) y el envío de los avisos de cuota vía el
+`ResendMailer` existente.
+
+`scripts/backup-postgres.sh` volcaba solo `--schema=mira`: se corrigió para
+volcar también `--schema=billing` y verificar las tablas nuevas en el dump —
+si no se hubiera corregido, los respaldos habrían excluido silenciosamente
+toda la facturación desde este cambio en adelante. `docs/operational-runbooks.md`
+y `README.md` quedaron actualizados con la estructura de ambos schemas y el
+recordatorio de que `billing.plans` es solo un espejo.
+
+**Motivo:** el usuario pidió una estructura de base de datos más clara para
+billing en vez de seguir apilando datos en la tabla polimórfica; separar el
+schema da columnas reales, FK y consultas de soporte directas por SQL.
+
+**Evidencia:** `cargo test` (201 tests), `cargo clippy -- -D warnings`,
+`cargo fmt --check`, `tsc -b` y `vite build` en verde. Migración aplicada de
+punta a punta contra Postgres 16 en Docker con datos legacy sintéticos
+(incluyendo nombres de campo obsoletos como `candidate_threads`) para probar
+el backfill, y `scripts/backup-postgres.sh` corrido contra esa misma base
+para confirmar que el dump incluye ambos schemas.
+
+**Qué sigue:** aplicar la migración en Supabase con
+`scripts/apply-supabase-migrations.sh` (correr `scripts/backup-postgres.sh`
+antes), y decidir cuándo limpiar las filas viejas de `subscription`/
+`checkout`/`usage_ledger` que quedaron inertes en `mira.records`.

@@ -1,13 +1,14 @@
 import { LogOut } from "lucide-react";
-import type { BillingPlan, BillingPlanId } from "../../api/types";
+import type { BillingInterval, BillingPlan, BillingPlanId } from "../../api/types";
 import { AccessShell } from "./AccessShell";
+import { EnterpriseContactCard } from "./EnterpriseContactCard";
 import { PaymentNotes } from "./PaymentNotes";
 import { PricingPlans } from "./PricingPlans";
 
 interface PricingGateProps {
   email: string;
   plans: BillingPlan[];
-  onChoosePlan: (planId: BillingPlanId) => void;
+  onChoosePlan: (planId: BillingPlanId, billingInterval: BillingInterval) => void;
   loadingPlanId: string | null;
   error: string | null;
   onLogout: () => void;
@@ -39,6 +40,7 @@ export function PricingGate({
       )}
 
       <PricingPlans plans={plans} onChoosePlan={onChoosePlan} loadingPlanId={loadingPlanId} />
+      <EnterpriseContactCard />
 
       <PaymentNotes />
 

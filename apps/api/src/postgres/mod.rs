@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
-use sqlx::{PgPool, Postgres, Transaction, postgres::PgPoolOptions};
+use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgPoolOptions};
 use uuid::Uuid;
 
 use crate::{
@@ -11,7 +11,10 @@ use crate::{
         AiAuditResult, AnalysisRun, EmailMessage, EmailThread, ManualReview, ManualReviewOverride,
     },
     auth::UserSession,
-    billing::{Account, CheckoutSession, Subscription, UsageLedger},
+    billing::{
+        Account, BillingInterval, BillingPlanId, CheckoutSession, CheckoutSessionStatus,
+        Subscription, SubscriptionStatus, UsageLedger,
+    },
     mailbox::{FilterPreset, MailboxConnection, MailboxMetadata},
     policies::{OrgConfigBundle, PolicyVersion},
     scheduler::model::{ScheduleConfig, ScheduleState},
@@ -619,60 +622,130 @@ impl StorageRepository for PostgresStorage {
     }
 
     async fn upsert_subscription(&self, subscription: &Subscription) -> anyhow::Result<()> {
-        self.put(
-            "subscription",
-            &subscription.org_id,
-            RecordFields {
-                org_id: Some(&subscription.org_id),
-                provider: Some(&subscription.provider),
-                provider_id: subscription.provider_subscription_id.as_deref(),
-                state: Some(subscription_state_name(subscription)),
-                sort_at: Some(subscription.updated_at),
-                ..Default::default()
-            },
-            subscription,
+        sqlx::query(
+            "INSERT INTO billing.subscriptions \
+               (id, org_id, plan_id, billing_interval, status, provider, provider_subscription_id, \
+                current_period_start, current_period_end, trial_ends_at, cancel_at_period_end, \
+                created_at, updated_at) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) \
+             ON CONFLICT (org_id) DO UPDATE SET \
+               id=EXCLUDED.id, plan_id=EXCLUDED.plan_id, billing_interval=EXCLUDED.billing_interval, \
+               status=EXCLUDED.status, provider=EXCLUDED.provider, \
+               provider_subscription_id=EXCLUDED.provider_subscription_id, \
+               current_period_start=EXCLUDED.current_period_start, \
+               current_period_end=EXCLUDED.current_period_end, trial_ends_at=EXCLUDED.trial_ends_at, \
+               cancel_at_period_end=EXCLUDED.cancel_at_period_end, updated_at=EXCLUDED.updated_at",
         )
+        .bind(&subscription.id)
+        .bind(&subscription.org_id)
+        .bind(subscription.plan_id.as_str())
+        .bind(subscription.billing_interval.as_str())
+        .bind(subscription.status.as_str())
+        .bind(&subscription.provider)
+        .bind(&subscription.provider_subscription_id)
+        .bind(subscription.current_period_start)
+        .bind(subscription.current_period_end)
+        .bind(subscription.trial_ends_at)
+        .bind(subscription.cancel_at_period_end)
+        .bind(subscription.created_at)
+        .bind(subscription.updated_at)
+        .execute(&self.pool)
         .await
+        .context("failed to upsert subscription")?;
+        Ok(())
     }
 
     async fn get_subscription_for_org(&self, org_id: &str) -> anyhow::Result<Option<Subscription>> {
-        self.get("subscription", org_id).await
+        let row = sqlx::query(
+            "SELECT id, org_id, plan_id, billing_interval, status, provider, provider_subscription_id, \
+                    current_period_start, current_period_end, trial_ends_at, cancel_at_period_end, \
+                    created_at, updated_at \
+             FROM billing.subscriptions WHERE org_id = $1",
+        )
+        .bind(org_id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("failed to load subscription")?;
+        row.map(|row| subscription_from_row(&row)).transpose()
     }
 
     async fn find_subscription_by_provider_id(
         &self,
         provider_id: &str,
     ) -> anyhow::Result<Option<Subscription>> {
-        find_provider_record(&self.pool, "subscription", provider_id).await
+        let row = sqlx::query(
+            "SELECT id, org_id, plan_id, billing_interval, status, provider, provider_subscription_id, \
+                    current_period_start, current_period_end, trial_ends_at, cancel_at_period_end, \
+                    created_at, updated_at \
+             FROM billing.subscriptions WHERE provider_subscription_id = $1",
+        )
+        .bind(provider_id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("failed to load subscription by provider id")?;
+        row.map(|row| subscription_from_row(&row)).transpose()
     }
 
     async fn upsert_checkout_session(&self, checkout: &CheckoutSession) -> anyhow::Result<()> {
-        self.put(
-            "checkout",
-            &checkout.id,
-            RecordFields {
-                owner_email: Some(&checkout.account_email),
-                org_id: Some(&checkout.org_id),
-                provider: Some(&checkout.provider),
-                provider_id: checkout.provider_subscription_id.as_deref(),
-                state: Some(checkout_state_name(checkout)),
-                sort_at: Some(checkout.updated_at),
-                ..Default::default()
-            },
-            checkout,
+        sqlx::query(
+            "INSERT INTO billing.checkout_sessions \
+               (id, org_id, account_email, plan_id, billing_interval, status, provider, \
+                provider_subscription_id, currency_id, amount_clp, usd_reference_monthly, \
+                trial_days, created_at, updated_at) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) \
+             ON CONFLICT (id) DO UPDATE SET \
+               status=EXCLUDED.status, provider_subscription_id=EXCLUDED.provider_subscription_id, \
+               updated_at=EXCLUDED.updated_at",
         )
+        .bind(&checkout.id)
+        .bind(&checkout.org_id)
+        .bind(normalize_email(&checkout.account_email))
+        .bind(checkout.plan_id.as_str())
+        .bind(checkout.billing_interval.as_str())
+        .bind(checkout.status.as_str())
+        .bind(&checkout.provider)
+        .bind(&checkout.provider_subscription_id)
+        .bind(&checkout.currency_id)
+        .bind(checkout.amount_clp as i32)
+        .bind(checkout.usd_reference_monthly as i32)
+        .bind(checkout.trial_days as i32)
+        .bind(checkout.created_at)
+        .bind(checkout.updated_at)
+        .execute(&self.pool)
         .await
+        .context("failed to upsert checkout session")?;
+        Ok(())
     }
 
     async fn get_checkout_session(&self, id: &str) -> anyhow::Result<Option<CheckoutSession>> {
-        self.get("checkout", id).await
+        let row = sqlx::query(
+            "SELECT id, org_id, account_email, plan_id, billing_interval, status, provider, \
+                    provider_subscription_id, currency_id, amount_clp, usd_reference_monthly, \
+                    trial_days, created_at, updated_at \
+             FROM billing.checkout_sessions WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("failed to load checkout session")?;
+        row.map(|row| checkout_session_from_row(&row)).transpose()
     }
 
     async fn find_checkout_session_by_provider_id(
         &self,
         provider_id: &str,
     ) -> anyhow::Result<Option<CheckoutSession>> {
-        find_provider_record(&self.pool, "checkout", provider_id).await
+        let row = sqlx::query(
+            "SELECT id, org_id, account_email, plan_id, billing_interval, status, provider, \
+                    provider_subscription_id, currency_id, amount_clp, usd_reference_monthly, \
+                    trial_days, created_at, updated_at \
+             FROM billing.checkout_sessions WHERE provider_subscription_id = $1",
+        )
+        .bind(provider_id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("failed to load checkout session by provider id")?;
+        row.map(|row| checkout_session_from_row(&row)).transpose()
     }
 
     async fn add_usage(
@@ -683,19 +756,23 @@ impl StorageRepository for PostgresStorage {
         retrieved_threads: u32,
         ai_analyzed_threads: u32,
     ) -> anyhow::Result<()> {
-        let id = format!("{org_id}:{period_key}");
         sqlx::query(
-            "INSERT INTO mira.records (kind,id,org_id,sort_at,data) VALUES \
-             ('usage_ledger',$1,$2,now(),jsonb_build_object('org_id',$2,'period_key',$3,'runs_created',$4,'retrieved_threads',$5,'ai_analyzed_threads',$6,'updated_at',to_jsonb(now()))) \
-             ON CONFLICT (kind,id) DO UPDATE SET sort_at=now(), updated_at=now(), data=jsonb_build_object( \
-               'org_id',EXCLUDED.data->'org_id','period_key',EXCLUDED.data->'period_key', \
-               'runs_created',to_jsonb(LEAST(4294967295::bigint,COALESCE((mira.records.data->>'runs_created')::bigint,0)+$4)), \
-               'retrieved_threads',to_jsonb(LEAST(4294967295::bigint,COALESCE((mira.records.data->>'retrieved_threads')::bigint,COALESCE((mira.records.data->>'candidate_threads')::bigint,0))+$5)), \
-               'ai_analyzed_threads',to_jsonb(LEAST(4294967295::bigint,COALESCE((mira.records.data->>'ai_analyzed_threads')::bigint,0)+$6)), \
-               'updated_at',to_jsonb(now()))",
+            "INSERT INTO billing.usage_ledger (org_id, period_key, runs_created, retrieved_threads, ai_analyzed_threads, updated_at) \
+             VALUES ($1,$2,$3,$4,$5,now()) \
+             ON CONFLICT (org_id, period_key) DO UPDATE SET \
+               runs_created = billing.usage_ledger.runs_created + EXCLUDED.runs_created, \
+               retrieved_threads = billing.usage_ledger.retrieved_threads + EXCLUDED.retrieved_threads, \
+               ai_analyzed_threads = billing.usage_ledger.ai_analyzed_threads + EXCLUDED.ai_analyzed_threads, \
+               updated_at = now()",
         )
-        .bind(id).bind(org_id).bind(period_key).bind(i64::from(runs_created)).bind(i64::from(retrieved_threads)).bind(i64::from(ai_analyzed_threads))
-        .execute(&self.pool).await?;
+        .bind(org_id)
+        .bind(period_key)
+        .bind(runs_created as i32)
+        .bind(retrieved_threads as i32)
+        .bind(ai_analyzed_threads as i32)
+        .execute(&self.pool)
+        .await
+        .context("failed to add usage")?;
         Ok(())
     }
 
@@ -704,8 +781,37 @@ impl StorageRepository for PostgresStorage {
         org_id: &str,
         period_key: &str,
     ) -> anyhow::Result<Option<UsageLedger>> {
-        self.get("usage_ledger", &format!("{org_id}:{period_key}"))
-            .await
+        let row = sqlx::query(
+            "SELECT org_id, period_key, runs_created, retrieved_threads, ai_analyzed_threads, updated_at \
+             FROM billing.usage_ledger WHERE org_id = $1 AND period_key = $2",
+        )
+        .bind(org_id)
+        .bind(period_key)
+        .fetch_optional(&self.pool)
+        .await
+        .context("failed to load usage ledger")?;
+        row.map(|row| usage_ledger_from_row(&row)).transpose()
+    }
+
+    async fn record_quota_alert_if_new(
+        &self,
+        org_id: &str,
+        period_key: &str,
+        axis: &str,
+        threshold: u16,
+    ) -> anyhow::Result<bool> {
+        let inserted = sqlx::query(
+            "INSERT INTO billing.quota_alerts (org_id, period_key, axis, threshold) \
+             VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING",
+        )
+        .bind(org_id)
+        .bind(period_key)
+        .bind(axis)
+        .bind(threshold as i16)
+        .execute(&self.pool)
+        .await
+        .context("failed to record quota alert")?;
+        Ok(inserted.rows_affected() == 1)
     }
 
     async fn create_analysis_run(&self, run: &AnalysisRun) -> anyhow::Result<()> {
@@ -1081,20 +1187,64 @@ impl PostgresStorage {
     }
 }
 
-async fn find_provider_record<T: DeserializeOwned>(
-    pool: &PgPool,
-    kind: &str,
-    provider_id: &str,
-) -> anyhow::Result<Option<T>> {
-    let data = sqlx::query_scalar::<_, Value>(
-        "SELECT data FROM mira.records WHERE kind=$1 AND provider_id=$2 LIMIT 1",
-    )
-    .bind(kind)
-    .bind(provider_id)
-    .fetch_optional(pool)
-    .await?;
-    data.map(|value| serde_json::from_value(value).context("invalid provider record"))
-        .transpose()
+fn subscription_from_row(row: &sqlx::postgres::PgRow) -> anyhow::Result<Subscription> {
+    let plan_id_raw: String = row.try_get("plan_id")?;
+    let status_raw: String = row.try_get("status")?;
+    let interval_raw: String = row.try_get("billing_interval")?;
+    Ok(Subscription {
+        id: row.try_get("id")?,
+        org_id: row.try_get("org_id")?,
+        plan_id: BillingPlanId::parse(&plan_id_raw)
+            .ok_or_else(|| anyhow!("invalid stored plan_id: {plan_id_raw}"))?,
+        status: SubscriptionStatus::parse(&status_raw)
+            .ok_or_else(|| anyhow!("invalid stored subscription status: {status_raw}"))?,
+        provider: row.try_get("provider")?,
+        provider_subscription_id: row.try_get("provider_subscription_id")?,
+        billing_interval: BillingInterval::parse(&interval_raw)
+            .ok_or_else(|| anyhow!("invalid stored billing_interval: {interval_raw}"))?,
+        current_period_start: row.try_get("current_period_start")?,
+        current_period_end: row.try_get("current_period_end")?,
+        trial_ends_at: row.try_get("trial_ends_at")?,
+        cancel_at_period_end: row.try_get("cancel_at_period_end")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn checkout_session_from_row(row: &sqlx::postgres::PgRow) -> anyhow::Result<CheckoutSession> {
+    let plan_id_raw: String = row.try_get("plan_id")?;
+    let status_raw: String = row.try_get("status")?;
+    let interval_raw: String = row.try_get("billing_interval")?;
+    Ok(CheckoutSession {
+        id: row.try_get("id")?,
+        org_id: row.try_get("org_id")?,
+        account_email: row.try_get("account_email")?,
+        plan_id: BillingPlanId::parse(&plan_id_raw)
+            .ok_or_else(|| anyhow!("invalid stored plan_id: {plan_id_raw}"))?,
+        status: CheckoutSessionStatus::parse(&status_raw)
+            .ok_or_else(|| anyhow!("invalid stored checkout status: {status_raw}"))?,
+        provider: row.try_get("provider")?,
+        provider_subscription_id: row.try_get("provider_subscription_id")?,
+        billing_interval: BillingInterval::parse(&interval_raw)
+            .ok_or_else(|| anyhow!("invalid stored billing_interval: {interval_raw}"))?,
+        currency_id: row.try_get("currency_id")?,
+        amount_clp: row.try_get::<i32, _>("amount_clp")? as u32,
+        usd_reference_monthly: row.try_get::<i32, _>("usd_reference_monthly")? as u32,
+        trial_days: row.try_get::<i32, _>("trial_days")? as u32,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn usage_ledger_from_row(row: &sqlx::postgres::PgRow) -> anyhow::Result<UsageLedger> {
+    Ok(UsageLedger {
+        org_id: row.try_get("org_id")?,
+        period_key: row.try_get("period_key")?,
+        runs_created: row.try_get::<i32, _>("runs_created")? as u32,
+        retrieved_threads: row.try_get::<i32, _>("retrieved_threads")? as u32,
+        ai_analyzed_threads: row.try_get::<i32, _>("ai_analyzed_threads")? as u32,
+        updated_at: row.try_get("updated_at")?,
+    })
 }
 
 fn normalize_email(email: &str) -> String {
@@ -1130,12 +1280,6 @@ fn enum_name<T: Serialize>(value: &T) -> &'static str {
 }
 fn schedule_state_name(state: &ScheduleState) -> &'static str {
     enum_name(&state.status)
-}
-fn subscription_state_name(subscription: &Subscription) -> &'static str {
-    enum_name(&subscription.status)
-}
-fn checkout_state_name(checkout: &CheckoutSession) -> &'static str {
-    enum_name(&checkout.status)
 }
 fn analysis_state_name(run: &AnalysisRun) -> &'static str {
     enum_name(&run.status)
