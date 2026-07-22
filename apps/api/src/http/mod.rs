@@ -706,6 +706,7 @@ async fn gmail_connect_callback(
         });
     }
     state.storage.upsert_org_config(&bundle).await?;
+    sync_schedule_config_from_policy(&state, &bundle).await?;
 
     let mut headers = HeaderMap::new();
     headers.append(
@@ -955,6 +956,7 @@ async fn microsoft_connect_callback(
         now,
     );
     state.storage.upsert_org_config(&bundle).await?;
+    sync_schedule_config_from_policy(&state, &bundle).await?;
 
     {
         let mailbox = state.mailbox.clone();
@@ -1069,7 +1071,6 @@ async fn gmail_disconnect(
         .await?;
     let mut bundle = get_or_provision_org_config(&state, &session.google_account_email).await?;
     bundle.mailbox.revoked_at = Some(now);
-    bundle.draft.schedule_report_policy.scheduler_enabled = false;
     state.storage.upsert_org_config(&bundle).await?;
     sync_schedule_config_from_policy(&state, &bundle).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -5875,8 +5876,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disconnect_gmail_removes_tokens_from_all_owner_sessions() {
+    async fn disconnect_gmail_preserves_schedule_preference_for_reconnection() {
         let fixture = seeded_app().await;
+        let response = fixture
+            .app
+            .clone()
+            .oneshot(request(
+                Method::PUT,
+                "/me/org/config",
+                Some(&fixture.alice_cookie),
+                Some(json!({
+                    "schedule_report_policy": {
+                        "scheduler_enabled": true,
+                        "report_recipients": ["ops@example.com"]
+                    }
+                })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
         let mut current = fixture
             .storage
             .get_user_session("alice-session")
@@ -5897,6 +5916,19 @@ mod tests {
         fixture
             .storage
             .upsert_user_session(&historical)
+            .await
+            .unwrap();
+        let mut connection = fixture
+            .storage
+            .get_gmail_connection("alice@example.com")
+            .await
+            .unwrap()
+            .unwrap();
+        connection.access_token_encrypted.clear();
+        connection.refresh_token_encrypted = None;
+        fixture
+            .storage
+            .upsert_gmail_connection(&connection)
             .await
             .unwrap();
 
@@ -5927,6 +5959,11 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(bundle.mailbox.revoked_at.is_some());
+        assert!(bundle.draft.schedule_report_policy.scheduler_enabled);
+        assert_eq!(
+            bundle.draft.schedule_report_policy.report_recipients,
+            vec!["ops@example.com"]
+        );
         assert!(
             fixture
                 .storage
@@ -5936,6 +5973,32 @@ mod tests {
                 .into_iter()
                 .find(|config| config.user_email == "alice@example.com")
                 .is_some_and(|config| !config.enabled)
+        );
+
+        connection.access_token_encrypted = "new-access".to_string();
+        connection.refresh_token_encrypted = Some("new-refresh".to_string());
+        connection.revoked_at = None;
+        fixture
+            .storage
+            .upsert_gmail_connection(&connection)
+            .await
+            .unwrap();
+        let mut bundle = bundle;
+        bundle.mailbox.revoked_at = None;
+        fixture.storage.upsert_org_config(&bundle).await.unwrap();
+        let state = AppState::new(test_app_config(), Arc::new(fixture.storage.clone()));
+        sync_schedule_config_from_policy(&state, &bundle)
+            .await
+            .unwrap();
+        assert!(
+            fixture
+                .storage
+                .list_schedule_configs()
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|config| config.user_email == "alice@example.com")
+                .is_some_and(|config| config.enabled && config.recipients == ["ops@example.com"])
         );
     }
 

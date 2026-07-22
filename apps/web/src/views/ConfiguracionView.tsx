@@ -264,6 +264,7 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
   const queryClient = useQueryClient();
   const [draft, setDraft] = useState<WizardDraft>(() => initDraft(null));
   const [formError, setFormError] = useState<string | null>(null);
+  const [isDirty, setIsDirty] = useState(false);
   const [setupState, setSetupState] = useState(orgConfig?.setup_state ?? null);
   const [activeSection, setActiveSection] = useState<SectionKey>("org");
   const initialized = useRef(false);
@@ -317,6 +318,7 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
     mutationFn: (body: ReturnType<typeof buildPutBody>) =>
       api<PutConfigResponse>("/me/org/config", { method: "PUT", body: JSON.stringify(body) }),
     onSuccess: (res) => {
+      setIsDirty(false);
       setSetupState(res.setup_state);
       queryClient.invalidateQueries({ queryKey: ["org-config"] });
       queryClient.invalidateQueries({ queryKey: ["operations-status"] });
@@ -324,6 +326,8 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
   });
 
   function set<K extends keyof WizardDraft>(key: K, val: WizardDraft[K]) {
+    saveMutation.reset();
+    setIsDirty(true);
     setDraft((d) => ({ ...d, [key]: val }));
   }
 
@@ -661,6 +665,9 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
                 />
                 <span>Analizar automáticamente los días laborables a las 08:00 (hora local)</span>
               </label>
+              <span className="cfg-hint">
+                El cambio se aplica cuando guardas o publicas la configuración.
+              </span>
             </div>
             {draft.schedulerEnabled && (
               <div className="field">
@@ -790,6 +797,9 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
                   : " Completa las secciones pendientes para habilitar el análisis."
                 : " Puedes seguir editando el borrador."}
             </span>
+          )}
+          {!formError && isDirty && !saveMutation.isPending && !saveMutation.isError && (
+            <span className="cfg-hint">Cambios sin guardar.</span>
           )}
         </div>
         <div className="cfg-savebar-actions">
