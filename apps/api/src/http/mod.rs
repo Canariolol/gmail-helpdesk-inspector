@@ -1081,6 +1081,7 @@ async fn auth_logout(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
     let mut session = require_session(&state, &headers).await?;
+    let logout_url = workos_logout_url(&session, &state.config.web_base_url);
     session.revoked_at = Some(Utc::now());
     session.updated_at = Utc::now();
     state.storage.upsert_user_session(&session).await?;
@@ -1094,7 +1095,26 @@ async fn auth_logout(
         ))
         .unwrap(),
     );
-    Ok((StatusCode::NO_CONTENT, headers))
+    Ok((
+        StatusCode::OK,
+        headers,
+        Json(json!({ "logout_url": logout_url })),
+    ))
+}
+
+/// WorkOS termina su cookie hospedada solo cuando el navegador visita este URL.
+/// Las sesiones locales antiguas sin `sid` aún cierran sesión en Mira y vuelven
+/// a la landing.
+fn workos_logout_url(session: &UserSession, web_base_url: &str) -> String {
+    let Some(session_id) = session.workos_session_id.as_deref() else {
+        return web_base_url.to_string();
+    };
+    url::Url::parse_with_params(
+        "https://api.workos.com/user_management/sessions/logout",
+        [("session_id", session_id), ("return_to", web_base_url)],
+    )
+    .expect("valid WorkOS logout URL")
+    .to_string()
 }
 
 async fn auth_logout_all(
@@ -1102,6 +1122,7 @@ async fn auth_logout_all(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
     let session = require_session(&state, &headers).await?;
+    let logout_url = workos_logout_url(&session, &state.config.web_base_url);
     state
         .storage
         .revoke_user_sessions(&session.google_account_email, Utc::now())
@@ -1116,7 +1137,11 @@ async fn auth_logout_all(
         ))
         .unwrap(),
     );
-    Ok((StatusCode::NO_CONTENT, headers))
+    Ok((
+        StatusCode::OK,
+        headers,
+        Json(json!({ "logout_url": logout_url })),
+    ))
 }
 
 async fn auth_me(
@@ -5702,6 +5727,14 @@ mod tests {
     #[tokio::test]
     async fn logout_revokes_the_server_side_session() {
         let fixture = seeded_app().await;
+        let mut session = fixture
+            .storage
+            .get_user_session("alice-session")
+            .await
+            .unwrap()
+            .unwrap();
+        session.workos_session_id = Some("session-alice".to_string());
+        fixture.storage.upsert_user_session(&session).await.unwrap();
         let response = fixture
             .app
             .clone()
@@ -5713,7 +5746,12 @@ mod tests {
             ))
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = response_json(response).await;
+        assert_eq!(
+            body["logout_url"],
+            "https://api.workos.com/user_management/sessions/logout?session_id=session-alice&return_to=http%3A%2F%2Flocalhost%3A5173"
+        );
 
         let response = fixture
             .app
@@ -5749,7 +5787,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(response.status(), StatusCode::OK);
 
         for id in ["alice-session", "alice-other"] {
             assert!(

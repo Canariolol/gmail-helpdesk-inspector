@@ -294,8 +294,8 @@ export function App() {
   });
 
   const logoutAllSessions = useMutation({
-    mutationFn: () => api<void>("/auth/logout-all", { method: "POST" }),
-    onSuccess: () => location.reload(),
+    mutationFn: () => api<{ logout_url: string }>("/auth/logout-all", { method: "POST" }),
+    onSuccess: ({ logout_url }) => location.assign(logout_url),
   });
 
   const filterPresets = useQuery({
@@ -339,7 +339,9 @@ export function App() {
   };
 
   const handleLogout = () => {
-    api("/auth/logout", { method: "POST" }).then(() => location.reload());
+    api<{ logout_url: string }>("/auth/logout", { method: "POST" }).then(({ logout_url }) => {
+      location.assign(logout_url);
+    });
   };
 
   const handleGoToSetup = () => setView("configuracion");
