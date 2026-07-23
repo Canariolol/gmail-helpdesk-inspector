@@ -71,7 +71,7 @@ export function ReportesView({ runs }: Props) {
           <div className="metric-grid primary">
             <MetricCard icon={Ban} label="Ignoradas" value={totals.ignored} tone="gray" />
             <MetricCard icon={ClipboardList} label="Correcciones manuales" value={totals.manualOverrides} tone="purple" />
-            <MetricCard icon={ShieldCheck} label="Confianza" value={formatPercent(totals.reportConfidence)} tone="purple" description="Porcentaje de conversaciones que Mira pudo clasificar sin pedir una revisión manual, considerando todos los análisis incluidos." />
+            <MetricCard icon={ShieldCheck} label="Clasificación automática" value={formatPercent(totals.reportConfidence)} tone="purple" description="Porcentaje de conversaciones que Mira pudo clasificar sin pedir una revisión manual, considerando todos los análisis incluidos." />
             <MetricCard icon={Timer} label="T. medio respuesta" value={formatDuration(totals.avgFirstResponseMinutes)} tone="gray" />
             <MetricCard icon={CheckCheck} label="Cierre medio" value={formatDuration(totals.avgResolutionMinutes)} tone="gray" />
           </div>

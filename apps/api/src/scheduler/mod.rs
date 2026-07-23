@@ -3,7 +3,7 @@ pub mod window;
 
 use std::time::Duration;
 
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, NaiveDate, Timelike, Utc};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -92,14 +92,16 @@ pub async fn run_due_scheduled_analysis(
             });
             continue;
         }
-        let Some(window) = window::due_window_for(now_utc, &config.timezone) else {
+        let Some(window) = window::due_window_for(now_utc, &config.timezone, &config.analysis_time)
+        else {
             outcomes.push(ScheduledOutcome::Skipped {
                 user_email: Some(config.user_email),
                 reason: "fuera de horario programado".to_string(),
             });
             continue;
         };
-        outcomes.push(run_for_user(state, mailer, &config, &window).await);
+        let repeat_hourly = state.config.is_privileged_account(&config.user_email);
+        outcomes.push(run_for_user(state, mailer, &config, &window, repeat_hourly).await);
     }
     Ok(outcomes)
 }
@@ -127,14 +129,13 @@ async fn run_configs_for_window(
             });
             continue;
         }
-        outcomes.push(run_for_user(state, mailer, &config, window).await);
+        outcomes.push(run_for_user(state, mailer, &config, window, false).await);
     }
     Ok(outcomes)
 }
 
-/// Loop interno: despierta cada minuto y dispara una vez por día hábil desde
-/// las 08:00 de America/Santiago. La idempotencia real vive en ScheduleState,
-/// el memo en memoria solo evita relecturas de la base durante el día.
+/// Loop interno: despierta periódicamente y dispara una vez por día hábil desde
+/// la hora configurada. La idempotencia real vive en ScheduleState.
 pub fn spawn(state: AppState) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mailer = match ResendMailer::from_config(&state.config.report) {
@@ -147,7 +148,7 @@ pub fn spawn(state: AppState) -> tokio::task::JoinHandle<()> {
                 return;
             }
         };
-        tracing::info!("scheduler interno activo (preset weekdays_08_local por timezone)");
+        tracing::info!("scheduler interno activo (hora local configurable)");
         loop {
             tokio::time::sleep(POLL_INTERVAL).await;
             match run_due_scheduled_analysis(&state, &mailer, Utc::now()).await {
@@ -204,6 +205,7 @@ async fn load_or_seed_configs(state: &AppState) -> anyhow::Result<Vec<ScheduleCo
         ignored_domains: Vec::new(),
         ignored_keywords: Vec::new(),
         timezone: "America/Santiago".to_string(),
+        analysis_time: window::DEFAULT_ANALYSIS_TIME.to_string(),
         gmail_max_threads: state.config.scheduler.seed_gmail_max_threads,
         updated_at: Utc::now(),
     };
@@ -220,8 +222,9 @@ async fn run_for_user(
     mailer: &dyn ReportMailer,
     config: &ScheduleConfig,
     window: &AnalysisWindow,
+    repeat_completed_hourly: bool,
 ) -> ScheduledOutcome {
-    match check_idempotency(state, config, window).await {
+    match check_idempotency(state, config, window, repeat_completed_hourly).await {
         Ok(Some(reason)) => {
             return ScheduledOutcome::Skipped {
                 user_email: Some(config.user_email.clone()),
@@ -275,8 +278,15 @@ async fn check_idempotency(
     state: &AppState,
     config: &ScheduleConfig,
     window: &AnalysisWindow,
+    repeat_completed_hourly: bool,
 ) -> anyhow::Result<Option<String>> {
     let now = Utc::now();
+    let repeat_completed_before = repeat_completed_hourly.then(|| {
+        now.with_minute(0)
+            .and_then(|value| value.with_second(0))
+            .and_then(|value| value.with_nanosecond(0))
+            .expect("UTC always has a valid hour boundary")
+    });
     let claim = state
         .storage
         .claim_schedule_window(
@@ -292,6 +302,7 @@ async fn check_idempotency(
                 updated_at: now,
             },
             now - chrono::Duration::minutes(CLAIM_TTL_MINUTES),
+            repeat_completed_before,
         )
         .await?;
     Ok(match claim {
@@ -440,13 +451,14 @@ async fn create_scheduled_run(
             ));
         }
         let current_setup = setup_state(&bundle.draft);
-        if !current_setup.ready_for_analysis {
+        let unrestricted = state.config.is_privileged_account(&config.user_email);
+        if !current_setup.ready_for_analysis && !unrestricted {
             return Err(anyhow::anyhow!(
                 "configuración incompleta para análisis programado: {}",
                 current_setup.missing.join(", ")
             ));
         }
-        if state.config.billing.enforcement_enabled {
+        if state.config.billing.enforcement_enabled && !unrestricted {
             let subscription = state
                 .storage
                 .get_subscription_for_org(&bundle.org.id)
@@ -738,6 +750,7 @@ mod tests {
             ignored_domains: vec![],
             ignored_keywords: vec![],
             timezone: "America/Santiago".to_string(),
+            analysis_time: window::DEFAULT_ANALYSIS_TIME.to_string(),
             gmail_max_threads: None,
             updated_at: Utc::now(),
         }
@@ -843,6 +856,38 @@ mod tests {
             .await
             .unwrap();
         assert!(skip_reason(&outcomes).contains("sin configuración"));
+    }
+
+    #[tokio::test]
+    async fn privileged_account_can_create_scheduled_run_without_subscription() {
+        let email = "alice@example.com";
+        let storage = Arc::new(MemoryStorage::default());
+        let mut config = test_config(None);
+        config.billing.enforcement_enabled = true;
+        config.internal_full_access_emails = vec![email.to_string()];
+        let state = AppState::new(config, storage.clone());
+        let mut bundle = provision_default_config(email, Utc::now());
+        bundle.draft.schedule_report_policy.scheduler_enabled = true;
+        bundle.draft.schedule_report_policy.report_recipients = vec![email.to_string()];
+        bundle.draft.analysis_policy.valid_request_criteria =
+            vec!["Solicitudes de soporte".to_string()];
+        bundle.policy_version =
+            policy_version_from_draft(&bundle.mailbox, &bundle.draft, 2, email, Utc::now());
+        storage.upsert_org_config(&bundle).await.unwrap();
+
+        let run = create_scheduled_run(
+            &state,
+            &schedule_config(email),
+            &AnalysisWindow {
+                date_from: "2026-07-22".to_string(),
+                date_to: "2026-07-22".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(run.user_email, email);
+        assert_eq!(run.org_id.as_deref(), Some(bundle.org.id.as_str()));
     }
 
     #[tokio::test]
@@ -962,8 +1007,8 @@ mod tests {
         };
 
         let (first, second) = tokio::join!(
-            check_idempotency(&state, &config, &window),
-            check_idempotency(&state, &config, &window),
+            check_idempotency(&state, &config, &window, false),
+            check_idempotency(&state, &config, &window, false),
         );
         let outcomes = [first.unwrap(), second.unwrap()];
         assert_eq!(
@@ -974,6 +1019,40 @@ mod tests {
             outcomes
                 .iter()
                 .any(|outcome| { outcome.as_deref() == Some("análisis en curso") })
+        );
+    }
+
+    #[tokio::test]
+    async fn privileged_schedule_can_repeat_once_per_hour() {
+        let (state, storage) = app_state(None);
+        let config = schedule_config("tester@example.com");
+        let window = AnalysisWindow {
+            date_from: "2026-06-11".to_string(),
+            date_to: "2026-06-11".to_string(),
+        };
+        storage
+            .upsert_schedule_state(&schedule_state(
+                &config.user_email,
+                &window.date_from,
+                &window.date_to,
+                ScheduleRunStatus::Completed,
+                70,
+            ))
+            .await
+            .unwrap();
+
+        assert!(
+            check_idempotency(&state, &config, &window, true)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            check_idempotency(&state, &config, &window, true)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("análisis en curso")
         );
     }
 

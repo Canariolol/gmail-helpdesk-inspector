@@ -127,7 +127,7 @@ export function ResumenView(props: Props) {
               <MetricCard icon={Reply} label="Respondidos" value={run.metrics.answered} tone="teal" onClick={() => focusThreads("answered")} />
               <MetricCard icon={Clock} label="Sin respuesta" value={run.metrics.unanswered} tone="orange" onClick={() => focusThreads("unanswered")} />
               <MetricCard icon={HelpCircle} label="Pendientes de revisión" value={run.metrics.pending_review} tone="amber" onClick={() => focusThreads("review")} />
-              <MetricCard icon={ShieldCheck} label="Confianza" value={formatPercent(run.metrics.report_confidence)} tone="purple" description="Porcentaje de conversaciones que Mira pudo clasificar sin pedir una revisión manual." />
+              <MetricCard icon={ShieldCheck} label="Clasificación automática" value={formatPercent(run.metrics.report_confidence)} tone="purple" description="Porcentaje de conversaciones que Mira pudo clasificar sin pedir una revisión manual." />
             </div>
             <div className="metric-grid times">
               <MetricCard icon={Timer} label="T. medio respuesta" value={formatDuration(run.metrics.avg_first_response_minutes)} tone="gray" onClick={() => focusThreads("answered")} />

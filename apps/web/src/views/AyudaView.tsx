@@ -63,7 +63,7 @@ export function AyudaView() {
           <li><strong>P90 respuesta:</strong> el 90% de las solicitudes se respondió en este tiempo o menos.</li>
           <li><strong>Cierre medio:</strong> promedio entre la recepción y el último envío interno del hilo.</li>
           <li><strong>Pendientes de revisión:</strong> conversaciones donde Mira necesita tu confirmación; pueden tener un estado tentativo mientras esperan revisión.</li>
-          <li><strong>Confianza:</strong> proporción de hilos que no están pendientes de revisión manual.</li>
+          <li><strong>Clasificación automática:</strong> proporción de hilos que no están pendientes de revisión manual.</li>
         </ul>
       </section>
       <section className="card">

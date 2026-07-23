@@ -23,7 +23,7 @@ export function RunCard({ run, isActive, onSelect }: Props) {
         <span>Creado: {formatDateTime(run.created_at)}</span>
         <span>
           {run.metrics.total_threads} hilos · {run.metrics.valid_requests} válidas · {run.metrics.answered} respondidas ·
-          confianza {formatPercent(run.metrics.report_confidence)}
+          clasificación automática {formatPercent(run.metrics.report_confidence)}
         </span>
       </div>
     </button>

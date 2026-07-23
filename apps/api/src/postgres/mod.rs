@@ -491,6 +491,7 @@ impl StorageRepository for PostgresStorage {
         &self,
         state: &ScheduleState,
         stale_before: DateTime<Utc>,
+        repeat_completed_before: Option<DateTime<Utc>>,
     ) -> anyhow::Result<ScheduleWindowClaim> {
         let id = normalize_email(&state.user_email);
         let mut tx = self.pool.begin().await?;
@@ -502,7 +503,12 @@ impl StorageRepository for PostgresStorage {
         .await?;
         if let Some(value) = current {
             let existing: ScheduleState = serde_json::from_value(value)?;
-            if let Some(result) = existing_schedule_window_claim(&existing, state, stale_before) {
+            if let Some(result) = existing_schedule_window_claim(
+                &existing,
+                state,
+                stale_before,
+                repeat_completed_before,
+            ) {
                 tx.commit().await?;
                 return Ok(result);
             }

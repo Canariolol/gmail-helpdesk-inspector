@@ -169,6 +169,8 @@ pub struct ScheduleReportPolicy {
     pub scheduler_enabled: bool,
     pub preset: SchedulePreset,
     pub timezone: String,
+    #[serde(default = "default_analysis_time")]
+    pub analysis_time: String,
     pub report_recipients: Vec<String>,
     pub report_content: ReportContentPolicy,
     pub failure_notice_enabled: bool,
@@ -179,6 +181,10 @@ pub struct ScheduleReportPolicy {
 pub enum SchedulePreset {
     Disabled,
     Weekdays08Local,
+}
+
+fn default_analysis_time() -> String {
+    "08:00".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -314,6 +320,7 @@ pub fn provision_default_config(user_email: &str, now: DateTime<Utc>) -> OrgConf
             scheduler_enabled: false,
             preset: SchedulePreset::Weekdays08Local,
             timezone: org.default_timezone.clone(),
+            analysis_time: default_analysis_time(),
             report_recipients: vec![],
             report_content: ReportContentPolicy {
                 mode: ReportMode::MetricsOnly,
@@ -505,6 +512,22 @@ mod tests {
         assert!(bundle.draft.ai_policy.enabled);
         assert!(bundle.draft.ai_policy.consent_granted_at.is_some());
         assert!(bundle.draft.ai_policy.ai_defaults_applied);
+        assert_eq!(bundle.draft.schedule_report_policy.analysis_time, "08:00");
+    }
+
+    #[test]
+    fn legacy_schedule_policy_defaults_to_eight() {
+        let bundle = provision_default_config("agente@cliente.cl", Utc::now());
+        let mut value =
+            serde_json::to_value(&bundle.draft.schedule_report_policy).expect("serialize policy");
+        value
+            .as_object_mut()
+            .expect("policy object")
+            .remove("analysis_time");
+
+        let restored: ScheduleReportPolicy =
+            serde_json::from_value(value).expect("deserialize legacy policy");
+        assert_eq!(restored.analysis_time, "08:00");
     }
 
     #[test]

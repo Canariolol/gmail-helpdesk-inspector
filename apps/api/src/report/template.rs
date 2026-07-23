@@ -105,7 +105,7 @@ fn wrap_html(title: &str, window: &str, greeting: &str, body_rows: &str) -> Stri
 <tr><td style="padding:24px 28px 8px 28px;color:{TEXT};font-size:15px;line-height:1.6;">{}</td></tr>
 {body_rows}
 <tr><td style="padding:20px 28px 28px 28px;border-top:1px solid {BORDER};color:{TEXT_MUTED};font-size:12px;line-height:1.6;">
-Generado automáticamente por Gmail Helpdesk Inspector · análisis programado de lunes a viernes a las 08:00 (America/Santiago).
+Generado automáticamente por Gmail Helpdesk Inspector · análisis programado según la configuración de tu organización.
 </td></tr>
 </table>
 </td></tr>
@@ -159,7 +159,7 @@ fn metrics_section(run: &AnalysisRun) -> String {
         ),
         metric_card("Descartados", &metrics.ignored.to_string(), None),
         metric_card(
-            "Confianza del reporte",
+            "Clasificación automática",
             &format!("{:.0}%", metrics.report_confidence * 100.0),
             None,
         ),

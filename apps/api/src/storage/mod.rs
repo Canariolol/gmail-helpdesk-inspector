@@ -122,6 +122,7 @@ pub trait StorageRepository: Send + Sync {
         &self,
         state: &ScheduleState,
         stale_before: DateTime<Utc>,
+        repeat_completed_before: Option<DateTime<Utc>>,
     ) -> anyhow::Result<ScheduleWindowClaim>;
     async fn get_org_config_for_user(
         &self,
@@ -319,6 +320,7 @@ pub(crate) fn existing_schedule_window_claim(
     existing: &ScheduleState,
     candidate: &ScheduleState,
     stale_before: DateTime<Utc>,
+    repeat_completed_before: Option<DateTime<Utc>>,
 ) -> Option<ScheduleWindowClaim> {
     let same_window = existing.window_date_from == candidate.window_date_from
         && existing.window_date_to == candidate.window_date_to;
@@ -327,7 +329,12 @@ pub(crate) fn existing_schedule_window_claim(
     }
 
     match existing.status {
-        ScheduleRunStatus::Completed => Some(ScheduleWindowClaim::AlreadyCompleted),
+        ScheduleRunStatus::Completed
+            if repeat_completed_before.is_none_or(|before| existing.updated_at >= before) =>
+        {
+            Some(ScheduleWindowClaim::AlreadyCompleted)
+        }
+        ScheduleRunStatus::Completed => None,
         ScheduleRunStatus::Running if existing.started_at > stale_before => {
             Some(ScheduleWindowClaim::AlreadyRunning)
         }
@@ -607,10 +614,16 @@ impl StorageRepository for MemoryStorage {
         &self,
         state: &ScheduleState,
         stale_before: DateTime<Utc>,
+        repeat_completed_before: Option<DateTime<Utc>>,
     ) -> anyhow::Result<ScheduleWindowClaim> {
         let mut inner = self.inner.write().await;
         if let Some(existing) = inner.schedule_states.get(&state.user_email)
-            && let Some(result) = existing_schedule_window_claim(existing, state, stale_before)
+            && let Some(result) = existing_schedule_window_claim(
+                existing,
+                state,
+                stale_before,
+                repeat_completed_before,
+            )
         {
             return Ok(result);
         }
@@ -1972,6 +1985,7 @@ mod tests {
             ignored_domains: vec![],
             ignored_keywords: vec![],
             timezone: "America/Santiago".to_string(),
+            analysis_time: crate::scheduler::window::DEFAULT_ANALYSIS_TIME.to_string(),
             gmail_max_threads: Some(120),
             updated_at: Utc::now(),
         };

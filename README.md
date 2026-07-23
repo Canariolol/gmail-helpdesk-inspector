@@ -179,8 +179,8 @@ Pagination note: `GET /analysis-runs` and `GET /analysis-runs/:id/threads` remai
 
 ## Scheduled Daily Analysis & Email Report
 
-The API can run the analysis automatically using the policy preset
-`weekdays_08_local`: Monday to Friday at 08:00 in each configured tenant timezone.
+The API can run the analysis automatically Monday to Friday at the whole hour
+selected by each tenant (`08:00` by default) in its configured timezone.
 Tuesday to Friday cover the previous local day (00:00–23:59); Monday covers Friday
 through Sunday. The report is sent with [Resend](https://resend.com), not Gmail —
 the Gmail scope stays readonly.
@@ -195,7 +195,10 @@ used to mint a fresh access token at run time).
    schedule config in its own IANA timezone.
 2. **External trigger** — `POST /internal/scheduled-analysis` authenticated
    with the `x-cron-secret` header (`CRON_SECRET` env var). Without `as_of_date`,
-   it uses the same due-by-timezone logic as the internal loop. With `as_of_date`,
+   it uses the same due-by-timezone logic as the internal loop. Configure one
+   Cloud Scheduler job hourly on weekdays (`0 * * * 1-5`); the API selects only
+   tenants whose configured hour is due and its idempotency lock prevents reruns.
+   With `as_of_date`,
    it performs an explicit local-date backfill/testing run:
 
    ```bash

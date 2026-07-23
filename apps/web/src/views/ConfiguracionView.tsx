@@ -22,6 +22,9 @@ const TIMEZONES = [
   "Europe/Madrid",
   "UTC",
 ];
+const ANALYSIS_HOURS = Array.from({ length: 24 }, (_, hour) =>
+  `${hour.toString().padStart(2, "0")}:00`
+);
 
 type SectionKey = "org" | "equipo" | "cuenta" | "ia" | "programacion" | "retencion";
 
@@ -48,6 +51,7 @@ type WizardDraft = {
   maxAuditMessages: number;
   maxBodyCharsPerMessage: number;
   schedulerEnabled: boolean;
+  analysisTime: string;
   reportRecipientsText: string;
   reportMode: "metrics_only" | "metrics_and_review_items";
   retentionDays: number;
@@ -82,6 +86,7 @@ function initDraft(config: OrgConfig | null): WizardDraft {
       maxAuditMessages: 4,
       maxBodyCharsPerMessage: 280,
       schedulerEnabled: false,
+      analysisTime: "08:00",
       reportRecipientsText: "",
       reportMode: "metrics_only",
       retentionDays: 30,
@@ -102,6 +107,7 @@ function initDraft(config: OrgConfig | null): WizardDraft {
     maxAuditMessages: draft.ai_policy.max_audit_messages,
     maxBodyCharsPerMessage: draft.ai_policy.max_body_chars_per_message,
     schedulerEnabled: draft.schedule_report_policy.scheduler_enabled,
+    analysisTime: draft.schedule_report_policy.analysis_time ?? "08:00",
     reportRecipientsText: draft.schedule_report_policy.report_recipients.join("\n"),
     reportMode: draft.schedule_report_policy.report_content.mode,
     retentionDays: draft.retention_policy.retention_days,
@@ -139,6 +145,7 @@ function buildPutBody(d: WizardDraft, finalize = false) {
       scheduler_enabled: d.schedulerEnabled,
       preset: "weekdays_08_local",
       timezone: d.orgTimezone,
+      analysis_time: d.analysisTime,
       report_recipients: d.schedulerEnabled ? splitLines(d.reportRecipientsText) : [],
       report_content: { mode: d.reportMode, include_subjects: false, include_senders: false },
       failure_notice_enabled: true,
@@ -193,7 +200,9 @@ function SchedulerStatusPanel({ status }: { status: OperationsStatus | undefined
           </h3>
         </div>
         <span className={status.scheduler.enabled ? "wizard-ready-badge" : "wizard-not-ready-badge"}>
-          {status.scheduler.enabled ? "Lunes a viernes, 08:00" : "Solo manual"}
+          {status.scheduler.enabled
+            ? `Lunes a viernes, ${status.scheduler.analysis_time}`
+            : "Solo manual"}
         </span>
       </div>
       <div className="scheduler-status-grid">
@@ -662,26 +671,41 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
                   checked={draft.schedulerEnabled}
                   onChange={(e) => set("schedulerEnabled", e.target.checked)}
                 />
-                <span>Analizar automáticamente los días laborables a las 08:00 (hora local)</span>
+                <span>Analizar automáticamente los días laborables</span>
               </label>
               <span className="cfg-hint">
                 El cambio se aplica cuando guardas o publicas la configuración.
               </span>
             </div>
             {draft.schedulerEnabled && (
-              <div className="field">
-                <label htmlFor="report-recipients">Destinatarios de reportes por email</label>
-                <textarea
-                  id="report-recipients"
-                  rows={3}
-                  value={draft.reportRecipientsText}
-                  onChange={(e) => set("reportRecipientsText", e.target.value)}
-                  placeholder={"operaciones@tuempresa.com\ngerencia@tuempresa.com"}
-                />
-                <span className="cfg-hint">
-                  Uno por línea. Es obligatorio si activas el análisis automático.
-                </span>
-              </div>
+              <>
+                <div className="field">
+                  <label htmlFor="analysis-time">Hora del análisis</label>
+                  <select
+                    id="analysis-time"
+                    value={draft.analysisTime}
+                    onChange={(e) => set("analysisTime", e.target.value)}
+                  >
+                    {ANALYSIS_HOURS.map((hour) => (
+                      <option key={hour} value={hour}>{hour}</option>
+                    ))}
+                  </select>
+                  <span className="cfg-hint">Se usa la zona horaria de tu organización.</span>
+                </div>
+                <div className="field">
+                  <label htmlFor="report-recipients">Destinatarios de reportes por email</label>
+                  <textarea
+                    id="report-recipients"
+                    rows={3}
+                    value={draft.reportRecipientsText}
+                    onChange={(e) => set("reportRecipientsText", e.target.value)}
+                    placeholder={"operaciones@tuempresa.com\ngerencia@tuempresa.com"}
+                  />
+                  <span className="cfg-hint">
+                    Uno por línea. Es obligatorio si activas el análisis automático.
+                  </span>
+                </div>
+              </>
             )}
             <div className="field">
               <label>Contenido del reporte</label>

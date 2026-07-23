@@ -22,6 +22,8 @@ pub struct ScheduleConfig {
     pub ignored_keywords: Vec<String>,
     #[serde(default = "default_timezone")]
     pub timezone: String,
+    #[serde(default = "default_analysis_time")]
+    pub analysis_time: String,
     #[serde(default)]
     pub gmail_max_threads: Option<u32>,
     pub updated_at: DateTime<Utc>,
@@ -56,4 +58,8 @@ fn default_true() -> bool {
 
 fn default_timezone() -> String {
     "America/Santiago".to_string()
+}
+
+fn default_analysis_time() -> String {
+    "08:00".to_string()
 }

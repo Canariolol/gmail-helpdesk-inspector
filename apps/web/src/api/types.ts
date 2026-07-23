@@ -289,6 +289,7 @@ export interface ScheduleReportPolicy {
   scheduler_enabled: boolean;
   preset: string;
   timezone: string;
+  analysis_time: string;
   report_recipients: string[];
   report_content: ReportContentPolicy;
   failure_notice_enabled: boolean;
@@ -465,6 +466,7 @@ export interface OperationsStatus {
   scheduler: {
     enabled: boolean;
     timezone: string;
+    analysis_time: string;
     preset: string;
     recipients_count: number;
     next_run_estimate: string | null;

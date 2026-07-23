@@ -1207,7 +1207,8 @@ async fn get_account_status(
 ) -> Result<Json<AccountStatusResponse>, ApiError> {
     let session = require_session(&state, &headers).await?;
     let bundle = get_or_provision_org_config(&state, &session.google_account_email).await?;
-    let entitlement = entitlement_snapshot(&state, &bundle.org.id).await?;
+    let entitlement =
+        entitlement_snapshot(&state, &bundle.org.id, &session.google_account_email).await?;
     let connection = state
         .storage
         .get_gmail_connection(&session.google_account_email)
@@ -1398,7 +1399,8 @@ async fn cancel_subscription(
     subscription.updated_at = Utc::now();
     state.storage.upsert_subscription(&subscription).await?;
 
-    let entitlement = entitlement_snapshot(&state, &bundle.org.id).await?;
+    let entitlement =
+        entitlement_snapshot(&state, &bundle.org.id, &session.google_account_email).await?;
     Ok(Json(entitlement))
 }
 
@@ -1462,7 +1464,8 @@ async fn change_plan(
     subscription.updated_at = Utc::now();
     state.storage.upsert_subscription(&subscription).await?;
 
-    let entitlement = entitlement_snapshot(&state, &bundle.org.id).await?;
+    let entitlement =
+        entitlement_snapshot(&state, &bundle.org.id, &session.google_account_email).await?;
     Ok(Json(entitlement))
 }
 
@@ -1558,8 +1561,14 @@ async fn get_usage(
         .get_usage_ledger(&bundle.org.id, &period_key)
         .await?
         .unwrap_or_else(|| empty_usage(&bundle.org.id, &period_key));
-    // Plan vigente (pagado o Mira Free por defecto): siempre hay límites que mostrar.
-    let limits = Some(effective_plan_for_org(&state, &bundle.org.id).await?.limits);
+    let limits = if state
+        .config
+        .is_privileged_account(&session.google_account_email)
+    {
+        None
+    } else {
+        Some(effective_plan_for_org(&state, &bundle.org.id).await?.limits)
+    };
     Ok(Json(UsageResponse {
         period_key,
         usage,
@@ -1795,6 +1804,7 @@ struct OperationsHistoryEntry {
 struct SchedulerStatusSummary {
     enabled: bool,
     timezone: String,
+    analysis_time: String,
     preset: String,
     recipients_count: usize,
     next_run_estimate: Option<String>,
@@ -1837,6 +1847,10 @@ async fn get_operations_status(
         .as_ref()
         .map(|config| config.enabled)
         .unwrap_or(schedule_policy.scheduler_enabled);
+    let analysis_time = schedule_config
+        .as_ref()
+        .map(|config| config.analysis_time.clone())
+        .unwrap_or_else(|| schedule_policy.analysis_time.clone());
     let recipients_count = schedule_config
         .as_ref()
         .map(|config| config.recipients.len())
@@ -1854,10 +1868,11 @@ async fn get_operations_status(
         scheduler: SchedulerStatusSummary {
             enabled,
             timezone: timezone.clone(),
-            preset: "weekdays_08_local".to_string(),
+            analysis_time: analysis_time.clone(),
+            preset: "weekdays_custom_hour_local".to_string(),
             recipients_count,
             next_run_estimate: if enabled {
-                next_fire_time_label(Utc::now(), &timezone)
+                next_fire_time_label(Utc::now(), &timezone, &analysis_time)
             } else {
                 None
             },
@@ -2195,6 +2210,7 @@ struct AiPolicyUpdateRequest {
 struct ScheduleReportPolicyUpdateRequest {
     scheduler_enabled: Option<bool>,
     timezone: Option<String>,
+    analysis_time: Option<String>,
     report_recipients: Option<Vec<String>>,
     report_content: Option<crate::policies::ReportContentPolicy>,
     failure_notice_enabled: Option<bool>,
@@ -2276,6 +2292,7 @@ async fn sync_schedule_config_from_policy(
             ignored_domains: analysis.ignored_domains.clone(),
             ignored_keywords: analysis.ignored_keywords.clone(),
             timezone: schedule.timezone.clone(),
+            analysis_time: schedule.analysis_time.clone(),
             gmail_max_threads: Some(analysis.max_threads_per_run),
             updated_at: Utc::now(),
         })
@@ -2435,6 +2452,15 @@ fn apply_schedule_report_policy_update(
         validate_policy_timezone(&timezone)?;
         current.timezone = timezone;
     }
+    if let Some(value) = update.analysis_time {
+        let value = validate_time(&value)?;
+        if !value.ends_with(":00") {
+            return Err(ApiError::bad_request(
+                "analysis_time debe usar una hora completa",
+            ));
+        }
+        current.analysis_time = value;
+    }
     if let Some(values) = update.report_recipients {
         current.report_recipients = normalize_list(values);
     }
@@ -2546,7 +2572,7 @@ async fn create_analysis_run(
 ) -> Result<Json<AnalysisRun>, ApiError> {
     let session = require_session(&state, &headers).await?;
     let bundle = require_active_entitlement(&state, &session).await?;
-    enforce_usage_allows_run(&state, &bundle.org.id).await?;
+    enforce_usage_allows_run(&state, &bundle.org.id, &session.google_account_email).await?;
     require_mailbox_connected(
         state
             .storage
@@ -3130,7 +3156,7 @@ pub(crate) async fn execute_analysis(
     // El plan aplica tres cupos distintos: recuperados de la casilla (mensual,
     // holgado), hilos que entran al informe (por análisis) y hilos enviados a la
     // IA (mensual, estricto: es el único que cuesta dinero).
-    let plan = plan_for_run(&state, run.org_id.as_deref())
+    let plan = plan_for_run(&state, run.org_id.as_deref(), &run.user_email)
         .await
         .context(AnalysisFailureStage("plan_lookup"))?;
     let (used_retrieved, used_ai) = match run.org_id.as_deref() {
@@ -3149,7 +3175,8 @@ pub(crate) async fn execute_analysis(
         .map(|snapshot| snapshot.analysis_policy.max_threads_per_run)
         .unwrap_or(state.config.google.gmail_max_threads);
     // En dev (`enforcement_enabled=false`) no hay tope: análisis ilimitado como antes.
-    let enforce = state.config.billing.enforcement_enabled;
+    let enforce = state.config.billing.enforcement_enabled
+        && !state.config.is_privileged_account(&run.user_email);
     // Tope de hilos que entran al informe: es por análisis, no mensual.
     let reported_cap = if enforce {
         plan.limits.reported_threads_per_run
@@ -3325,7 +3352,10 @@ pub(crate) async fn execute_analysis(
         usize::MAX
     };
     let (ai_audited_now, ai_skipped_by_budget) = split_by_ai_budget(batch_indexes.len(), ai_budget);
-    let batch_indexes = &batch_indexes[..ai_audited_now];
+    let (batch_indexes, skipped_indexes) = batch_indexes.split_at(ai_audited_now);
+    for index in skipped_indexes {
+        mark_ai_audit_unavailable(&mut prepared_threads[*index].thread);
+    }
 
     // Segunda fase: una única auditoría completa por lotes. Los errores se reintentan
     // una vez dividiendo el lote; no existe una segunda llamada por hilo.
@@ -3404,8 +3434,12 @@ pub(crate) async fn execute_analysis(
 }
 
 /// Plan vigente para un run en background (versión `anyhow` de `effective_plan_for_org`).
-async fn plan_for_run(state: &AppState, org_id: Option<&str>) -> anyhow::Result<BillingPlan> {
-    if !state.config.billing.enforcement_enabled {
+async fn plan_for_run(
+    state: &AppState,
+    org_id: Option<&str>,
+    user_email: &str,
+) -> anyhow::Result<BillingPlan> {
+    if !state.config.billing.enforcement_enabled || state.config.is_privileged_account(user_email) {
         return Ok(plan_by_id(&BillingPlanId::Pro));
     }
     let Some(org_id) = org_id else {
@@ -3824,6 +3858,7 @@ async fn audit_batch_once(
         request = request.bearer_auth(fetch_cloud_run_identity_token(&state.http, audience).await?);
     }
     Ok(request
+        .timeout(Duration::from_secs(70))
         .send()
         .await?
         .error_for_status()?
@@ -3844,7 +3879,6 @@ async fn audit_batch_with_split(
     match audit_batch_once(state, prepared, indexes, policy_snapshot).await {
         Ok(response) => {
             merge_batch_response(&mut execution, response, prepared, indexes);
-            return execution;
         }
         Err(_) => {
             tracing::warn!(
@@ -3854,11 +3888,27 @@ async fn audit_batch_with_split(
             );
         }
     }
-    if indexes.len() <= 1 {
+    let missing = indexes
+        .iter()
+        .copied()
+        .filter(|index| {
+            !execution
+                .decisions
+                .contains_key(&prepared[*index].thread.thread_id)
+        })
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
         return execution;
     }
-    let middle = indexes.len() / 2;
-    for half in [&indexes[..middle], &indexes[middle..]] {
+    tracing::warn!(
+        operation = "ai_batch_partial",
+        expected = indexes.len(),
+        received = execution.decisions.len(),
+        missing = missing.len(),
+        "auditoría IA incompleta; reintentando solo hilos faltantes"
+    );
+    let middle = missing.len().div_ceil(2);
+    for half in [&missing[..middle], &missing[middle..]] {
         if half.is_empty() {
             continue;
         }
@@ -3918,6 +3968,9 @@ fn apply_batch_decision(
 ) {
     if !batch_message_ids_known(decision, messages) || decision.confidence < manual_review_threshold
     {
+        thread.classification = Classification::Ambiguous;
+        thread.classification_confidence = 0.0;
+        thread.is_valid_client_request = false;
         thread.manual_review_required = true;
         thread.reasons.push(
             "Mira no alcanzó confianza suficiente; revisa este hilo manualmente.".to_string(),
@@ -3946,6 +3999,9 @@ fn apply_batch_decision(
 }
 
 fn mark_ai_audit_unavailable(thread: &mut EmailThread) {
+    thread.classification = Classification::Ambiguous;
+    thread.classification_confidence = 0.0;
+    thread.is_valid_client_request = false;
     thread.manual_review_required = true;
     thread
         .reasons
@@ -4133,8 +4189,11 @@ async fn effective_plan_for_org(state: &AppState, org_id: &str) -> Result<Billin
 async fn entitlement_snapshot(
     state: &AppState,
     org_id: &str,
+    account_email: &str,
 ) -> Result<EntitlementSnapshot, ApiError> {
-    if !state.config.billing.enforcement_enabled {
+    if !state.config.billing.enforcement_enabled
+        || state.config.is_privileged_account(account_email)
+    {
         return Ok(EntitlementSnapshot {
             allowed: true,
             reason: None,
@@ -4193,7 +4252,8 @@ async fn require_active_entitlement(
     session: &UserSession,
 ) -> Result<OrgConfigBundle, ApiError> {
     let bundle = get_or_provision_org_config(state, &session.google_account_email).await?;
-    let entitlement = entitlement_snapshot(state, &bundle.org.id).await?;
+    let entitlement =
+        entitlement_snapshot(state, &bundle.org.id, &session.google_account_email).await?;
     if entitlement.allowed {
         Ok(bundle)
     } else {
@@ -4223,8 +4283,14 @@ fn empty_usage(org_id: &str, period_key: &str) -> UsageLedger {
     }
 }
 
-async fn enforce_usage_allows_run(state: &AppState, org_id: &str) -> Result<(), ApiError> {
-    if !state.config.billing.enforcement_enabled {
+async fn enforce_usage_allows_run(
+    state: &AppState,
+    org_id: &str,
+    account_email: &str,
+) -> Result<(), ApiError> {
+    if !state.config.billing.enforcement_enabled
+        || state.config.is_privileged_account(account_email)
+    {
         return Ok(());
     }
     // Plan vigente (pagado o Mira Free por defecto). Free nunca tiene fila de
@@ -4254,6 +4320,9 @@ async fn increment_runs_usage(
     org_id: Option<&str>,
     account_email: &str,
 ) -> Result<(), ApiError> {
+    if state.config.is_privileged_account(account_email) {
+        return Ok(());
+    }
     let Some(org_id) = org_id else {
         return Ok(());
     };
@@ -4273,6 +4342,9 @@ async fn add_analysis_usage(
     retrieved_threads: u32,
     ai_analyzed_threads: u32,
 ) -> anyhow::Result<()> {
+    if state.config.is_privileged_account(account_email) {
+        return Ok(());
+    }
     let Some(org_id) = org_id else {
         return Ok(());
     };
@@ -4296,7 +4368,9 @@ async fn add_analysis_usage(
 /// un email que no sale es una degradación silenciosa aceptable, un run que
 /// se cae por eso no lo es.
 async fn check_quota_alerts(state: &AppState, org_id: &str, period_key: &str, account_email: &str) {
-    if !state.config.billing.enforcement_enabled {
+    if !state.config.billing.enforcement_enabled
+        || state.config.is_privileged_account(account_email)
+    {
         return;
     }
     let plan = match effective_plan_for_org(state, org_id).await {
@@ -5399,6 +5473,9 @@ mod tests {
         mark_ai_audit_unavailable(&mut failed);
 
         assert!(failed.manual_review_required);
+        assert_eq!(failed.classification, Classification::Ambiguous);
+        assert!(!failed.is_valid_client_request);
+        assert_eq!(calculate_metrics(&[failed.clone()], 0, 0).valid_requests, 0);
         assert!(
             failed
                 .reasons
@@ -5690,7 +5767,9 @@ mod tests {
         let original = low_confidence.classification.clone();
         decision.confidence = 0.5;
         apply_batch_decision(&mut low_confidence, &messages, &decision, 0.92, 0.72);
-        assert_eq!(low_confidence.classification, original);
+        assert_ne!(low_confidence.classification, original);
+        assert_eq!(low_confidence.classification, Classification::Ambiguous);
+        assert!(!low_confidence.is_valid_client_request);
         assert_ne!(
             low_confidence.classification_source,
             ClassificationSource::Ai
@@ -5701,8 +5780,44 @@ mod tests {
         decision.confidence = 0.95;
         decision.first_client_message_id = Some("invented".to_string());
         apply_batch_decision(&mut invalid_ids, &messages, &decision, 0.92, 0.72);
+        assert_eq!(invalid_ids.classification, Classification::Ambiguous);
+        assert!(!invalid_ids.is_valid_client_request);
         assert_ne!(invalid_ids.classification_source, ClassificationSource::Ai);
         assert!(invalid_ids.manual_review_required);
+    }
+
+    #[tokio::test]
+    async fn privileged_account_has_no_billing_limits_without_subscription() {
+        let mut config = test_app_config();
+        config.internal_full_access_emails = vec!["alice@example.com".to_string()];
+        let storage = MemoryStorage::default();
+        let state = AppState::new(config, Arc::new(storage.clone()));
+
+        let entitlement = entitlement_snapshot(&state, "alice-org", "alice@example.com")
+            .await
+            .unwrap();
+        assert!(entitlement.allowed);
+        assert_eq!(entitlement.plan.unwrap().id, BillingPlanId::Pro);
+
+        storage
+            .add_usage("alice-org", &current_period_key(), 10, 400, 100)
+            .await
+            .unwrap();
+        enforce_usage_allows_run(&state, "alice-org", "alice@example.com")
+            .await
+            .unwrap();
+        increment_runs_usage(&state, Some("alice-org"), "alice@example.com")
+            .await
+            .unwrap();
+        assert_eq!(
+            storage
+                .get_usage_ledger("alice-org", &current_period_key())
+                .await
+                .unwrap()
+                .unwrap()
+                .runs_created,
+            10
+        );
     }
 
     #[test]
@@ -6150,6 +6265,7 @@ mod tests {
                 Some(json!({
                     "schedule_report_policy": {
                         "scheduler_enabled": true,
+                        "analysis_time": "11:00",
                         "report_recipients": ["ops@example.com"]
                     }
                 })),
@@ -6934,6 +7050,7 @@ mod tests {
                     },
                     "schedule_report_policy": {
                         "scheduler_enabled": true,
+                        "analysis_time": "11:00",
                         "report_recipients": ["ops@example.com"]
                     }
                 })),
@@ -6956,8 +7073,32 @@ mod tests {
         let body: serde_json::Value = response_json(response).await;
         assert_eq!(body["scheduler"]["enabled"], true);
         assert_eq!(body["scheduler"]["recipients_count"], 1);
-        assert_eq!(body["scheduler"]["preset"], "weekdays_08_local");
+        assert_eq!(body["scheduler"]["preset"], "weekdays_custom_hour_local");
+        assert_eq!(body["scheduler"]["analysis_time"], "11:00");
         assert_eq!(body["policy"]["setup_ready"], true);
+    }
+
+    #[tokio::test]
+    async fn schedule_analysis_time_rejects_partial_hours() {
+        let test = seeded_app().await;
+        let response = test
+            .app
+            .oneshot(request(
+                Method::PUT,
+                "/me/org/config",
+                Some(&test.alice_cookie),
+                Some(json!({
+                    "schedule_report_policy": {
+                        "analysis_time": "08:30"
+                    }
+                })),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = response_json(response).await;
+        assert_eq!(body["error"]["code"], "BAD_REQUEST");
     }
 
     #[tokio::test]
