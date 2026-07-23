@@ -49,6 +49,8 @@ type WizardDraft = {
   validSignalKeywordsText: string;
   aiEnabled: boolean;
   aiConsentChecked: boolean;
+  autoApplyThreshold: number;
+  manualReviewThreshold: number;
   maxAuditMessages: number;
   maxBodyCharsPerMessage: number;
   schedulerEnabled: boolean;
@@ -85,6 +87,8 @@ function initDraft(config: OrgConfig | null): WizardDraft {
       validSignalKeywordsText: "",
       aiEnabled: true,
       aiConsentChecked: true,
+      autoApplyThreshold: 0.85,
+      manualReviewThreshold: 0.72,
       maxAuditMessages: 4,
       maxBodyCharsPerMessage: 280,
       schedulerEnabled: false,
@@ -118,6 +122,8 @@ function initDraft(config: OrgConfig | null): WizardDraft {
     validSignalKeywordsText: (draft.analysis_policy.valid_signal_keywords ?? []).join("\n"),
     aiEnabled: draft.ai_policy.enabled,
     aiConsentChecked: draft.ai_policy.enabled,
+    autoApplyThreshold: draft.ai_policy.auto_apply_threshold,
+    manualReviewThreshold: draft.ai_policy.manual_review_threshold,
     maxAuditMessages: draft.ai_policy.max_audit_messages,
     maxBodyCharsPerMessage: draft.ai_policy.max_body_chars_per_message,
     schedulerEnabled: draft.schedule_report_policy.scheduler_enabled,
@@ -150,8 +156,8 @@ function buildPutBody(d: WizardDraft, finalize = false) {
     ai_policy: {
       enabled: d.aiEnabled,
       consent_confirmed: d.aiConsentChecked,
-      auto_apply_threshold: 0.92,
-      manual_review_threshold: 0.72,
+      auto_apply_threshold: d.autoApplyThreshold,
+      manual_review_threshold: d.manualReviewThreshold,
       max_audit_messages: d.maxAuditMessages,
       max_body_chars_per_message: d.maxBodyCharsPerMessage,
     },

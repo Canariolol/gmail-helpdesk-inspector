@@ -8,6 +8,8 @@ use crate::mailbox::MailboxMetadata;
 
 pub const GMAIL_READONLY_SCOPE: &str = "https://www.googleapis.com/auth/gmail.readonly";
 pub const POLICY_SCHEMA_VERSION: u32 = 1;
+pub const DEFAULT_AUTO_APPLY_THRESHOLD: f64 = 0.85;
+const LEGACY_AUTO_APPLY_THRESHOLD: f64 = 0.92;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Organization {
@@ -462,7 +464,7 @@ fn default_ai_policy(enabled: bool, consent_granted_at: Option<DateTime<Utc>>) -
         provider: "bedrock".to_string(),
         model_id: "configured-server-side".to_string(),
         prompt_version: "helpdesk-auditor-v1".to_string(),
-        auto_apply_threshold: 0.92,
+        auto_apply_threshold: DEFAULT_AUTO_APPLY_THRESHOLD,
         manual_review_threshold: 0.72,
         max_audit_messages: 4,
         max_body_chars_per_message: 280,
@@ -492,6 +494,16 @@ pub fn apply_ai_defaults_migration(ai: &mut AiPolicy, now: DateTime<Utc>) -> boo
     true
 }
 
+/// Migra solo el antiguo valor fijo de la interfaz; umbrales personalizados se
+/// conservan.
+pub fn apply_ai_threshold_migration(ai: &mut AiPolicy) -> bool {
+    if ai.auto_apply_threshold != LEGACY_AUTO_APPLY_THRESHOLD {
+        return false;
+    }
+    ai.auto_apply_threshold = DEFAULT_AUTO_APPLY_THRESHOLD;
+    true
+}
+
 fn suggested_org_name(domain: &str) -> String {
     domain
         .split('.')
@@ -517,6 +529,10 @@ mod tests {
         assert!(bundle.draft.ai_policy.enabled);
         assert!(bundle.draft.ai_policy.consent_granted_at.is_some());
         assert!(bundle.draft.ai_policy.ai_defaults_applied);
+        assert_eq!(
+            bundle.draft.ai_policy.auto_apply_threshold,
+            DEFAULT_AUTO_APPLY_THRESHOLD
+        );
         assert_eq!(bundle.draft.schedule_report_policy.analysis_time, "08:00");
     }
 
@@ -555,5 +571,18 @@ mod tests {
         // Cargas posteriores NO la vuelven a encender: el opt-out persiste.
         assert!(!apply_ai_defaults_migration(&mut ai, now));
         assert!(!ai.enabled);
+    }
+
+    #[test]
+    fn ai_threshold_migration_only_replaces_the_legacy_default() {
+        let mut legacy = default_ai_policy(true, None);
+        legacy.auto_apply_threshold = LEGACY_AUTO_APPLY_THRESHOLD;
+        assert!(apply_ai_threshold_migration(&mut legacy));
+        assert_eq!(legacy.auto_apply_threshold, DEFAULT_AUTO_APPLY_THRESHOLD);
+        assert!(!apply_ai_threshold_migration(&mut legacy));
+
+        legacy.auto_apply_threshold = 0.8;
+        assert!(!apply_ai_threshold_migration(&mut legacy));
+        assert_eq!(legacy.auto_apply_threshold, 0.8);
     }
 }

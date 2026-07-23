@@ -7,6 +7,7 @@ import pytest
 from ai_worker.bedrock import (
     audit_batch_with_bedrock,
     audit_with_bedrock,
+    build_batch_system_prompt,
     build_batch_user_prompt,
     build_system_prompt,
 )
@@ -65,6 +66,7 @@ def batch_payload() -> BatchAuditRequest:
                 {
                     "thread_id": "g1",
                     "subject": "Ayuda",
+                    "focus_message_id": "m1",
                     "messages": [
                         {
                             "message_id": "m1",
@@ -263,6 +265,7 @@ async def test_audit_parses_fenced_json_response() -> None:
 def test_batch_prompt_uses_only_selected_content_and_metadata() -> None:
     prompt = build_batch_user_prompt(batch_payload())
     body = json.loads(prompt)
+    assert body["threads"][0]["focus_message_id"] == "m1"
     message = body["threads"][0]["messages"][0]
     assert message["content"] == "Necesito ayuda"
     assert set(message) == {
@@ -277,6 +280,14 @@ def test_batch_prompt_uses_only_selected_content_and_metadata() -> None:
     assert "text" not in message
     assert "automatic_classification" not in body["threads"][0]
     assert "policy_context" not in body
+
+
+def test_batch_system_prompt_resolves_clear_non_requests_without_review() -> None:
+    prompt = build_batch_system_prompt(Settings(), batch_payload().policy_context)
+
+    assert 'test emails with no support request are "misc"' in prompt
+    assert 'Use "ambiguous" only when at least two materially plausible' in prompt
+    assert "manual_review_required=true only when a human decision is genuinely needed" in prompt
 
 
 def test_batch_payload_accepts_legacy_excerpt() -> None:

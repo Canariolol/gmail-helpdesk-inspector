@@ -62,9 +62,10 @@ use crate::{
     },
     policies::{
         AiPolicy, AnalysisPolicy, MailboxPurpose, OrgConfigBundle, OrgConfigResponse,
-        PolicyVersion, ScheduleReportPolicy, apply_ai_defaults_migration, hash_owner_email,
-        normalize_domains, normalize_list, policy_version_from_draft, provision_default_config,
-        retention_expires_at, setup_state, validate_timezone,
+        PolicyVersion, ScheduleReportPolicy, apply_ai_defaults_migration,
+        apply_ai_threshold_migration, hash_owner_email, normalize_domains, normalize_list,
+        policy_version_from_draft, provision_default_config, retention_expires_at, setup_state,
+        validate_timezone,
     },
     provider_detect::{self, DetectedProvider},
     report::{ReportMailer, ResendMailer},
@@ -2526,9 +2527,20 @@ async fn get_or_provision_org_config(
     user_email: &str,
 ) -> Result<OrgConfigBundle, ApiError> {
     if let Some(mut bundle) = state.storage.get_org_config_for_user(user_email).await? {
-        // Migración perezosa al modelo opt-out: enciende una sola vez la IA de orgs
-        // previas que estaban apagadas por el viejo default, persistiendo el cambio.
-        if apply_ai_defaults_migration(&mut bundle.draft.ai_policy, Utc::now()) {
+        let now = Utc::now();
+        // Migraciones perezosas e idempotentes: preservan decisiones explícitas
+        // y crean una versión de política que el próximo análisis sí puede usar.
+        let defaults_changed = apply_ai_defaults_migration(&mut bundle.draft.ai_policy, now);
+        let threshold_changed = apply_ai_threshold_migration(&mut bundle.draft.ai_policy);
+        if defaults_changed || threshold_changed {
+            bundle.draft.updated_at = now;
+            bundle.policy_version = policy_version_from_draft(
+                &bundle.mailbox,
+                &bundle.draft,
+                bundle.policy_version.version + 1,
+                user_email,
+                now,
+            );
             state.storage.upsert_org_config(&bundle).await?;
         }
         return Ok(bundle);
@@ -3490,7 +3502,7 @@ const PROGRESS_UPDATE_EVERY: u64 = 5;
 /// acotar el tamaño del documento del run sin perder utilidad de diagnóstico.
 const FUNNEL_DROPPED_SAMPLE_CAP: usize = 100;
 const AI_BATCH_SIZE: usize = 20;
-const AI_MILESTONE_MESSAGE_CAP: usize = 4;
+const DEFAULT_AI_MESSAGE_CAP: usize = 4;
 const DEFAULT_AI_BODY_CHARS: usize = 280;
 
 #[derive(Default)]
@@ -3706,6 +3718,7 @@ struct BatchThreadSummary {
     thread_id: String,
     subject: String,
     gmail_labels: Vec<String>,
+    focus_message_id: Option<String>,
     messages: Vec<BatchMessageSummary>,
 }
 
@@ -3748,54 +3761,38 @@ struct BatchExecution {
 
 fn batch_messages_for_thread(
     prepared: &PreparedThread,
+    max_messages: usize,
     max_body_chars: usize,
 ) -> Vec<BatchMessageSummary> {
-    let first_client = prepared
+    let max_messages = max_messages.max(1);
+    let focus = prepared
         .thread
         .first_client_message_id
         .as_ref()
-        .and_then(|id| {
-            prepared
-                .messages
-                .iter()
-                .find(|message| &message.id == id && message.is_external && !message.is_automated)
-        })
-        .or_else(|| {
-            prepared
-                .messages
-                .iter()
-                .filter(|message| message.is_external && !message.is_automated)
-                .min_by_key(|message| message.date)
-        });
-    let Some(first_client) = first_client else {
-        return Vec::new();
-    };
-    let first_reply = prepared
+        .and_then(|id| prepared.messages.iter().find(|message| &message.id == id));
+    let first_client = prepared
         .messages
         .iter()
-        .filter(|message| {
-            message.is_internal && !message.is_automated && message.date > first_client.date
-        })
+        .filter(|message| message.is_external && !message.is_automated)
         .min_by_key(|message| message.date);
-    let last_client = prepared
-        .messages
-        .iter()
-        .filter(|message| {
-            message.is_external && !message.is_automated && message.date >= first_client.date
-        })
-        .max_by_key(|message| message.date);
-    let last_reply = prepared
-        .messages
-        .iter()
-        .filter(|message| {
-            message.is_internal && !message.is_automated && message.date > first_client.date
-        })
-        .max_by_key(|message| message.date);
-    let mut selected = Vec::with_capacity(AI_MILESTONE_MESSAGE_CAP);
-    for message in [Some(first_client), first_reply, last_client, last_reply]
+    let first_reply = first_client.and_then(|client| {
+        prepared
+            .messages
+            .iter()
+            .filter(|message| {
+                message.is_internal && !message.is_automated && message.date > client.date
+            })
+            .min_by_key(|message| message.date)
+    });
+    let mut selected = Vec::with_capacity(max_messages);
+    for message in [focus, first_client, first_reply]
         .into_iter()
         .flatten()
+        .chain(prepared.messages.iter().rev())
     {
+        if selected.len() == max_messages {
+            break;
+        }
         if !selected
             .iter()
             .any(|selected: &&EmailMessage| selected.id == message.id)
@@ -3824,12 +3821,17 @@ fn batch_messages_for_thread(
         .collect()
 }
 
-fn batch_summary(prepared: &PreparedThread, max_body_chars: usize) -> BatchThreadSummary {
+fn batch_summary(
+    prepared: &PreparedThread,
+    max_messages: usize,
+    max_body_chars: usize,
+) -> BatchThreadSummary {
     BatchThreadSummary {
         thread_id: prepared.thread.thread_id.clone(),
         subject: prepared.thread.subject.clone(),
         gmail_labels: prepared.label_ids.clone(),
-        messages: batch_messages_for_thread(prepared, max_body_chars),
+        focus_message_id: prepared.thread.first_client_message_id.clone(),
+        messages: batch_messages_for_thread(prepared, max_messages, max_body_chars),
     }
 }
 
@@ -3840,12 +3842,15 @@ async fn audit_batch_once(
     policy_snapshot: Option<&crate::policies::PolicySnapshot>,
 ) -> anyhow::Result<BatchAuditResponse> {
     let policy_context = policy_snapshot.map(ai_worker_policy_context);
+    let max_messages = policy_snapshot
+        .map(|snapshot| snapshot.ai_policy.max_audit_messages as usize)
+        .unwrap_or(DEFAULT_AI_MESSAGE_CAP);
     let max_body_chars = policy_snapshot
         .map(|snapshot| snapshot.ai_policy.max_body_chars_per_message as usize)
         .unwrap_or(DEFAULT_AI_BODY_CHARS);
     let threads = indexes
         .iter()
-        .map(|index| batch_summary(&prepared[*index], max_body_chars))
+        .map(|index| batch_summary(&prepared[*index], max_messages, max_body_chars))
         .collect();
     let mut request = state
         .http
@@ -3969,31 +3974,36 @@ fn apply_batch_decision(
     auto_apply_threshold: f64,
     manual_review_threshold: f64,
 ) {
-    if !batch_message_ids_known(decision, messages) || decision.confidence < manual_review_threshold
-    {
-        thread.classification = Classification::Ambiguous;
-        thread.classification_confidence = 0.0;
-        thread.is_valid_client_request = false;
-        thread.manual_review_required = true;
-        thread.reasons.push(
-            "Mira no alcanzó confianza suficiente; revisa este hilo manualmente.".to_string(),
-        );
-        thread.reasons.extend(decision.issues.iter().cloned());
-        return;
-    }
-
+    let ids_known = batch_message_ids_known(decision, messages);
+    let classification_is_valid = decision.classification == Classification::ValidClientRequest;
+    let decision_is_consistent = decision.is_valid_client_request == classification_is_valid;
     thread.classification = decision.classification.clone();
     thread.classification_source = ClassificationSource::Ai;
     thread.classification_confidence = decision.confidence;
-    thread.is_valid_client_request = decision.is_valid_client_request;
-    thread.is_answered = decision.is_answered;
-    thread.first_client_message_id = decision.first_client_message_id.clone();
-    thread.first_internal_reply_message_id = decision.first_internal_reply_message_id.clone();
-    thread.last_internal_message_id = decision.last_internal_message_id.clone();
-    apply_trace_dates(thread, messages);
-    thread.manual_review_required =
-        decision.manual_review_required || decision.confidence < auto_apply_threshold;
-    thread.reasons.push(if thread.manual_review_required {
+    thread.is_valid_client_request = classification_is_valid;
+    if ids_known {
+        thread.is_answered = decision.is_answered;
+        thread.first_client_message_id = decision.first_client_message_id.clone();
+        thread.first_internal_reply_message_id = decision.first_internal_reply_message_id.clone();
+        thread.last_internal_message_id = decision.last_internal_message_id.clone();
+        apply_trace_dates(thread, messages);
+    }
+    thread.manual_review_required = decision.manual_review_required
+        || decision.classification == Classification::Ambiguous
+        || decision.confidence < auto_apply_threshold
+        || !ids_known
+        || !decision_is_consistent;
+    thread.reasons.push(if !ids_known {
+        "Mira clasificó el hilo, pero entregó referencias de mensajes inválidas; revisa la trazabilidad."
+            .to_string()
+    } else if !decision_is_consistent {
+        "Mira entregó una clasificación inconsistente; se conservó la categoría y requiere revisión."
+            .to_string()
+    } else if decision.classification == Classification::Ambiguous {
+        "Mira encontró más de una clasificación plausible; revisa este hilo.".to_string()
+    } else if decision.confidence < manual_review_threshold {
+        "Mira clasificó el hilo con baja confianza; revisa este resultado.".to_string()
+    } else if thread.manual_review_required {
         "Mira sugiere un estado que requiere confirmación manual.".to_string()
     } else {
         "Mira aplicó la auditoría por alta confianza.".to_string()
@@ -5433,7 +5443,7 @@ mod tests {
     #[test]
     fn batch_audit_selects_unique_milestones_and_compact_content() {
         let mut thread = thread("thread-1", "run-1");
-        thread.first_client_message_id = Some("msg-c".to_string());
+        thread.first_client_message_id = Some("msg-d".to_string());
         let mut first = message("msg-a", "cliente@example.com");
         first.body_text = Some("abcdefgh".to_string());
         let mut first_reply = message("msg-b", "agente@example.com");
@@ -5456,18 +5466,21 @@ mod tests {
             should_batch: true,
         };
 
-        let selected = batch_messages_for_thread(&prepared, 5);
+        let selected = batch_messages_for_thread(&prepared, 3, 5);
 
-        assert_eq!(selected.len(), 4);
+        assert_eq!(selected.len(), 3);
         assert_eq!(
             selected
                 .iter()
                 .map(|message| message.message_id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["msg-a", "msg-b", "msg-d", "msg-e"]
+            vec!["msg-a", "msg-b", "msg-d"]
         );
         assert_eq!(selected[0].content, "abcde\n[truncado]");
         assert_eq!(selected[1].content, "Neces\n[truncado]");
+
+        let full_context = batch_messages_for_thread(&prepared, 5, 5);
+        assert_eq!(full_context.len(), 5);
     }
 
     #[test]
@@ -5771,21 +5784,22 @@ mod tests {
         decision.confidence = 0.5;
         apply_batch_decision(&mut low_confidence, &messages, &decision, 0.92, 0.72);
         assert_ne!(low_confidence.classification, original);
-        assert_eq!(low_confidence.classification, Classification::Ambiguous);
+        assert_eq!(low_confidence.classification, Classification::Misc);
         assert!(!low_confidence.is_valid_client_request);
-        assert_ne!(
+        assert_eq!(
             low_confidence.classification_source,
             ClassificationSource::Ai
         );
+        assert_eq!(low_confidence.classification_confidence, 0.5);
         assert!(low_confidence.manual_review_required);
 
         let mut invalid_ids = thread("invalid", "run");
         decision.confidence = 0.95;
         decision.first_client_message_id = Some("invented".to_string());
         apply_batch_decision(&mut invalid_ids, &messages, &decision, 0.92, 0.72);
-        assert_eq!(invalid_ids.classification, Classification::Ambiguous);
+        assert_eq!(invalid_ids.classification, Classification::Misc);
         assert!(!invalid_ids.is_valid_client_request);
-        assert_ne!(invalid_ids.classification_source, ClassificationSource::Ai);
+        assert_eq!(invalid_ids.classification_source, ClassificationSource::Ai);
         assert!(invalid_ids.manual_review_required);
     }
 

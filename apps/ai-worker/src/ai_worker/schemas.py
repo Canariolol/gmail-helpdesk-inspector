@@ -90,6 +90,7 @@ class BatchThreadSummary(BaseModel):
     thread_id: str
     subject: str
     gmail_labels: list[str] = Field(default_factory=list)
+    focus_message_id: str | None = None
     messages: list[BatchMessageSummary] = Field(default_factory=list)
 
 

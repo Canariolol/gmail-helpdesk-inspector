@@ -176,8 +176,14 @@ Ignored senders/domains/keywords:
 
 For each thread:
 - valid_client_request means an external human asks for work covered by the policy.
+- Messages may include earlier history for context. focus_message_id identifies the client message that brought the thread into the current analysis window.
+- Use the full supplied history to understand the request. A short follow-up or thank-you does not erase a clear earlier request and response.
 - is_answered requires a later human internal reply; automated acknowledgements do not count.
-- The selected messages are the first client message, first human internal reply, last client message and last human internal reply when each exists.
+- If focus_message_id is only an acknowledgement with no new request, evaluate whether the earlier request was answered. If it contains a new or repeated request, require a human internal reply after that focus message.
+- Empty connectivity/test emails with no support request are "misc", not "ambiguous". An explicit out-of-scope policy match is also "misc" (or the more specific non-request class), not "ambiguous".
+- Use "ambiguous" only when at least two materially plausible classifications remain after considering all supplied context. Missing request content by itself is evidence that the message is not a valid request.
+- Set manual_review_required=true only when a human decision is genuinely needed; do not require review merely because wording differs from the policy examples.
+- The supplied messages are a bounded chronological selection that prioritizes the focus, original request, first reply and recent context.
 - Use only supplied message_id values for first_client_message_id, first_internal_reply_message_id and last_internal_message_id; never invent ids.
 - Use ambiguous and manual_review_required=true when the evidence is insufficient.
 - Preserve every supplied thread_id exactly and return exactly one decision for each.
