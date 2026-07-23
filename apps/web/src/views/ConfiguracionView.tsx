@@ -41,6 +41,7 @@ type WizardDraft = {
   orgName: string;
   orgTimezone: string;
   internalDomainsText: string;
+  mailboxAliasesText: string;
   validCriteriaText: string;
   nonResponsibilityText: string;
   ignoredDomainsText: string;
@@ -76,6 +77,7 @@ function initDraft(config: OrgConfig | null): WizardDraft {
       orgName: "",
       orgTimezone: "America/Santiago",
       internalDomainsText: "",
+      mailboxAliasesText: "",
       validCriteriaText: "",
       nonResponsibilityText: "",
       ignoredDomainsText: "google.com\ncalendar.google.com",
@@ -93,10 +95,22 @@ function initDraft(config: OrgConfig | null): WizardDraft {
     };
   }
   const { draft, org } = config;
+  const detectedAliases = (config.mailbox_metadata?.send_as ?? [])
+    .map((address) => address.email.trim())
+    .filter(
+      (email) =>
+        email &&
+        email.toLowerCase() !== config.mailbox.google_account_email.toLowerCase(),
+    );
+  const mailboxAliases =
+    draft.mailbox_aliases_configured || draft.analysis_policy.mailbox_aliases.length > 0
+      ? draft.analysis_policy.mailbox_aliases
+      : detectedAliases;
   return {
     orgName: org.name,
     orgTimezone: org.default_timezone,
     internalDomainsText: draft.analysis_policy.internal_domains.join("\n"),
+    mailboxAliasesText: mailboxAliases.join("\n"),
     validCriteriaText: draft.analysis_policy.valid_request_criteria.join("\n"),
     nonResponsibilityText: draft.analysis_policy.non_responsibility_rules.join("\n"),
     ignoredDomainsText: draft.analysis_policy.ignored_domains.join("\n"),
@@ -122,7 +136,7 @@ function buildPutBody(d: WizardDraft, finalize = false) {
       timezone: d.orgTimezone,
       internal_domains: splitLines(d.internalDomainsText),
       responder_emails: [],
-      mailbox_aliases: [],
+      mailbox_aliases: splitLines(d.mailboxAliasesText),
       valid_request_criteria: splitLines(d.validCriteriaText),
       non_responsibility_rules: splitLines(d.nonResponsibilityText),
       ignored_senders: [],
@@ -408,6 +422,20 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
   }
 
   const domains = splitLines(draft.internalDomainsText);
+  const detectedAliases = (orgConfig?.mailbox_metadata?.send_as ?? [])
+    .map((address) => address.email.trim())
+    .filter(
+      (email) =>
+        email &&
+        email.toLowerCase() !== orgConfig?.mailbox.google_account_email.toLowerCase(),
+    );
+  const selectedAliases = splitLines(draft.mailboxAliasesText);
+  function toggleDetectedAlias(email: string, checked: boolean) {
+    const withoutEmail = selectedAliases.filter(
+      (selected) => selected.toLowerCase() !== email.toLowerCase(),
+    );
+    set("mailboxAliasesText", (checked ? [...withoutEmail, email] : withoutEmail).join("\n"));
+  }
   const ready = Boolean(setupState?.ready_for_analysis);
 
   const registerSection = (key: SectionKey) => (el: HTMLElement | null) => {
@@ -530,6 +558,40 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
                 de tu equipo.
               </div>
             )}
+            <div className="field">
+              <label htmlFor="mailbox-aliases">Direcciones y alias de la casilla (opcional)</label>
+              <textarea
+                id="mailbox-aliases"
+                rows={3}
+                value={draft.mailboxAliasesText}
+                onChange={(e) => set("mailboxAliasesText", e.target.value)}
+                placeholder={"soporte@tuempresa.com\nayuda@tuempresa.com"}
+              />
+              <span className="cfg-hint">
+                Direcciones adicionales que llegan a esta casilla. Una por línea.
+              </span>
+              {detectedAliases.length > 0 ? (
+                <div className="cfg-detected-aliases">
+                  <span>Detectadas por el proveedor</span>
+                  {detectedAliases.map((email) => (
+                    <label className="checkline" key={email}>
+                      <input
+                        type="checkbox"
+                        checked={selectedAliases.some(
+                          (selected) => selected.toLowerCase() === email.toLowerCase(),
+                        )}
+                        onChange={(event) => toggleDetectedAlias(email, event.target.checked)}
+                      />
+                      <span>{email}</span>
+                    </label>
+                  ))}
+                </div>
+              ) : (
+                <span className="cfg-hint">
+                  El proveedor no informó alias; puedes escribirlos manualmente.
+                </span>
+              )}
+            </div>
           </section>
 
           <section className="cfg-section" data-section="cuenta" ref={registerSection("cuenta")}>

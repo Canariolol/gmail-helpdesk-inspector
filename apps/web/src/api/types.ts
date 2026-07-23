@@ -302,6 +302,7 @@ export interface RetentionPolicy {
 }
 
 export interface PolicyDraft {
+  mailbox_aliases_configured?: boolean;
   analysis_policy: AnalysisPolicy;
   ai_policy: AiPolicy;
   schedule_report_policy: ScheduleReportPolicy;

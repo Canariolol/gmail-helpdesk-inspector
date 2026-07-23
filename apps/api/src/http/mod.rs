@@ -2334,6 +2334,9 @@ fn apply_org_config_update(
         }
     }
     if let Some(policy) = request.analysis_policy {
+        if policy.mailbox_aliases.is_some() {
+            bundle.draft.mailbox_aliases_configured = true;
+        }
         apply_analysis_policy_update(&mut bundle.draft.analysis_policy, policy)?;
     }
     if let Some(policy) = request.ai_policy {
@@ -5965,6 +5968,7 @@ mod tests {
 
         let response = test
             .app
+            .clone()
             .oneshot(request(
                 Method::PUT,
                 "/me/org/config",
@@ -5972,6 +5976,7 @@ mod tests {
                 Some(json!({
                     "finalize": true,
                     "analysis_policy": {
+                        "mailbox_aliases": ["soporte@example.com"],
                         "valid_request_criteria": ["Clientes externos solicitan soporte"]
                     }
                 })),
@@ -5981,6 +5986,23 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body: serde_json::Value = response_json(response).await;
         assert_eq!(body["setup_state"]["ready_for_analysis"], true);
+        assert_eq!(
+            body["policy_version"]["snapshot"]["analysis_policy"]["mailbox_aliases"],
+            json!(["soporte@example.com"])
+        );
+
+        let response = test
+            .app
+            .oneshot(request(
+                Method::GET,
+                "/me/org/config",
+                Some(&test.alice_cookie),
+                None,
+            ))
+            .await
+            .unwrap();
+        let body: OrgConfigResponse = response_json(response).await;
+        assert!(body.draft.mailbox_aliases_configured);
     }
 
     #[tokio::test]

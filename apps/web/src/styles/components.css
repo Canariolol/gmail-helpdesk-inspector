@@ -2404,6 +2404,23 @@
   color: var(--text-muted);
 }
 
+.cfg-detected-aliases {
+  display: grid;
+  gap: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3);
+}
+
+.cfg-detected-aliases > span {
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+
+.cfg-detected-aliases .checkline {
+  font-size: var(--fs-sm);
+}
+
 .cfg-loading {
   display: flex;
   align-items: center;

@@ -79,6 +79,10 @@ pub enum MailboxPurpose {
 pub struct PolicyDraft {
     pub org_id: String,
     pub mailbox_id: String,
+    /// Distingue "todavía no sugerimos alias detectados" de "el usuario eligió
+    /// dejar la lista vacía".
+    #[serde(default)]
+    pub mailbox_aliases_configured: bool,
     pub analysis_policy: AnalysisPolicy,
     pub ai_policy: AiPolicy,
     pub schedule_report_policy: ScheduleReportPolicy,
@@ -296,11 +300,12 @@ pub fn provision_default_config(user_email: &str, now: DateTime<Utc>) -> OrgConf
     let draft = PolicyDraft {
         org_id: org_id.clone(),
         mailbox_id,
+        mailbox_aliases_configured: false,
         analysis_policy: AnalysisPolicy {
             timezone: org.default_timezone.clone(),
             internal_domains: vec![domain],
             responder_emails: vec![],
-            mailbox_aliases: vec![user_email.to_string()],
+            mailbox_aliases: vec![],
             valid_request_criteria: vec![],
             non_responsibility_rules: vec![],
             ignored_senders: vec![],
