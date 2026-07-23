@@ -261,6 +261,9 @@ export interface AnalysisPolicy {
   ignored_domains: string[];
   ignored_keywords: string[];
   valid_signal_keywords?: string[];
+  count_historical_closures_as_valid?: boolean;
+  count_previous_request_followups_as_valid?: boolean;
+  count_org_hosted_training_as_valid?: boolean;
   default_time_from: string;
   default_time_to: string;
   max_threads_per_run: number;

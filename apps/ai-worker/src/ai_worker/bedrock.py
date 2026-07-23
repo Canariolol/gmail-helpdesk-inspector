@@ -76,6 +76,11 @@ Ignored hints from policy (use as supporting evidence, not as the only criterion
 - Ignored subject keywords:
 {_bullet_list(policy.ignored_keywords, "  - none")}
 
+Window counting rules:
+- Historical acknowledgements/thank-yous/closures with no new request: {"COUNT as valid when the prior request was valid." if policy.count_historical_closures_as_valid else "DO NOT count; classify as misc."}
+- Follow-ups or insistences about a request/ticket that started before the window: {"COUNT as a new valid request when in scope." if policy.count_previous_request_followups_as_valid else "DO NOT count as a new request; classify as misc unless the focus introduces a materially new request."}
+- Training/webinars: {"COUNT only when this organization is the host/provider and the focus asks it to perform work." if policy.count_org_hosted_training_as_valid else "DO NOT count as valid."}
+
 Classification guidance:
 - "valid_client_request": an external, human client asks for something this configured helpdesk should handle under the valid request criteria.
 - "automated": automated/system/no-reply/notification mail.
@@ -90,11 +95,14 @@ Gmail label hints (field "gmail_labels", use as supporting evidence, not the sol
 - CATEGORY_PERSONAL, INBOX and IMPORTANT are neutral and do not by themselves indicate a valid request.
 
 Answer guidance:
-- is_answered=true only if a real HUMAN internal/responder reply after the client's relevant message exists.
+- For a valid in-window request, is_answered=true only if a real HUMAN internal/responder reply after the focus exists.
+- For an ignored historical closure/thank-you, is_answered may be true when the supplied history shows that the prior request was already answered.
 - Automated acknowledgements and ticket auto-replies do NOT count as answered.
 - Use only the message ids provided; never invent messages or ids.
 - Pick first_client_message_id, first_internal_reply_message_id and last_internal_message_id from the provided ids when applicable, else null.
 - The messages are compact excerpts; use "ambiguous" + manual_review_required=true if the evidence is insufficient.
+- automatic_classification.first_client_message_id is the first client message inside the analysis window. Classify that activity; earlier messages are context only.
+- Match ignored domains exactly or by subdomain boundary. gmail.com is not google.com.
 - The automatic_classification field is only a prior hint from a rule-based pass; correct it freely.
 - Write every string in the "issues" array in Spanish.
 - Output must match the requested JSON schema exactly."""
@@ -162,7 +170,7 @@ def build_batch_system_prompt(
     settings: Settings, policy: AuditPolicyContext | None = None
 ) -> str:
     policy = policy or _fallback_policy_context(settings)
-    return f"""Audit a batch of email threads for one helpdesk mailbox. The tenant policy below applies to every thread. Return strict JSON with one decision per supplied thread_id and no extra text.
+    return f"""You are analyzing the inbound mailbox of a helpdesk. Your task is to identify new support requests received within the selected analysis window. The tenant policy below applies to every thread. Return strict JSON with one decision per supplied thread_id and no extra text.
 
 Mailbox: {policy.mailbox_email or "not specified"}
 Internal domains:
@@ -174,13 +182,21 @@ Out-of-scope rules:
 Ignored senders/domains/keywords:
 {_bullet_list([*policy.ignored_senders, *policy.ignored_domains, *policy.ignored_keywords], "  - none")}
 
+Window counting rules:
+- Historical acknowledgements/thank-yous/closures with no new request: {"COUNT as valid when the prior request was valid." if policy.count_historical_closures_as_valid else "DO NOT count; classify as misc."}
+- Follow-ups or insistences about a request/ticket that started before the window: {"COUNT as a new valid request when in scope." if policy.count_previous_request_followups_as_valid else "DO NOT count as a new request; classify as misc unless the focus introduces a materially new request."}
+- Training/webinars: {"COUNT only when this organization is the host/provider and the focus asks it to perform work." if policy.count_org_hosted_training_as_valid else "DO NOT count as valid."}
+
 For each thread:
 - valid_client_request means an external human asks for work covered by the policy.
 - Messages may include earlier history for context. focus_message_id identifies the client message that brought the thread into the current analysis window.
-- Use the full supplied history to understand the request. A short follow-up or thank-you does not erase a clear earlier request and response.
-- is_answered requires a later human internal reply; automated acknowledgements do not count.
-- If focus_message_id is only an acknowledgement with no new request, evaluate whether the earlier request was answered. If it contains a new or repeated request, require a human internal reply after that focus message.
+- Classify the activity beginning at focus_message_id, not the historical thread as a whole. Earlier messages are context only and cannot by themselves make the in-window activity valid.
+- Use the full supplied history to understand what the focus refers to, while applying the window counting rules above.
+- For a valid in-window request, is_answered requires a later human internal reply; automated acknowledgements do not count.
+- For an ignored historical closure/thank-you, is_answered may be true when the supplied history shows that the prior request was already answered.
+- For a valid request, first_client_message_id must be focus_message_id and reply ids must occur after it.
 - Empty connectivity/test emails with no support request are "misc", not "ambiguous". An explicit out-of-scope policy match is also "misc" (or the more specific non-request class), not "ambiguous".
+- Match ignored domains exactly or by subdomain boundary. gmail.com is not google.com.
 - Use "ambiguous" only when at least two materially plausible classifications remain after considering all supplied context. Missing request content by itself is evidence that the message is not a valid request.
 - Set manual_review_required=true only when a human decision is genuinely needed; do not require review merely because wording differs from the policy examples.
 - The supplied messages are a bounded chronological selection that prioritizes the focus, original request, first reply and recent context.

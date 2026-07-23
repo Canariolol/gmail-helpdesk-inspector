@@ -64,6 +64,9 @@ class AuditPolicyContext(BaseModel):
     ignored_senders: list[str] = Field(default_factory=list)
     ignored_domains: list[str] = Field(default_factory=list)
     ignored_keywords: list[str] = Field(default_factory=list)
+    count_historical_closures_as_valid: bool = False
+    count_previous_request_followups_as_valid: bool = False
+    count_org_hosted_training_as_valid: bool = True
     prompt_version: str = ""
     allowed_fields: list[str] = Field(default_factory=list)
 

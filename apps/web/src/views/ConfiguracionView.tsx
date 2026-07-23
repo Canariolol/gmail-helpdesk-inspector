@@ -47,6 +47,9 @@ type WizardDraft = {
   ignoredDomainsText: string;
   ignoredKeywordsText: string;
   validSignalKeywordsText: string;
+  countHistoricalClosuresAsValid: boolean;
+  countPreviousRequestFollowupsAsValid: boolean;
+  countOrgHostedTrainingAsValid: boolean;
   aiEnabled: boolean;
   aiConsentChecked: boolean;
   autoApplyThreshold: number;
@@ -85,6 +88,9 @@ function initDraft(config: OrgConfig | null): WizardDraft {
       ignoredDomainsText: "google.com\ncalendar.google.com",
       ignoredKeywordsText: "newsletter\nboletín\npromoción",
       validSignalKeywordsText: "",
+      countHistoricalClosuresAsValid: false,
+      countPreviousRequestFollowupsAsValid: false,
+      countOrgHostedTrainingAsValid: true,
       aiEnabled: true,
       aiConsentChecked: true,
       autoApplyThreshold: 0.85,
@@ -120,6 +126,12 @@ function initDraft(config: OrgConfig | null): WizardDraft {
     ignoredDomainsText: draft.analysis_policy.ignored_domains.join("\n"),
     ignoredKeywordsText: draft.analysis_policy.ignored_keywords.join("\n"),
     validSignalKeywordsText: (draft.analysis_policy.valid_signal_keywords ?? []).join("\n"),
+    countHistoricalClosuresAsValid:
+      draft.analysis_policy.count_historical_closures_as_valid ?? false,
+    countPreviousRequestFollowupsAsValid:
+      draft.analysis_policy.count_previous_request_followups_as_valid ?? false,
+    countOrgHostedTrainingAsValid:
+      draft.analysis_policy.count_org_hosted_training_as_valid ?? true,
     aiEnabled: draft.ai_policy.enabled,
     aiConsentChecked: draft.ai_policy.enabled,
     autoApplyThreshold: draft.ai_policy.auto_apply_threshold,
@@ -149,6 +161,9 @@ function buildPutBody(d: WizardDraft, finalize = false) {
       ignored_domains: splitLines(d.ignoredDomainsText),
       ignored_keywords: splitLines(d.ignoredKeywordsText),
       valid_signal_keywords: splitLines(d.validSignalKeywordsText),
+      count_historical_closures_as_valid: d.countHistoricalClosuresAsValid,
+      count_previous_request_followups_as_valid: d.countPreviousRequestFollowupsAsValid,
+      count_org_hosted_training_as_valid: d.countOrgHostedTrainingAsValid,
       default_time_from: "00:00",
       default_time_to: "23:59",
       max_threads_per_run: 50,
@@ -634,6 +649,36 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
                 Si la respuesta del equipo menciona alguna de estas palabras, el correo se cuenta
                 como solicitud válida y Mira confirma el resultado. Una por línea.
               </span>
+            </div>
+            <div className="field">
+              <label>Reglas de conteo</label>
+              <span className="cfg-hint">
+                Define qué actividad recibida dentro de la ventana cuenta como una nueva solicitud.
+              </span>
+              <label className="checkline">
+                <input
+                  type="checkbox"
+                  checked={draft.countHistoricalClosuresAsValid}
+                  onChange={(e) => set("countHistoricalClosuresAsValid", e.target.checked)}
+                />
+                <span>Contar agradecimientos y cierres de solicitudes anteriores</span>
+              </label>
+              <label className="checkline">
+                <input
+                  type="checkbox"
+                  checked={draft.countPreviousRequestFollowupsAsValid}
+                  onChange={(e) => set("countPreviousRequestFollowupsAsValid", e.target.checked)}
+                />
+                <span>Contar seguimientos o insistencias de solicitudes anteriores</span>
+              </label>
+              <label className="checkline">
+                <input
+                  type="checkbox"
+                  checked={draft.countOrgHostedTrainingAsValid}
+                  onChange={(e) => set("countOrgHostedTrainingAsValid", e.target.checked)}
+                />
+                <span>Contar capacitaciones impartidas por mi organización</span>
+              </label>
             </div>
             <div className="field">
               <label htmlFor="non-responsibility">Reglas de no responsabilidad (opcional)</label>

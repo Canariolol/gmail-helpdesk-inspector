@@ -288,6 +288,9 @@ def test_batch_system_prompt_resolves_clear_non_requests_without_review() -> Non
     assert 'test emails with no support request are "misc"' in prompt
     assert 'Use "ambiguous" only when at least two materially plausible' in prompt
     assert "manual_review_required=true only when a human decision is genuinely needed" in prompt
+    assert "Earlier messages are context only" in prompt
+    assert "gmail.com is not google.com" in prompt
+    assert "Historical acknowledgements/thank-yous/closures" in prompt
 
 
 def test_batch_payload_accepts_legacy_excerpt() -> None:

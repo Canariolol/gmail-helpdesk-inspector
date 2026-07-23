@@ -63,9 +63,9 @@ use crate::{
     policies::{
         AiPolicy, AnalysisPolicy, MailboxPurpose, OrgConfigBundle, OrgConfigResponse,
         PolicyVersion, ScheduleReportPolicy, apply_ai_defaults_migration,
-        apply_ai_threshold_migration, hash_owner_email, normalize_domains, normalize_list,
-        policy_version_from_draft, provision_default_config, retention_expires_at, setup_state,
-        validate_timezone,
+        apply_ai_prompt_version_migration, apply_ai_threshold_migration, hash_owner_email,
+        normalize_domains, normalize_list, policy_version_from_draft, provision_default_config,
+        retention_expires_at, setup_state, validate_timezone,
     },
     provider_detect::{self, DetectedProvider},
     report::{ReportMailer, ResendMailer},
@@ -2190,6 +2190,9 @@ struct AnalysisPolicyUpdateRequest {
     ignored_domains: Option<Vec<String>>,
     ignored_keywords: Option<Vec<String>>,
     valid_signal_keywords: Option<Vec<String>>,
+    count_historical_closures_as_valid: Option<bool>,
+    count_previous_request_followups_as_valid: Option<bool>,
+    count_org_hosted_training_as_valid: Option<bool>,
     include_labels: Option<Vec<String>>,
     exclude_labels: Option<Vec<String>>,
     default_time_from: Option<String>,
@@ -2394,6 +2397,15 @@ fn apply_analysis_policy_update(
     if let Some(values) = update.valid_signal_keywords {
         current.valid_signal_keywords = normalize_text_list(values);
     }
+    if let Some(value) = update.count_historical_closures_as_valid {
+        current.count_historical_closures_as_valid = value;
+    }
+    if let Some(value) = update.count_previous_request_followups_as_valid {
+        current.count_previous_request_followups_as_valid = value;
+    }
+    if let Some(value) = update.count_org_hosted_training_as_valid {
+        current.count_org_hosted_training_as_valid = value;
+    }
     if let Some(values) = update.include_labels {
         current.include_labels = normalize_text_list(values);
     }
@@ -2532,7 +2544,8 @@ async fn get_or_provision_org_config(
         // y crean una versión de política que el próximo análisis sí puede usar.
         let defaults_changed = apply_ai_defaults_migration(&mut bundle.draft.ai_policy, now);
         let threshold_changed = apply_ai_threshold_migration(&mut bundle.draft.ai_policy);
-        if defaults_changed || threshold_changed {
+        let prompt_changed = apply_ai_prompt_version_migration(&mut bundle.draft.ai_policy);
+        if defaults_changed || threshold_changed || prompt_changed {
             bundle.draft.updated_at = now;
             bundle.policy_version = policy_version_from_draft(
                 &bundle.mailbox,
@@ -3679,6 +3692,9 @@ struct AiWorkerPolicyContext<'a> {
     ignored_senders: &'a [String],
     ignored_domains: &'a [String],
     ignored_keywords: &'a [String],
+    count_historical_closures_as_valid: bool,
+    count_previous_request_followups_as_valid: bool,
+    count_org_hosted_training_as_valid: bool,
     prompt_version: &'a str,
     allowed_fields: &'a [String],
 }
@@ -3698,6 +3714,15 @@ fn ai_worker_policy_context(
         ignored_senders: &snapshot.analysis_policy.ignored_senders,
         ignored_domains: &snapshot.analysis_policy.ignored_domains,
         ignored_keywords: &snapshot.analysis_policy.ignored_keywords,
+        count_historical_closures_as_valid: snapshot
+            .analysis_policy
+            .count_historical_closures_as_valid,
+        count_previous_request_followups_as_valid: snapshot
+            .analysis_policy
+            .count_previous_request_followups_as_valid,
+        count_org_hosted_training_as_valid: snapshot
+            .analysis_policy
+            .count_org_hosted_training_as_valid,
         prompt_version: &snapshot.ai_policy.prompt_version,
         allowed_fields: &snapshot.ai_policy.allowed_fields,
     }
@@ -3981,13 +4006,15 @@ fn apply_batch_decision(
     thread.classification_source = ClassificationSource::Ai;
     thread.classification_confidence = decision.confidence;
     thread.is_valid_client_request = classification_is_valid;
-    if ids_known {
+    if !classification_is_valid {
+        // Un cierre antiguo puede ser "ignorado y contestado": no afecta las
+        // métricas válidas, pero conserva el estado que ve la persona revisora.
         thread.is_answered = decision.is_answered;
-        thread.first_client_message_id = decision.first_client_message_id.clone();
-        thread.first_internal_reply_message_id = decision.first_internal_reply_message_id.clone();
-        thread.last_internal_message_id = decision.last_internal_message_id.clone();
-        apply_trace_dates(thread, messages);
     }
+    // La IA clasifica la actividad, pero no puede mover las métricas fuera de la
+    // ventana: estos hitos ya fueron calculados contra el primer cliente recibido
+    // dentro del período.
+    apply_trace_dates(thread, messages);
     thread.manual_review_required = decision.manual_review_required
         || decision.classification == Classification::Ambiguous
         || decision.confidence < auto_apply_threshold
@@ -5746,6 +5773,9 @@ mod tests {
     fn batch_applies_high_confidence_and_prefills_manual_suggestions() {
         let mut candidate = thread("batch", "run");
         candidate.manual_review_required = false;
+        candidate.is_answered = true;
+        candidate.first_internal_reply_message_id = Some("msg-b".to_string());
+        candidate.last_internal_message_id = Some("msg-b".to_string());
         let mut first = message("msg-a", "cliente@example.com");
         let mut reply = message("msg-b", "agente@example.com");
         reply.is_internal = true;
@@ -5801,6 +5831,11 @@ mod tests {
         assert!(!invalid_ids.is_valid_client_request);
         assert_eq!(invalid_ids.classification_source, ClassificationSource::Ai);
         assert!(invalid_ids.manual_review_required);
+        assert_eq!(
+            invalid_ids.first_client_message_id.as_deref(),
+            Some("msg-a")
+        );
+        assert!(invalid_ids.is_answered);
     }
 
     #[tokio::test]

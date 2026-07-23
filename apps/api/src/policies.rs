@@ -7,9 +7,11 @@ use uuid::Uuid;
 use crate::mailbox::MailboxMetadata;
 
 pub const GMAIL_READONLY_SCOPE: &str = "https://www.googleapis.com/auth/gmail.readonly";
-pub const POLICY_SCHEMA_VERSION: u32 = 1;
+pub const POLICY_SCHEMA_VERSION: u32 = 2;
 pub const DEFAULT_AUTO_APPLY_THRESHOLD: f64 = 0.85;
 const LEGACY_AUTO_APPLY_THRESHOLD: f64 = 0.92;
+const DEFAULT_PROMPT_VERSION: &str = "helpdesk-auditor-v2";
+const LEGACY_PROMPT_VERSION: &str = "helpdesk-auditor-v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Organization {
@@ -140,6 +142,14 @@ pub struct AnalysisPolicy {
     /// a Solicitud Válida y se enruta a la auditoría IA para el veredicto final.
     #[serde(default)]
     pub valid_signal_keywords: Vec<String>,
+    /// Reglas opcionales para decidir si la actividad dentro de la ventana
+    /// constituye una nueva solicitud diaria.
+    #[serde(default)]
+    pub count_historical_closures_as_valid: bool,
+    #[serde(default)]
+    pub count_previous_request_followups_as_valid: bool,
+    #[serde(default = "default_true")]
+    pub count_org_hosted_training_as_valid: bool,
     /// Etiquetas/categorías de Gmail a incluir y excluir en la recuperación de
     /// hilos. Vacías = comportamiento histórico (INBOX + pestaña Principal).
     #[serde(default)]
@@ -187,6 +197,10 @@ pub struct ScheduleReportPolicy {
 pub enum SchedulePreset {
     Disabled,
     Weekdays08Local,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_analysis_time() -> String {
@@ -314,6 +328,9 @@ pub fn provision_default_config(user_email: &str, now: DateTime<Utc>) -> OrgConf
             ignored_domains: vec![],
             ignored_keywords: vec![],
             valid_signal_keywords: vec![],
+            count_historical_closures_as_valid: false,
+            count_previous_request_followups_as_valid: false,
+            count_org_hosted_training_as_valid: true,
             include_labels: vec![],
             exclude_labels: vec![],
             default_time_from: "00:00".to_string(),
@@ -463,7 +480,7 @@ fn default_ai_policy(enabled: bool, consent_granted_at: Option<DateTime<Utc>>) -
         consent_granted_at,
         provider: "bedrock".to_string(),
         model_id: "configured-server-side".to_string(),
-        prompt_version: "helpdesk-auditor-v1".to_string(),
+        prompt_version: DEFAULT_PROMPT_VERSION.to_string(),
         auto_apply_threshold: DEFAULT_AUTO_APPLY_THRESHOLD,
         manual_review_threshold: 0.72,
         max_audit_messages: 4,
@@ -501,6 +518,14 @@ pub fn apply_ai_threshold_migration(ai: &mut AiPolicy) -> bool {
         return false;
     }
     ai.auto_apply_threshold = DEFAULT_AUTO_APPLY_THRESHOLD;
+    true
+}
+
+pub fn apply_ai_prompt_version_migration(ai: &mut AiPolicy) -> bool {
+    if ai.prompt_version != LEGACY_PROMPT_VERSION {
+        return false;
+    }
+    ai.prompt_version = DEFAULT_PROMPT_VERSION.to_string();
     true
 }
 
@@ -552,6 +577,23 @@ mod tests {
     }
 
     #[test]
+    fn legacy_analysis_policy_gets_window_counting_defaults() {
+        let bundle = provision_default_config("agente@cliente.cl", Utc::now());
+        let mut value =
+            serde_json::to_value(&bundle.draft.analysis_policy).expect("serialize policy");
+        let object = value.as_object_mut().expect("policy object");
+        object.remove("count_historical_closures_as_valid");
+        object.remove("count_previous_request_followups_as_valid");
+        object.remove("count_org_hosted_training_as_valid");
+
+        let restored: AnalysisPolicy =
+            serde_json::from_value(value).expect("deserialize legacy policy");
+        assert!(!restored.count_historical_closures_as_valid);
+        assert!(!restored.count_previous_request_followups_as_valid);
+        assert!(restored.count_org_hosted_training_as_valid);
+    }
+
+    #[test]
     fn ai_defaults_migration_enables_legacy_off_orgs_once_and_respects_opt_out() {
         let now = Utc::now();
         // Org previa al cambio: IA apagada y sin el flag de migración.
@@ -584,5 +626,14 @@ mod tests {
         legacy.auto_apply_threshold = 0.8;
         assert!(!apply_ai_threshold_migration(&mut legacy));
         assert_eq!(legacy.auto_apply_threshold, 0.8);
+    }
+
+    #[test]
+    fn ai_prompt_migration_only_replaces_v1() {
+        let mut ai = default_ai_policy(true, None);
+        ai.prompt_version = LEGACY_PROMPT_VERSION.to_string();
+        assert!(apply_ai_prompt_version_migration(&mut ai));
+        assert_eq!(ai.prompt_version, DEFAULT_PROMPT_VERSION);
+        assert!(!apply_ai_prompt_version_migration(&mut ai));
     }
 }
