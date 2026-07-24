@@ -196,8 +196,9 @@ used to mint a fresh access token at run time).
 2. **External trigger** — `POST /internal/scheduled-analysis` authenticated
    with the `x-cron-secret` header (`CRON_SECRET` env var). Without `as_of_date`,
    it uses the same due-by-timezone logic as the internal loop. Configure one
-   Cloud Scheduler job hourly on weekdays (`0 * * * 1-5`); the API selects only
-   tenants whose configured hour is due and its idempotency lock prevents reruns.
+   Configure Cloud Scheduler for the four available report slots on weekdays
+   (`0 8,14,18,22 * * 1-5`, `America/Santiago`); the API selects only tenants
+   whose configured hour is due and its idempotency lock prevents reruns.
    With `as_of_date`,
    it performs an explicit local-date backfill/testing run:
 

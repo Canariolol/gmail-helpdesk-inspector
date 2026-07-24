@@ -389,8 +389,9 @@ En el OAuth Client de Google agrega:
 
 ## 10. Programador diario (Cloud Scheduler)
 
-El analisis programado corre de lunes a viernes a las 08:00 (America/Santiago)
-y envia el reporte por correo via Resend. En Cloud Run usa Cloud Scheduler con
+El analisis programado permite cuatro horarios de lunes a viernes: 08:00,
+14:00, 18:00 y 22:00 (America/Santiago), y envia el reporte por correo via
+Resend. En Cloud Run usa Cloud Scheduler con
 `SCHEDULER_ENABLED=false`: el servicio puede escalar a cero y el loop interno
 no es confiable ahi. El loop interno (`SCHEDULER_ENABLED=true`) es para hosts
 always-on como docker-compose o una VPS.
@@ -428,7 +429,7 @@ gcloud services enable cloudscheduler.googleapis.com
 
 gcloud scheduler jobs create http ghmi-daily-report \
   --location "$GCP_REGION" \
-  --schedule "0 8 * * 1-5" \
+  --schedule "0 8,14,18,22 * * 1-5" \
   --time-zone "America/Santiago" \
   --uri "${API_URL}/internal/scheduled-analysis" \
   --http-method POST \

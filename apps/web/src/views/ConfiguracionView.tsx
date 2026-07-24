@@ -22,9 +22,7 @@ const TIMEZONES = [
   "Europe/Madrid",
   "UTC",
 ];
-const ANALYSIS_HOURS = Array.from({ length: 24 }, (_, hour) =>
-  `${hour.toString().padStart(2, "0")}:00`
-);
+const ANALYSIS_HOURS = ["08:00", "14:00", "18:00", "22:00"];
 
 type SectionKey = "org" | "equipo" | "cuenta" | "ia" | "programacion" | "retencion";
 

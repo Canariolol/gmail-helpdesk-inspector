@@ -71,7 +71,7 @@ use crate::{
     report::{ReportMailer, ResendMailer},
     scheduler::{
         model::{ScheduleConfig, ScheduleState},
-        window::next_fire_time_label,
+        window::{ALLOWED_ANALYSIS_TIMES, next_fire_time_label},
     },
     storage::{AnalysisDataDeletionAudit, AnalysisDataDeletionStatus, StorageRepository},
 };
@@ -2470,9 +2470,9 @@ fn apply_schedule_report_policy_update(
     }
     if let Some(value) = update.analysis_time {
         let value = validate_time(&value)?;
-        if !value.ends_with(":00") {
+        if !ALLOWED_ANALYSIS_TIMES.contains(&value.as_str()) {
             return Err(ApiError::bad_request(
-                "analysis_time debe usar una hora completa",
+                "analysis_time debe ser 08:00, 14:00, 18:00 o 22:00",
             ));
         }
         current.analysis_time = value;
@@ -6336,7 +6336,7 @@ mod tests {
                 Some(json!({
                     "schedule_report_policy": {
                         "scheduler_enabled": true,
-                        "analysis_time": "11:00",
+                        "analysis_time": "14:00",
                         "report_recipients": ["ops@example.com"]
                     }
                 })),
@@ -7121,7 +7121,7 @@ mod tests {
                     },
                     "schedule_report_policy": {
                         "scheduler_enabled": true,
-                        "analysis_time": "11:00",
+                        "analysis_time": "14:00",
                         "report_recipients": ["ops@example.com"]
                     }
                 })),
@@ -7145,31 +7145,34 @@ mod tests {
         assert_eq!(body["scheduler"]["enabled"], true);
         assert_eq!(body["scheduler"]["recipients_count"], 1);
         assert_eq!(body["scheduler"]["preset"], "weekdays_custom_hour_local");
-        assert_eq!(body["scheduler"]["analysis_time"], "11:00");
+        assert_eq!(body["scheduler"]["analysis_time"], "14:00");
         assert_eq!(body["policy"]["setup_ready"], true);
     }
 
     #[tokio::test]
-    async fn schedule_analysis_time_rejects_partial_hours() {
+    async fn schedule_analysis_time_rejects_unavailable_hours() {
         let test = seeded_app().await;
-        let response = test
-            .app
-            .oneshot(request(
-                Method::PUT,
-                "/me/org/config",
-                Some(&test.alice_cookie),
-                Some(json!({
-                    "schedule_report_policy": {
-                        "analysis_time": "08:30"
-                    }
-                })),
-            ))
-            .await
-            .unwrap();
+        for analysis_time in ["08:30", "11:00"] {
+            let response = test
+                .app
+                .clone()
+                .oneshot(request(
+                    Method::PUT,
+                    "/me/org/config",
+                    Some(&test.alice_cookie),
+                    Some(json!({
+                        "schedule_report_policy": {
+                            "analysis_time": analysis_time
+                        }
+                    })),
+                ))
+                .await
+                .unwrap();
 
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        let body: serde_json::Value = response_json(response).await;
-        assert_eq!(body["error"]["code"], "BAD_REQUEST");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body: serde_json::Value = response_json(response).await;
+            assert_eq!(body["error"]["code"], "BAD_REQUEST");
+        }
     }
 
     #[tokio::test]

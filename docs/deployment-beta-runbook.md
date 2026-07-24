@@ -216,9 +216,9 @@ Content-Type: application/json
 ```
 
 Sin `as_of_date`, evalúa due-by-timezone. Con `as_of_date`, realiza backfill/testing explícito.
-Para permitir una hora distinta por organización, configurar un único job por
-hora de lunes a viernes (`0 * * * 1-5`). La API filtra las configuraciones que
-corresponden y evita duplicados mediante su claim idempotente.
+Configurar un único job para los cuatro horarios disponibles de lunes a viernes
+(`0 8,14,18,22 * * 1-5`, `America/Santiago`). La API filtra las configuraciones
+que corresponden y evita duplicados mediante su claim idempotente.
 
 Ejemplo seguro con placeholder:
 

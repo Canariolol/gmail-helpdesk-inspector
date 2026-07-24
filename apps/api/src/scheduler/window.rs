@@ -4,6 +4,7 @@ use chrono_tz::Tz;
 #[cfg(test)]
 pub const SCL: Tz = chrono_tz::America::Santiago;
 pub const DEFAULT_ANALYSIS_TIME: &str = "08:00";
+pub const ALLOWED_ANALYSIS_TIMES: [&str; 4] = ["08:00", "14:00", "18:00", "22:00"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnalysisWindow {
