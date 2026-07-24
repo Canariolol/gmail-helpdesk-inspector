@@ -43,6 +43,8 @@ export interface AnalysisFunnel {
   ai_detailed_audited?: number;
   ai_unique_threads?: number;
   ai_calls?: number;
+  ai_invalid_output_calls?: number;
+  ai_unconfirmed_calls?: number;
   // Hilos que no se auditaron por agotarse el cupo mensual de IA del plan.
   ai_skipped_by_budget?: number;
 }

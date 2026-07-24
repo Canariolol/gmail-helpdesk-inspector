@@ -20,6 +20,29 @@ pub enum AnalysisStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum AiUsageAttemptOutcome {
+    Valid,
+    InvalidOutput,
+    Unconfirmed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AiUsageAttempt {
+    pub id: String,
+    pub run_id: String,
+    pub batch_size: u32,
+    pub outcome: AiUsageAttemptOutcome,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub stop_reason: Option<String>,
+    pub aws_request_id: Option<String>,
+    pub error_kind: Option<String>,
+    pub started_at: DateTime<Utc>,
+    pub completed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum Classification {
     ValidClientRequest,
     Internal,
@@ -157,6 +180,12 @@ pub struct AnalysisFunnel {
     /// Llamadas totales al proveedor IA, incluidos reintentos y escaladas.
     #[serde(default)]
     pub ai_calls: u64,
+    /// Llamadas completadas por Bedrock cuya salida no cumplió el contrato.
+    #[serde(default)]
+    pub ai_invalid_output_calls: u64,
+    /// Intentos cuyo consumo no pudo confirmarse por error de red/proveedor.
+    #[serde(default)]
+    pub ai_unconfirmed_calls: u64,
     /// Hilos que iban a auditarse pero quedaron fuera al agotarse el cupo mensual
     /// de IA del plan. Conservan su clasificación heurística.
     #[serde(default)]

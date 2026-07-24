@@ -33,11 +33,11 @@ use uuid::Uuid;
 
 use crate::{
     analysis::{
-        AnalysisConfig, AnalysisFunnel, AnalysisMetrics, AnalysisRun, AnalysisStatus,
-        Classification, ClassificationSource, DroppedThreadInfo, EmailMessage, EmailThread,
-        ManualReview, ManualReviewOverride, ThreadDisposition, TriggerType,
-        apply_manual_review_override, calculate_metrics, classify_thread, message_fingerprint,
-        message_is_inside_analysis_window, refine_classification_with_folders,
+        AiUsageAttempt, AiUsageAttemptOutcome, AnalysisConfig, AnalysisFunnel, AnalysisMetrics,
+        AnalysisRun, AnalysisStatus, Classification, ClassificationSource, DroppedThreadInfo,
+        EmailMessage, EmailThread, ManualReview, ManualReviewOverride, ThreadDisposition,
+        TriggerType, apply_manual_review_override, calculate_metrics, classify_thread,
+        message_fingerprint, message_is_inside_analysis_window, refine_classification_with_folders,
         refine_classification_with_policy_hints, rescue_classification_with_valid_signals,
     },
     auth::{
@@ -3393,14 +3393,17 @@ pub(crate) async fn execute_analysis(
         }
         let batch = audit_batch_with_split(
             &state,
+            &mut run,
             &prepared_threads,
             index_chunk,
             policy_snapshot.as_ref(),
         )
-        .await;
+        .await?;
         ai_input_tokens += batch.input_tokens;
         ai_output_tokens += batch.output_tokens;
         funnel.ai_calls += batch.calls;
+        funnel.ai_invalid_output_calls += batch.invalid_output_calls;
+        funnel.ai_unconfirmed_calls += batch.unconfirmed_calls;
         funnel.ai_batch_classified += batch.decisions.len() as u64;
 
         for index in index_chunk {
@@ -3749,6 +3752,8 @@ struct BatchThreadSummary {
 
 #[derive(Serialize)]
 struct BatchAuditRequest<'a> {
+    run_id: &'a str,
+    attempt_id: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     policy_context: Option<AiWorkerPolicyContext<'a>>,
     threads: Vec<BatchThreadSummary>,
@@ -3774,6 +3779,20 @@ struct BatchAuditResponse {
     decisions: Vec<BatchAuditDecision>,
     input_tokens: u64,
     output_tokens: u64,
+    #[serde(default)]
+    outcome: BatchAuditOutcome,
+    #[serde(default)]
+    stop_reason: Option<String>,
+    #[serde(default)]
+    aws_request_id: Option<String>,
+}
+
+#[derive(Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum BatchAuditOutcome {
+    #[default]
+    Valid,
+    InvalidOutput,
 }
 
 #[derive(Default)]
@@ -3782,6 +3801,26 @@ struct BatchExecution {
     input_tokens: u64,
     output_tokens: u64,
     calls: u64,
+    invalid_output_calls: u64,
+    unconfirmed_calls: u64,
+}
+
+struct BatchCallError {
+    kind: &'static str,
+    retryable: bool,
+}
+
+enum BatchAttemptResult {
+    Completed(BatchAuditResponse),
+    Failed(BatchCallError),
+}
+
+fn should_retry_batch_error(error: &BatchCallError, attempt_number: usize) -> bool {
+    error.retryable && attempt_number == 0
+}
+
+fn should_split_missing_batch(missing: usize) -> bool {
+    missing > 1
 }
 
 fn batch_messages_for_thread(
@@ -3862,10 +3901,12 @@ fn batch_summary(
 
 async fn audit_batch_once(
     state: &AppState,
+    run_id: &str,
+    attempt_id: &str,
     prepared: &[PreparedThread],
     indexes: &[usize],
     policy_snapshot: Option<&crate::policies::PolicySnapshot>,
-) -> anyhow::Result<BatchAuditResponse> {
+) -> Result<BatchAuditResponse, BatchCallError> {
     let policy_context = policy_snapshot.map(ai_worker_policy_context);
     let max_messages = policy_snapshot
         .map(|snapshot| snapshot.ai_policy.max_audit_messages as usize)
@@ -3881,45 +3922,203 @@ async fn audit_batch_once(
         .http
         .post(format!("{}/audit/batch", state.config.ai.worker_url))
         .json(&BatchAuditRequest {
+            run_id,
+            attempt_id,
             policy_context,
             threads,
         });
-    if let Some(request_id) = worker_request_id() {
-        request = request.header("x-request-id", request_id);
-    }
+    request = request.header("x-request-id", attempt_id);
     if let Some(audience) = &state.config.ai.worker_audience {
-        request = request.bearer_auth(fetch_cloud_run_identity_token(&state.http, audience).await?);
+        let token = fetch_cloud_run_identity_token(&state.http, audience)
+            .await
+            .map_err(|_| BatchCallError {
+                kind: "worker_auth",
+                retryable: true,
+            })?;
+        request = request.bearer_auth(token);
     }
-    Ok(request
-        .timeout(Duration::from_secs(70))
+    let response = request
+        .timeout(Duration::from_secs(190))
         .send()
-        .await?
-        .error_for_status()?
+        .await
+        .map_err(|error| BatchCallError {
+            kind: if error.is_timeout() {
+                "worker_timeout"
+            } else {
+                "worker_transport"
+            },
+            retryable: true,
+        })?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(BatchCallError {
+            kind: if status == StatusCode::TOO_MANY_REQUESTS {
+                "worker_rate_limited"
+            } else if status.is_server_error() {
+                "worker_server_error"
+            } else {
+                "worker_client_error"
+            },
+            retryable: status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error(),
+        });
+    }
+    response
         .json::<BatchAuditResponse>()
-        .await?)
+        .await
+        .map_err(|_| BatchCallError {
+            kind: "worker_invalid_response",
+            retryable: false,
+        })
+}
+
+async fn recorded_batch_attempt(
+    state: &AppState,
+    run: &mut AnalysisRun,
+    prepared: &[PreparedThread],
+    indexes: &[usize],
+    policy_snapshot: Option<&crate::policies::PolicySnapshot>,
+) -> anyhow::Result<BatchAttemptResult> {
+    let attempt_id = Uuid::new_v4().to_string();
+    let started_at = Utc::now();
+    let result = audit_batch_once(
+        state,
+        &run.id,
+        &attempt_id,
+        prepared,
+        indexes,
+        policy_snapshot,
+    )
+    .await;
+    let completed_at = Utc::now();
+    let (outcome, input_tokens, output_tokens, stop_reason, aws_request_id, error_kind) =
+        match &result {
+            Ok(response) => (
+                if response.outcome == BatchAuditOutcome::Valid {
+                    AiUsageAttemptOutcome::Valid
+                } else {
+                    AiUsageAttemptOutcome::InvalidOutput
+                },
+                response.input_tokens,
+                response.output_tokens,
+                response.stop_reason.clone(),
+                response.aws_request_id.clone(),
+                None,
+            ),
+            Err(error) => (
+                AiUsageAttemptOutcome::Unconfirmed,
+                0,
+                0,
+                None,
+                None,
+                Some(error.kind.to_string()),
+            ),
+        };
+    let attempt = AiUsageAttempt {
+        id: attempt_id,
+        run_id: run.id.clone(),
+        batch_size: indexes.len() as u32,
+        outcome: outcome.clone(),
+        input_tokens,
+        output_tokens,
+        stop_reason,
+        aws_request_id,
+        error_kind: error_kind.clone(),
+        started_at,
+        completed_at,
+    };
+    state.storage.record_ai_usage_attempt(&attempt).await?;
+    run.metrics.ai_input_tokens = run.metrics.ai_input_tokens.saturating_add(input_tokens);
+    run.metrics.ai_output_tokens = run.metrics.ai_output_tokens.saturating_add(output_tokens);
+    run.metrics.funnel.ai_calls = run.metrics.funnel.ai_calls.saturating_add(1);
+    match outcome {
+        AiUsageAttemptOutcome::InvalidOutput => {
+            run.metrics.funnel.ai_invalid_output_calls =
+                run.metrics.funnel.ai_invalid_output_calls.saturating_add(1);
+        }
+        AiUsageAttemptOutcome::Unconfirmed => {
+            run.metrics.funnel.ai_unconfirmed_calls =
+                run.metrics.funnel.ai_unconfirmed_calls.saturating_add(1);
+        }
+        AiUsageAttemptOutcome::Valid => {}
+    }
+    state.storage.update_analysis_run(run).await?;
+    tracing::info!(
+        operation = "ai_usage_attempt",
+        run_id = %run.id,
+        attempt_id = %attempt.id,
+        batch_size = attempt.batch_size,
+        outcome = ?attempt.outcome,
+        input_tokens,
+        output_tokens,
+        stop_reason = attempt.stop_reason.as_deref().unwrap_or(""),
+        aws_request_id = attempt.aws_request_id.as_deref().unwrap_or(""),
+        error_kind = error_kind.as_deref().unwrap_or(""),
+        "intento IA registrado"
+    );
+    Ok(match result {
+        Ok(response) => BatchAttemptResult::Completed(response),
+        Err(error) => BatchAttemptResult::Failed(error),
+    })
+}
+
+async fn batch_attempt_with_retry(
+    state: &AppState,
+    run: &mut AnalysisRun,
+    prepared: &[PreparedThread],
+    indexes: &[usize],
+    policy_snapshot: Option<&crate::policies::PolicySnapshot>,
+    execution: &mut BatchExecution,
+) -> anyhow::Result<Option<BatchAuditResponse>> {
+    for attempt_number in 0..=1 {
+        execution.calls += 1;
+        match recorded_batch_attempt(state, run, prepared, indexes, policy_snapshot).await? {
+            BatchAttemptResult::Completed(response) => {
+                execution.input_tokens += response.input_tokens;
+                execution.output_tokens += response.output_tokens;
+                if response.outcome == BatchAuditOutcome::InvalidOutput {
+                    execution.invalid_output_calls += 1;
+                }
+                return Ok(Some(response));
+            }
+            BatchAttemptResult::Failed(error) => {
+                execution.unconfirmed_calls += 1;
+                tracing::warn!(
+                    operation = "ai_batch",
+                    batch_size = indexes.len(),
+                    error_kind = error.kind,
+                    retryable = error.retryable,
+                    "falló auditoría IA batch"
+                );
+                if !should_retry_batch_error(&error, attempt_number) {
+                    return Ok(None);
+                }
+            }
+        }
+    }
+    Ok(None)
 }
 
 async fn audit_batch_with_split(
     state: &AppState,
+    run: &mut AnalysisRun,
     prepared: &[PreparedThread],
     indexes: &[usize],
     policy_snapshot: Option<&crate::policies::PolicySnapshot>,
-) -> BatchExecution {
-    let mut execution = BatchExecution {
-        calls: 1,
-        ..Default::default()
-    };
-    match audit_batch_once(state, prepared, indexes, policy_snapshot).await {
-        Ok(response) => {
-            merge_batch_response(&mut execution, response, prepared, indexes);
-        }
-        Err(_) => {
-            tracing::warn!(
-                operation = "ai_batch",
-                batch_size = indexes.len(),
-                "falló auditoría IA batch"
-            );
-        }
+) -> anyhow::Result<BatchExecution> {
+    let mut execution = BatchExecution::default();
+    if let Some(response) = batch_attempt_with_retry(
+        state,
+        run,
+        prepared,
+        indexes,
+        policy_snapshot,
+        &mut execution,
+    )
+    .await?
+    {
+        merge_batch_response(&mut execution, response, prepared, indexes);
+    } else {
+        return Ok(execution);
     }
     let missing = indexes
         .iter()
@@ -3931,7 +4130,14 @@ async fn audit_batch_with_split(
         })
         .collect::<Vec<_>>();
     if missing.is_empty() {
-        return execution;
+        return Ok(execution);
+    }
+    if !should_split_missing_batch(missing.len()) {
+        tracing::warn!(
+            operation = "ai_batch_singleton_invalid",
+            "salida IA inválida para un único hilo; no se repite el mismo prompt"
+        );
+        return Ok(execution);
     }
     tracing::warn!(
         operation = "ai_batch_partial",
@@ -3945,19 +4151,14 @@ async fn audit_batch_with_split(
         if half.is_empty() {
             continue;
         }
-        execution.calls += 1;
-        match audit_batch_once(state, prepared, half, policy_snapshot).await {
-            Ok(response) => merge_batch_response(&mut execution, response, prepared, half),
-            Err(_) => {
-                tracing::warn!(
-                    operation = "ai_batch_retry",
-                    batch_size = half.len(),
-                    "falló reintento IA batch"
-                );
-            }
+        if let Some(response) =
+            batch_attempt_with_retry(state, run, prepared, half, policy_snapshot, &mut execution)
+                .await?
+        {
+            merge_batch_response(&mut execution, response, prepared, half);
         }
     }
-    execution
+    Ok(execution)
 }
 
 fn merge_batch_response(
@@ -3970,8 +4171,6 @@ fn merge_batch_response(
         .iter()
         .map(|index| prepared[*index].thread.thread_id.as_str())
         .collect::<HashSet<_>>();
-    execution.input_tokens += response.input_tokens;
-    execution.output_tokens += response.output_tokens;
     for decision in response.decisions {
         if expected.contains(decision.thread_id.as_str()) {
             execution
@@ -5138,6 +5337,23 @@ mod tests {
         assert_eq!(split_by_ai_budget(10, 0), (0, 10));
         // Dev (`enforce=false`) usa usize::MAX: nunca recorta.
         assert_eq!(split_by_ai_budget(10, usize::MAX), (10, 0));
+    }
+
+    #[test]
+    fn batch_retry_policy_does_not_repeat_invalid_singletons_or_permanent_errors() {
+        assert!(!should_split_missing_batch(1));
+        assert!(should_split_missing_batch(2));
+        let transient = BatchCallError {
+            kind: "worker_timeout",
+            retryable: true,
+        };
+        let permanent = BatchCallError {
+            kind: "worker_client_error",
+            retryable: false,
+        };
+        assert!(should_retry_batch_error(&transient, 0));
+        assert!(!should_retry_batch_error(&transient, 1));
+        assert!(!should_retry_batch_error(&permanent, 0));
     }
 
     #[test]

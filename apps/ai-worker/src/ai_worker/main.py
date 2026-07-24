@@ -36,6 +36,14 @@ class JsonFormatter(logging.Formatter):
             "status",
             "duration_ms",
             "run_id",
+            "attempt_id",
+            "batch_size",
+            "outcome",
+            "input_tokens",
+            "output_tokens",
+            "stop_reason",
+            "aws_request_id",
+            "error_class",
             "error_code",
         ):
             value = getattr(record, field, None)
@@ -57,7 +65,7 @@ if not logger.handlers:
 async def lifespan(app: FastAPI):
     # Reuse one pooled client for the whole process so every Bedrock inference
     # does not pay a fresh TLS handshake / connection setup.
-    async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0)) as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(180.0, connect=10.0)) as client:
         app.state.bedrock_client = client
         logger.info("worker started", extra={"operation": "startup"})
         yield
@@ -133,14 +141,33 @@ async def audit_thread(payload: AuditThreadRequest, request: Request) -> AuditTh
 @app.post("/audit/batch", response_model=BatchAuditResponse)
 async def audit_batch(payload: BatchAuditRequest, request: Request) -> BatchAuditResponse:
     try:
-        return await audit_batch_with_bedrock(
+        response = await audit_batch_with_bedrock(
             payload, settings, request.app.state.bedrock_client
         )
-    except Exception:
+        logger.info(
+            "Bedrock batch audit completed",
+            extra={
+                "operation": "audit_batch",
+                "run_id": payload.run_id or None,
+                "attempt_id": payload.attempt_id or None,
+                "batch_size": len(payload.threads),
+                "outcome": response.outcome,
+                "input_tokens": response.input_tokens,
+                "output_tokens": response.output_tokens,
+                "stop_reason": response.stop_reason,
+                "aws_request_id": response.aws_request_id,
+            },
+        )
+        return response
+    except Exception as exc:
         logger.error(
             "Bedrock batch audit failed",
             extra={
                 "operation": "audit_batch",
+                "run_id": payload.run_id or None,
+                "attempt_id": payload.attempt_id or None,
+                "batch_size": len(payload.threads),
+                "error_class": type(exc).__name__,
                 "error_code": "bedrock_failed",
             },
         )

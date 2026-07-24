@@ -313,8 +313,13 @@ async def test_batch_audit_parses_decisions_and_uses_batch_model() -> None:
         request_json = json.loads(request.content)
         assert len(request_json["system"]) == 1
         assert request_json["inferenceConfig"]["maxTokens"] == 6000
+        output_format = request_json["outputConfig"]["textFormat"]
+        assert output_format["type"] == "json_schema"
+        schema = json.loads(output_format["structure"]["jsonSchema"]["schema"])
+        assert schema["properties"]["decisions"]["minItems"] == 1
         return httpx.Response(
             200,
+            headers={"x-amzn-requestid": "aws-request-1"},
             json={
                 "output": {
                     "message": {
@@ -342,6 +347,7 @@ async def test_batch_audit_parses_decisions_and_uses_batch_model() -> None:
                         ]
                     }
                 },
+                "stopReason": "end_turn",
                 "usage": {"inputTokens": 321, "outputTokens": 54},
             },
         )
@@ -361,3 +367,39 @@ async def test_batch_audit_parses_decisions_and_uses_batch_model() -> None:
     assert result.decisions[0].first_client_message_id == "m1"
     assert result.input_tokens == 321
     assert result.output_tokens == 54
+    assert result.outcome == "valid"
+    assert result.stop_reason == "end_turn"
+    assert result.aws_request_id == "aws-request-1"
+
+
+@pytest.mark.asyncio
+async def test_batch_audit_preserves_usage_when_model_output_is_invalid() -> None:
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"x-amzn-requestid": "aws-invalid-1"},
+            json={
+                "output": {
+                    "message": {
+                        "content": [{"text": '{"decisions":[{"thread_id":"g1"}]}'}]
+                    }
+                },
+                "stopReason": "end_turn",
+                "usage": {"inputTokens": 987, "outputTokens": 65},
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        result = await audit_batch_with_bedrock(
+            batch_payload(),
+            Settings(AWS_BEARER_TOKEN_BEDROCK="token"),
+            client,
+        )
+
+    assert result.decisions == []
+    assert result.outcome == "invalid_output"
+    assert result.input_tokens == 987
+    assert result.output_tokens == 65
+    assert result.stop_reason == "end_turn"
+    assert result.aws_request_id == "aws-invalid-1"

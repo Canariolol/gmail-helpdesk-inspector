@@ -4,6 +4,7 @@ import json
 import re
 
 import httpx
+from pydantic import ValidationError
 
 from ai_worker.schemas import (
     AuditPolicyContext,
@@ -15,6 +16,64 @@ from ai_worker.schemas import (
     BedrockDecision,
 )
 from ai_worker.settings import Settings
+
+
+BATCH_OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "decisions": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "thread_id": {"type": "string"},
+                    "classification": {
+                        "type": "string",
+                        "enum": [
+                            "valid_client_request",
+                            "internal",
+                            "automated",
+                            "newsletter",
+                            "spam",
+                            "misc",
+                            "ambiguous",
+                        ],
+                    },
+                    "is_valid_client_request": {"type": "boolean"},
+                    "is_answered": {"type": "boolean"},
+                    "first_client_message_id": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}]
+                    },
+                    "first_internal_reply_message_id": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}]
+                    },
+                    "last_internal_message_id": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}]
+                    },
+                    "confidence": {"type": "number"},
+                    "manual_review_required": {"type": "boolean"},
+                    "issues": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": [
+                    "thread_id",
+                    "classification",
+                    "is_valid_client_request",
+                    "is_answered",
+                    "first_client_message_id",
+                    "first_internal_reply_message_id",
+                    "last_internal_message_id",
+                    "confidence",
+                    "manual_review_required",
+                    "issues",
+                ],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["decisions"],
+    "additionalProperties": False,
+}
 
 
 def _bullet_list(values: list[str], fallback: str) -> str:
@@ -239,6 +298,18 @@ async def audit_batch_with_bedrock(
             "maxTokens": 6000,
             "temperature": 0,
         },
+        "outputConfig": {
+            "textFormat": {
+                "type": "json_schema",
+                "structure": {
+                    "jsonSchema": {
+                        "schema": json.dumps(BATCH_OUTPUT_SCHEMA, separators=(",", ":")),
+                        "name": "mira_batch_audit",
+                        "description": "One audit decision for every supplied email thread.",
+                    }
+                },
+            }
+        },
     }
 
     owns_client = client is None
@@ -260,18 +331,34 @@ async def audit_batch_with_bedrock(
         if owns_client:
             await client.aclose()
 
-    text = (
-        raw.get("output", {})
-        .get("message", {})
-        .get("content", [{}])[0]
-        .get("text", "")
-    )
-    decision = BedrockBatchDecision.model_validate_json(extract_json_text(text))
     usage = raw.get("usage", {})
+    input_tokens = int(usage.get("inputTokens", 0))
+    output_tokens = int(usage.get("outputTokens", 0))
+    stop_reason = raw.get("stopReason")
+    aws_request_id = response.headers.get("x-amzn-requestid")
+    try:
+        text = (
+            raw.get("output", {})
+            .get("message", {})
+            .get("content", [{}])[0]
+            .get("text", "")
+        )
+        decision = BedrockBatchDecision.model_validate_json(extract_json_text(text))
+    except (AttributeError, IndexError, TypeError, ValidationError):
+        return BatchAuditResponse(
+            decisions=[],
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            outcome="invalid_output",
+            stop_reason=stop_reason,
+            aws_request_id=aws_request_id,
+        )
     return BatchAuditResponse(
         decisions=decision.decisions,
-        input_tokens=int(usage.get("inputTokens", 0)),
-        output_tokens=int(usage.get("outputTokens", 0)),
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        stop_reason=stop_reason,
+        aws_request_id=aws_request_id,
     )
 
 

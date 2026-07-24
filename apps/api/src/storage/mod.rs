@@ -11,9 +11,9 @@ use tokio::sync::RwLock;
 
 use crate::{
     analysis::{
-        AiAuditResult, AnalysisRun, AnalysisStatus, EmailMessage, EmailThread, ManualReview,
-        ManualReviewOverride, apply_manual_review_override, calculate_metrics, message_fingerprint,
-        reconcile_legacy_thread_classification,
+        AiAuditResult, AiUsageAttempt, AnalysisRun, AnalysisStatus, EmailMessage, EmailThread,
+        ManualReview, ManualReviewOverride, apply_manual_review_override, calculate_metrics,
+        message_fingerprint, reconcile_legacy_thread_classification,
     },
     auth::UserSession,
     billing::{Account, CheckoutSession, Subscription, UsageLedger},
@@ -183,6 +183,8 @@ pub trait StorageRepository: Send + Sync {
     async fn update_analysis_run(&self, run: &AnalysisRun) -> anyhow::Result<()>;
     async fn get_analysis_run(&self, id: &str) -> anyhow::Result<Option<AnalysisRun>>;
     async fn list_analysis_runs(&self, user_email: &str) -> anyhow::Result<Vec<AnalysisRun>>;
+    async fn record_ai_usage_attempt(&self, attempt: &AiUsageAttempt) -> anyhow::Result<()>;
+    async fn list_ai_usage_attempts(&self, run_id: &str) -> anyhow::Result<Vec<AiUsageAttempt>>;
     async fn delete_analysis_data(&self, owner_email: &str) -> anyhow::Result<()>;
     async fn record_analysis_data_deletion(
         &self,
@@ -258,6 +260,7 @@ struct MemoryInner {
     gmail_connections: HashMap<String, MailboxConnection>,
     accounts: HashMap<String, Account>,
     runs: HashMap<String, AnalysisRun>,
+    ai_usage_attempts: HashMap<String, AiUsageAttempt>,
     threads: HashMap<String, EmailThread>,
     messages: HashMap<String, Vec<EmailMessage>>,
     audits: HashMap<String, Vec<AiAuditResult>>,
@@ -864,6 +867,30 @@ impl StorageRepository for MemoryStorage {
         Ok(runs)
     }
 
+    async fn record_ai_usage_attempt(&self, attempt: &AiUsageAttempt) -> anyhow::Result<()> {
+        self.inner
+            .write()
+            .await
+            .ai_usage_attempts
+            .entry(attempt.id.clone())
+            .or_insert_with(|| attempt.clone());
+        Ok(())
+    }
+
+    async fn list_ai_usage_attempts(&self, run_id: &str) -> anyhow::Result<Vec<AiUsageAttempt>> {
+        let mut attempts = self
+            .inner
+            .read()
+            .await
+            .ai_usage_attempts
+            .values()
+            .filter(|attempt| attempt.run_id == run_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        attempts.sort_by_key(|attempt| attempt.started_at);
+        Ok(attempts)
+    }
+
     async fn delete_analysis_data(&self, owner_email: &str) -> anyhow::Result<()> {
         let owner = owner_email.trim();
         let mut inner = self.inner.write().await;
@@ -874,6 +901,9 @@ impl StorageRepository for MemoryStorage {
             .map(|run| run.id.clone())
             .collect();
         inner.runs.retain(|id, _| !run_ids.contains(id));
+        inner
+            .ai_usage_attempts
+            .retain(|_, attempt| !run_ids.contains(&attempt.run_id));
         inner
             .threads
             .retain(|_, thread| !run_ids.contains(&thread.analysis_run_id));
@@ -1356,7 +1386,8 @@ mod tests {
 
     use super::*;
     use crate::analysis::{
-        AnalysisConfig, AnalysisMetrics, AnalysisStatus, Classification, ClassificationSource,
+        AiUsageAttempt, AiUsageAttemptOutcome, AnalysisConfig, AnalysisMetrics, AnalysisStatus,
+        Classification, ClassificationSource,
     };
     use crate::scheduler::model::ScheduleRunStatus;
 
@@ -1377,6 +1408,89 @@ mod tests {
             created_at: at,
             updated_at: at,
         }
+    }
+
+    #[tokio::test]
+    async fn ai_usage_attempts_are_idempotent_and_scoped_to_the_run() {
+        let storage = MemoryStorage::default();
+        let now = Utc::now();
+        storage
+            .create_analysis_run(&AnalysisRun {
+                id: "run-1".to_string(),
+                user_email: "owner@example.com".to_string(),
+                org_id: None,
+                mailbox_id: None,
+                trigger_type: None,
+                policy_version_id: None,
+                policy_hash: None,
+                policy_snapshot: None,
+                gmail_scope_snapshot: vec![],
+                retention_expires_at: None,
+                data_minimization_mode: None,
+                config: AnalysisConfig {
+                    date_from: "2026-07-23".to_string(),
+                    date_to: "2026-07-24".to_string(),
+                    time_from: "00:00".to_string(),
+                    time_to: "23:59".to_string(),
+                    timezone: "America/Santiago".to_string(),
+                    internal_domains: vec![],
+                    ignored_senders: vec![],
+                    ignored_domains: vec![],
+                    ignored_keywords: vec![],
+                    include_labels: vec![],
+                    exclude_labels: vec![],
+                },
+                status: AnalysisStatus::Running,
+                progress_message: "running".to_string(),
+                processed_threads: 0,
+                total_candidate_threads: 0,
+                metrics: AnalysisMetrics::default(),
+                created_at: now,
+                completed_at: None,
+                error_message: None,
+            })
+            .await
+            .unwrap();
+        let attempt = AiUsageAttempt {
+            id: "attempt-1".to_string(),
+            run_id: "run-1".to_string(),
+            batch_size: 20,
+            outcome: AiUsageAttemptOutcome::InvalidOutput,
+            input_tokens: 100,
+            output_tokens: 25,
+            stop_reason: Some("end_turn".to_string()),
+            aws_request_id: Some("aws-1".to_string()),
+            error_kind: None,
+            started_at: now,
+            completed_at: now,
+        };
+
+        storage.record_ai_usage_attempt(&attempt).await.unwrap();
+        storage.record_ai_usage_attempt(&attempt).await.unwrap();
+
+        assert_eq!(
+            storage.list_ai_usage_attempts("run-1").await.unwrap(),
+            vec![attempt]
+        );
+        assert!(
+            storage
+                .list_ai_usage_attempts("run-2")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        storage
+            .delete_analysis_data("owner@example.com")
+            .await
+            .unwrap();
+        assert!(
+            storage
+                .list_ai_usage_attempts("run-1")
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]

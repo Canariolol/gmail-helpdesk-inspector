@@ -8,7 +8,8 @@ use uuid::Uuid;
 
 use crate::{
     analysis::{
-        AiAuditResult, AnalysisRun, EmailMessage, EmailThread, ManualReview, ManualReviewOverride,
+        AiAuditResult, AiUsageAttempt, AnalysisRun, EmailMessage, EmailThread, ManualReview,
+        ManualReviewOverride,
     },
     auth::UserSession,
     billing::{
@@ -869,6 +870,29 @@ impl StorageRepository for PostgresStorage {
             .into_iter()
             .map(|value| serde_json::from_value(value).context("invalid analysis run"))
             .collect()
+    }
+
+    async fn record_ai_usage_attempt(&self, attempt: &AiUsageAttempt) -> anyhow::Result<()> {
+        self.put(
+            "ai_usage_attempt",
+            &attempt.id,
+            RecordFields {
+                run_id: Some(&attempt.run_id),
+                state: Some(match attempt.outcome {
+                    crate::analysis::AiUsageAttemptOutcome::Valid => "valid",
+                    crate::analysis::AiUsageAttemptOutcome::InvalidOutput => "invalid_output",
+                    crate::analysis::AiUsageAttemptOutcome::Unconfirmed => "unconfirmed",
+                }),
+                sort_at: Some(attempt.started_at),
+                ..Default::default()
+            },
+            attempt,
+        )
+        .await
+    }
+
+    async fn list_ai_usage_attempts(&self, run_id: &str) -> anyhow::Result<Vec<AiUsageAttempt>> {
+        self.list_run("ai_usage_attempt", run_id).await
     }
 
     async fn delete_analysis_data(&self, owner_email: &str) -> anyhow::Result<()> {

@@ -289,6 +289,7 @@ deploy_api() {
   # secreto no debe partirse por word splitting.
   # shellcheck disable=SC2086
   build_push_deploy "api" "apps/api/Dockerfile" "$API_SERVICE" \
+    --update-env-vars "APP_ENV=production" \
     "${MICROSOFT_ARGS[@]}" ${API_DEPLOY_EXTRA_ARGS:-}
 
   if [[ ${#MICROSOFT_ARGS[@]} -gt 0 ]]; then
@@ -297,7 +298,8 @@ deploy_api() {
 }
 
 deploy_worker() {
-  build_push_deploy "ai-worker" "apps/ai-worker/Dockerfile" "$WORKER_SERVICE"
+  build_push_deploy "ai-worker" "apps/ai-worker/Dockerfile" "$WORKER_SERVICE" \
+    --update-env-vars "APP_ENV=production"
 }
 
 deploy_web() {

@@ -27,6 +27,8 @@ Firestore stores normalized metadata only:
 - classification decisions and reasons
 - audit findings
 - aggregate metrics and AI token usage
+- per-invocation operational metadata (run/attempt ids, token counts, outcome,
+  stop reason and provider request id), never prompts or model responses
 
 Los cuerpos se obtienen temporalmente durante el análisis. Para auditoría IA se
 envían participantes, fecha, asunto y texto limitado por mensaje; un mensaje
@@ -37,6 +39,9 @@ respuesta de auditoría y no se persisten como cuerpos completos.
 
 The Bedrock worker receives text-only thread content. Attachments, images,
 base64 payloads, and multimodal artifacts are intentionally excluded.
+Model Invocation Logging remains disabled because it would persist prompts and
+responses in AWS. Mira records only the metadata needed to reconcile usage and
+diagnose failures.
 
 AI auditing is enabled by default for a new organization. It can be disabled
 from Configuration; when it is disabled, ambiguous threads remain available for

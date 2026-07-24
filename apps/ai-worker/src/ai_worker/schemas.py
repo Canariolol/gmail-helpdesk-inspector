@@ -98,6 +98,8 @@ class BatchThreadSummary(BaseModel):
 
 
 class BatchAuditRequest(BaseModel):
+    run_id: str = ""
+    attempt_id: str = ""
     policy_context: AuditPolicyContext | None = None
     threads: list[BatchThreadSummary] = Field(min_length=1, max_length=20)
 
@@ -119,6 +121,9 @@ class BatchAuditResponse(BaseModel):
     decisions: list[BatchAuditDecision]
     input_tokens: int = Field(ge=0)
     output_tokens: int = Field(ge=0)
+    outcome: Literal["valid", "invalid_output"] = "valid"
+    stop_reason: str | None = None
+    aws_request_id: str | None = None
 
 
 class AuditThreadResponse(BaseModel):

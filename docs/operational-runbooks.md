@@ -53,12 +53,16 @@ no detalles internos.
 **Síntoma:** análisis fallidos con `bedrock_failed` o respuestas 502 de auditoría.
 
 1. Consultar `ghmi-ai-worker` con el filtro de errores y correlacionar por
-   `run_id` o `request_id`.
+   `run_id` y `attempt_id`. Los eventos seguros incluyen resultado, tokens,
+   `stop_reason` y request id de AWS, pero nunca el payload.
 2. Verificar su liveness autenticado según `docs/gcp-deploy.md`; no exponer el
    worker ni registrar su token de identidad.
-3. Confirmar que los análisis fallidos quedaron con categoría segura y no se
+3. Consultar los registros `ai_usage_attempt` del run y sumar `input_tokens` y
+   `output_tokens`. Comparar con `AWS/Bedrock` en CloudWatch sólo en una ventana
+   sin tráfico paralelo; una diferencia queda como uso no confirmado.
+4. Confirmar que los análisis fallidos quedaron con categoría segura y no se
    reintentan manualmente si podrían duplicar trabajo.
-4. Si el proveedor continúa caído, informar degradación: los análisis nuevos
+5. Si el proveedor continúa caído, informar degradación: los análisis nuevos
    no se completan hasta recuperar el worker.
 
 **Verificación:** un análisis de prueba autorizado completa y los eventos JSON
