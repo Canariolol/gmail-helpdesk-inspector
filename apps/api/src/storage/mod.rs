@@ -122,7 +122,6 @@ pub trait StorageRepository: Send + Sync {
         &self,
         state: &ScheduleState,
         stale_before: DateTime<Utc>,
-        repeat_completed_before: Option<DateTime<Utc>>,
     ) -> anyhow::Result<ScheduleWindowClaim>;
     async fn get_org_config_for_user(
         &self,
@@ -323,7 +322,6 @@ pub(crate) fn existing_schedule_window_claim(
     existing: &ScheduleState,
     candidate: &ScheduleState,
     stale_before: DateTime<Utc>,
-    repeat_completed_before: Option<DateTime<Utc>>,
 ) -> Option<ScheduleWindowClaim> {
     let same_window = existing.window_date_from == candidate.window_date_from
         && existing.window_date_to == candidate.window_date_to;
@@ -332,16 +330,32 @@ pub(crate) fn existing_schedule_window_claim(
     }
 
     match existing.status {
-        ScheduleRunStatus::Completed
-            if repeat_completed_before.is_none_or(|before| existing.updated_at >= before) =>
-        {
-            Some(ScheduleWindowClaim::AlreadyCompleted)
-        }
-        ScheduleRunStatus::Completed => None,
+        // Una ventana completada nunca se repite: garantiza un solo reporte por
+        // ventana para todas las cuentas, sin excepciones por usuario.
+        ScheduleRunStatus::Completed => Some(ScheduleWindowClaim::AlreadyCompleted),
         ScheduleRunStatus::Running if existing.started_at > stale_before => {
             Some(ScheduleWindowClaim::AlreadyRunning)
         }
         ScheduleRunStatus::Running | ScheduleRunStatus::Failed => None,
+    }
+}
+
+/// Estado a escribir al tomar el claim. Reemplaza la fila anterior salvo por
+/// `email_sent`, que es acumulativo dentro de la misma ventana: marca que ya se
+/// envió correo por ella y debe sobrevivir a los reintentos para que un fallo
+/// persistente no dispare un aviso en cada tick.
+pub(crate) fn claimed_schedule_state(
+    existing: Option<&ScheduleState>,
+    candidate: &ScheduleState,
+) -> ScheduleState {
+    let already_emailed = existing.is_some_and(|existing| {
+        existing.window_date_from == candidate.window_date_from
+            && existing.window_date_to == candidate.window_date_to
+            && existing.email_sent
+    });
+    ScheduleState {
+        email_sent: candidate.email_sent || already_emailed,
+        ..candidate.clone()
     }
 }
 
@@ -617,22 +631,18 @@ impl StorageRepository for MemoryStorage {
         &self,
         state: &ScheduleState,
         stale_before: DateTime<Utc>,
-        repeat_completed_before: Option<DateTime<Utc>>,
     ) -> anyhow::Result<ScheduleWindowClaim> {
         let mut inner = self.inner.write().await;
-        if let Some(existing) = inner.schedule_states.get(&state.user_email)
-            && let Some(result) = existing_schedule_window_claim(
-                existing,
-                state,
-                stale_before,
-                repeat_completed_before,
-            )
+        let existing = inner.schedule_states.get(&state.user_email).cloned();
+        if let Some(existing) = &existing
+            && let Some(result) = existing_schedule_window_claim(existing, state, stale_before)
         {
             return Ok(result);
         }
-        inner
-            .schedule_states
-            .insert(state.user_email.clone(), state.clone());
+        inner.schedule_states.insert(
+            state.user_email.clone(),
+            claimed_schedule_state(existing.as_ref(), state),
+        );
         Ok(ScheduleWindowClaim::Claimed)
     }
 

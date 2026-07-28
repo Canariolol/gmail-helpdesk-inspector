@@ -22,7 +22,7 @@ use crate::{
     storage::{
         AnalysisDataDeletionAudit, MailboxConnectionRefresh,
         ManualReviewInheritanceMigrationResult, ManualReviewMetricsMigrationResult,
-        ScheduleWindowClaim, StorageRepository, clear_gmail_connection,
+        ScheduleWindowClaim, StorageRepository, claimed_schedule_state, clear_gmail_connection,
         existing_schedule_window_claim, gmail_connection_from_legacy,
     },
 };
@@ -492,7 +492,6 @@ impl StorageRepository for PostgresStorage {
         &self,
         state: &ScheduleState,
         stale_before: DateTime<Utc>,
-        repeat_completed_before: Option<DateTime<Utc>>,
     ) -> anyhow::Result<ScheduleWindowClaim> {
         let id = normalize_email(&state.user_email);
         let mut tx = self.pool.begin().await?;
@@ -502,29 +501,27 @@ impl StorageRepository for PostgresStorage {
         .bind(&id)
         .fetch_optional(&mut *tx)
         .await?;
-        if let Some(value) = current {
-            let existing: ScheduleState = serde_json::from_value(value)?;
-            if let Some(result) = existing_schedule_window_claim(
-                &existing,
-                state,
-                stale_before,
-                repeat_completed_before,
-            ) {
-                tx.commit().await?;
-                return Ok(result);
-            }
+        let existing = current
+            .map(serde_json::from_value::<ScheduleState>)
+            .transpose()?;
+        if let Some(existing) = &existing
+            && let Some(result) = existing_schedule_window_claim(existing, state, stale_before)
+        {
+            tx.commit().await?;
+            return Ok(result);
         }
+        let claimed = claimed_schedule_state(existing.as_ref(), state);
         self.put_tx(
             &mut tx,
             "schedule_state",
             &id,
             RecordFields {
-                owner_email: Some(&state.user_email),
-                state: Some(schedule_state_name(state)),
-                sort_at: Some(state.updated_at),
+                owner_email: Some(&claimed.user_email),
+                state: Some(schedule_state_name(&claimed)),
+                sort_at: Some(claimed.updated_at),
                 ..Default::default()
             },
-            state,
+            &claimed,
         )
         .await?;
         tx.commit().await?;

@@ -3,7 +3,7 @@ pub mod window;
 
 use std::time::Duration;
 
-use chrono::{DateTime, NaiveDate, Timelike, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -100,8 +100,7 @@ pub async fn run_due_scheduled_analysis(
             });
             continue;
         };
-        let repeat_hourly = state.config.is_privileged_account(&config.user_email);
-        outcomes.push(run_for_user(state, mailer, &config, &window, repeat_hourly).await);
+        outcomes.push(run_for_user(state, mailer, &config, &window).await);
     }
     Ok(outcomes)
 }
@@ -129,7 +128,7 @@ async fn run_configs_for_window(
             });
             continue;
         }
-        outcomes.push(run_for_user(state, mailer, &config, window, false).await);
+        outcomes.push(run_for_user(state, mailer, &config, window).await);
     }
     Ok(outcomes)
 }
@@ -222,9 +221,8 @@ async fn run_for_user(
     mailer: &dyn ReportMailer,
     config: &ScheduleConfig,
     window: &AnalysisWindow,
-    repeat_completed_hourly: bool,
 ) -> ScheduledOutcome {
-    match check_idempotency(state, config, window, repeat_completed_hourly).await {
+    match check_idempotency(state, config, window).await {
         Ok(Some(reason)) => {
             return ScheduledOutcome::Skipped {
                 user_email: Some(config.user_email.clone()),
@@ -250,17 +248,24 @@ async fn run_for_user(
                 "scheduled analysis failed"
             );
             let message = "scheduled_analysis_failed".to_string();
+            // El scheduler reintenta cada tick mientras la ventana siga fallando;
+            // el aviso, en cambio, se manda una sola vez por ventana.
+            let already_notified = notice_already_sent_for_window(state, config, window).await;
+            let notice_sent = if already_notified {
+                false
+            } else {
+                send_failure_notice(state, mailer, config, window, &message).await
+            };
             store_state(
                 state,
                 config,
                 window,
                 ScheduleRunStatus::Failed,
                 None,
-                false,
+                already_notified || notice_sent,
                 Some(message.clone()),
             )
             .await;
-            let notice_sent = send_failure_notice(state, mailer, config, window, &message).await;
             ScheduledOutcome::Failed {
                 user_email: config.user_email.clone(),
                 error: message,
@@ -278,15 +283,8 @@ async fn check_idempotency(
     state: &AppState,
     config: &ScheduleConfig,
     window: &AnalysisWindow,
-    repeat_completed_hourly: bool,
 ) -> anyhow::Result<Option<String>> {
     let now = Utc::now();
-    let repeat_completed_before = repeat_completed_hourly.then(|| {
-        now.with_minute(0)
-            .and_then(|value| value.with_second(0))
-            .and_then(|value| value.with_nanosecond(0))
-            .expect("UTC always has a valid hour boundary")
-    });
     let claim = state
         .storage
         .claim_schedule_window(
@@ -302,7 +300,6 @@ async fn check_idempotency(
                 updated_at: now,
             },
             now - chrono::Duration::minutes(CLAIM_TTL_MINUTES),
-            repeat_completed_before,
         )
         .await?;
     Ok(match claim {
@@ -625,6 +622,26 @@ fn recipients_for(state: &AppState, config: &ScheduleConfig) -> Vec<String> {
     }
 }
 
+/// `email_sent` sobrevive al claim dentro de la misma ventana, así que sirve de
+/// marca de "ya se avisó por esta ventana" entre reintentos.
+async fn notice_already_sent_for_window(
+    state: &AppState,
+    config: &ScheduleConfig,
+    window: &AnalysisWindow,
+) -> bool {
+    match state.storage.get_schedule_state(&config.user_email).await {
+        Ok(Some(current)) => {
+            current.email_sent
+                && current.window_date_from == window.date_from
+                && current.window_date_to == window.date_to
+        }
+        // Sin lectura confiable preferimos avisar: perder el aviso de un fallo
+        // es peor que repetirlo.
+        Ok(None) => false,
+        Err(_) => false,
+    }
+}
+
 async fn send_failure_notice(
     state: &AppState,
     mailer: &dyn ReportMailer,
@@ -932,6 +949,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn persistent_failure_notifies_only_once_per_window() {
+        let (state, storage) = app_state(Some("a@x.cl"));
+        let mailer = FakeMailer::default();
+
+        // El scheduler despierta cada minuto: sin el guard, cada tick sobre la
+        // misma ventana rota mandaba otro aviso.
+        for _ in 0..3 {
+            let outcomes = run_scheduled_analysis(&state, &mailer, date("2026-06-12"))
+                .await
+                .unwrap();
+            assert!(matches!(outcomes[0], ScheduledOutcome::Failed { .. }));
+        }
+
+        assert_eq!(mailer.sent.lock().await.len(), 1);
+        // El reintento sigue vivo: el estado queda Failed y reclamable.
+        let saved = storage
+            .get_schedule_state("a@x.cl")
+            .await
+            .unwrap()
+            .expect("state expected");
+        assert_eq!(saved.status, ScheduleRunStatus::Failed);
+        assert!(saved.email_sent);
+    }
+
+    #[tokio::test]
     async fn completed_window_is_not_repeated() {
         let (state, storage) = app_state(None);
         storage
@@ -1007,8 +1049,8 @@ mod tests {
         };
 
         let (first, second) = tokio::join!(
-            check_idempotency(&state, &config, &window, false),
-            check_idempotency(&state, &config, &window, false),
+            check_idempotency(&state, &config, &window),
+            check_idempotency(&state, &config, &window),
         );
         let outcomes = [first.unwrap(), second.unwrap()];
         assert_eq!(
@@ -1023,9 +1065,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn privileged_schedule_can_repeat_once_per_hour() {
-        let (state, storage) = app_state(None);
+    async fn completed_window_never_repeats_even_for_privileged_account() {
+        let (mut state, storage) = app_state(None);
         let config = schedule_config("tester@example.com");
+        state.config.internal_full_access_emails = vec![config.user_email.clone()];
         let window = AnalysisWindow {
             date_from: "2026-06-11".to_string(),
             date_to: "2026-06-11".to_string(),
@@ -1036,23 +1079,19 @@ mod tests {
                 &window.date_from,
                 &window.date_to,
                 ScheduleRunStatus::Completed,
+                // Más de una hora atrás: el override anterior habría permitido
+                // aquí una segunda corrida (y un segundo correo).
                 70,
             ))
             .await
             .unwrap();
 
-        assert!(
-            check_idempotency(&state, &config, &window, true)
-                .await
-                .unwrap()
-                .is_none()
-        );
         assert_eq!(
-            check_idempotency(&state, &config, &window, true)
+            check_idempotency(&state, &config, &window)
                 .await
                 .unwrap()
                 .as_deref(),
-            Some("análisis en curso")
+            Some("ventana ya analizada")
         );
     }
 
