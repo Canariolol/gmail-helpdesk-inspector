@@ -4,38 +4,164 @@ import json
 import re
 
 import httpx
+from pydantic import ValidationError
 
-from ai_worker.schemas import AuditThreadRequest, AuditThreadResponse, BedrockDecision
+from ai_worker.schemas import (
+    AuditPolicyContext,
+    AuditThreadRequest,
+    AuditThreadResponse,
+    BatchAuditRequest,
+    BatchAuditResponse,
+    BedrockBatchDecision,
+    BedrockDecision,
+)
 from ai_worker.settings import Settings
 
 
-def build_system_prompt(settings: Settings) -> str:
-    return f"""You audit the email inbox of a Level-1 (N1) IT service desk ("Mesa de Servicio") at West Ingeniería, a Chilean technology company. The desk serves many external client companies; all email is in Spanish (Chilean). For one email thread you decide whether it is a VALID client request that this N1 desk should handle, and whether it was answered. Return strict JSON only, matching the requested schema exactly.
+BATCH_OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "decisions": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "thread_id": {"type": "string"},
+                    "classification": {
+                        "type": "string",
+                        "enum": [
+                            "valid_client_request",
+                            "internal",
+                            "automated",
+                            "newsletter",
+                            "spam",
+                            "misc",
+                            "ambiguous",
+                        ],
+                    },
+                    "is_valid_client_request": {"type": "boolean"},
+                    "is_answered": {"type": "boolean"},
+                    "first_client_message_id": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}]
+                    },
+                    "first_internal_reply_message_id": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}]
+                    },
+                    "last_internal_message_id": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}]
+                    },
+                    "confidence": {"type": "number"},
+                    "manual_review_required": {"type": "boolean"},
+                    "issues": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": [
+                    "thread_id",
+                    "classification",
+                    "is_valid_client_request",
+                    "is_answered",
+                    "first_client_message_id",
+                    "first_internal_reply_message_id",
+                    "last_internal_message_id",
+                    "confidence",
+                    "manual_review_required",
+                    "issues",
+                ],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["decisions"],
+    "additionalProperties": False,
+}
 
-Context:
-- The analyzed inbox is the desk supervisor's mailbox ({settings.analyzed_mailbox}), which receives a SUPERSET of the desk's mail. A message landing in this inbox is NOT automatically a desk request.
-- The real desk address is {settings.desk_mailbox}. A thread is most likely for the desk when {settings.desk_mailbox} is a direct (To) recipient. If it only appears in CC, or the mail is addressed to a specific person or another area, be skeptical.
-- Internal staff use @{settings.internal_domain} addresses. The N1 desk members are: {settings.desk_members}.
 
-VALID desk request (classification "valid_client_request", is_valid_client_request=true):
-- An external, human client (not an automated/system/no-reply sender) asks the desk for help: incidents, access/password problems, technical support for their products/systems (e.g. logistics/forestry systems, GPS equipment, latency), or a follow-up on such a request. The topic is broad, so do NOT reject a thread just because of its subject. Long or messy threads can still be valid.
+def _bullet_list(values: list[str], fallback: str) -> str:
+    cleaned = [value.strip() for value in values if value.strip()]
+    if not cleaned:
+        return fallback
+    return "\n".join(f"  - {value}" for value in cleaned)
 
-NOT valid for this desk (set is_valid_client_request=false and pick the closest category):
-- "automated": automated/system/no-reply/notification mail (GCP, AWS, calendars, mailer-daemon, monitoring).
-- "newsletter": promotions, marketing or newsletters. "spam": spam.
+
+def _fallback_policy_context(settings: Settings) -> AuditPolicyContext:
+    internal_domains = [settings.internal_domain] if settings.internal_domain else []
+    responder_emails = [settings.desk_mailbox] if settings.desk_mailbox else []
+    mailbox_email = settings.analyzed_mailbox or settings.desk_mailbox
+    return AuditPolicyContext(
+        mailbox_email=mailbox_email,
+        mailbox_display_name=mailbox_email,
+        workspace_domain=settings.internal_domain,
+        internal_domains=internal_domains,
+        responder_emails=responder_emails,
+        valid_request_criteria=[
+            "External human clients ask the configured support/helpdesk team for help, service, access, incident handling, or follow-up."
+        ],
+        non_responsibility_rules=[
+            "Messages clearly addressed to another team, person, vendor, newsletter, spam, or automated system are not valid client requests for this helpdesk."
+        ],
+        prompt_version="legacy_fallback_v1",
+    )
+
+
+def build_system_prompt(settings: Settings, policy: AuditPolicyContext | None = None) -> str:
+    policy = policy or _fallback_policy_context(settings)
+    mailbox_labels = [policy.mailbox_email, *policy.mailbox_aliases]
+    responder_labels = [*policy.responder_emails]
+    internal_labels = [*policy.internal_domains]
+    return f"""You audit one email thread for a Gmail inbox used as a helpdesk/support mailbox. Your job is to decide whether the thread is a VALID client request for the configured organization policy and whether it was answered. Return strict JSON only, matching the requested schema exactly.
+
+Tenant policy context:
+- Analyzed mailbox: {policy.mailbox_email or "not specified"}
+- Mailbox display name: {policy.mailbox_display_name or "not specified"}
+- Workspace/domain: {policy.workspace_domain or "not specified"}
+- Mailbox aliases / support addresses:
+{_bullet_list(mailbox_labels, "  - not specified")}
+- Internal domains:
+{_bullet_list(internal_labels, "  - infer only from is_internal/is_external flags")}
+- Explicit responder emails:
+{_bullet_list(responder_labels, "  - infer internal human responders from message flags")}
+
+Valid request criteria from the organization policy:
+{_bullet_list(policy.valid_request_criteria, "  - External human clients ask the configured helpdesk/support team for help, service, access, incident handling, or follow-up.")}
+
+Out-of-scope / non-responsibility rules from the organization policy:
+{_bullet_list(policy.non_responsibility_rules, "  - Messages clearly meant for another team/person, automated mail, newsletters, spam, or generic non-support topics are not valid client requests for this helpdesk.")}
+
+Ignored hints from policy (use as supporting evidence, not as the only criterion):
+- Ignored senders:
+{_bullet_list(policy.ignored_senders, "  - none")}
+- Ignored domains:
+{_bullet_list(policy.ignored_domains, "  - none")}
+- Ignored subject keywords:
+{_bullet_list(policy.ignored_keywords, "  - none")}
+
+Window counting rules:
+- Historical acknowledgements/thank-yous/closures with no new request: {"COUNT as valid when the prior request was valid." if policy.count_historical_closures_as_valid else "DO NOT count; classify as misc."}
+- Follow-ups or insistences about a request/ticket that started before the window: {"COUNT as a new valid request when in scope." if policy.count_previous_request_followups_as_valid else "DO NOT count as a new request; classify as misc unless the focus introduces a materially new request."}
+- Training/webinars: {"COUNT only when this organization is the host/provider and the focus asks it to perform work." if policy.count_org_hosted_training_as_valid else "DO NOT count as valid."}
+
+Classification guidance:
+- "valid_client_request": an external, human client asks for something this configured helpdesk should handle under the valid request criteria.
+- "automated": automated/system/no-reply/notification mail.
+- "newsletter": promotions, marketing or newsletters.
+- "spam": spam.
 - "internal": only internal staff, no external human client.
-- "misc": a client who explicitly asks to deal with someone who is NOT an N1 desk member (Sales, a specific account manager, a named person not in the desk list), even if {settings.desk_mailbox} is CC'd — this is not the desk's responsibility. Also anything else that is clearly not a client support request.
+- "misc": clearly not a request this configured helpdesk owns.
+- "ambiguous": evidence is insufficient or policy ownership is genuinely unclear.
 
-Set manual_review_required=true (usually with classification "ambiguous") when:
-- The client asks to talk to a person who is NOT an N1 desk member, BUT the mail also describes a genuine desk-type issue (access/system/GPS/etc.). Let a human decide; lean valid only if the desk-type issue is clearly the point.
-- The thread was answered/handled by someone who is NOT an N1 desk member.
-- Evidence is genuinely insufficient or ambiguous.
+Gmail label hints (field "gmail_labels", use as supporting evidence, not the sole criterion):
+- CATEGORY_PROMOTIONS strongly suggests promotions/newsletter; CATEGORY_SOCIAL and CATEGORY_FORUMS suggest social/forum notifications rather than a support request.
+- CATEGORY_PERSONAL, INBOX and IMPORTANT are neutral and do not by themselves indicate a valid request.
 
-is_answered: true only if a real HUMAN reply from a desk member (internal, non-automated, after the client's message) exists. Automated acknowledgements ("hemos recibido su solicitud", ticket auto-replies) do NOT count as answered.
-
-Output rules:
-- Use only the message ids provided; never invent messages or ids. Pick first_client_message_id, first_internal_reply_message_id and last_internal_message_id from the provided ids when applicable, else null.
-- The provided messages are a compact view with short body excerpts; this is enough to judge validity. Only use "ambiguous" + manual_review_required=true if the evidence is truly insufficient.
+Answer guidance:
+- For a valid in-window request, is_answered=true only if a real HUMAN internal/responder reply after the focus exists.
+- For an ignored historical closure/thank-you, is_answered may be true when the supplied history shows that the prior request was already answered.
+- Automated acknowledgements and ticket auto-replies do NOT count as answered.
+- Use only the message ids provided; never invent messages or ids.
+- Pick first_client_message_id, first_internal_reply_message_id and last_internal_message_id from the provided ids when applicable, else null.
+- The messages are compact excerpts; use "ambiguous" + manual_review_required=true if the evidence is insufficient.
+- automatic_classification.first_client_message_id is the first client message inside the analysis window. Classify that activity; earlier messages are context only.
+- Match ignored domains exactly or by subdomain boundary. gmail.com is not google.com.
 - The automatic_classification field is only a prior hint from a rule-based pass; correct it freely.
 - Write every string in the "issues" array in Spanish.
 - Output must match the requested JSON schema exactly."""
@@ -72,6 +198,7 @@ def build_user_prompt(payload: AuditThreadRequest) -> str:
         {
             "thread_id": payload.thread.gmail_thread_id,
             "subject": payload.thread.subject,
+            "gmail_labels": payload.gmail_labels,
             "automatic_classification": {
                 "classification": payload.thread.classification,
                 "classification_source": payload.thread.classification_source,
@@ -98,6 +225,143 @@ def build_user_prompt(payload: AuditThreadRequest) -> str:
     )
 
 
+def build_batch_system_prompt(
+    settings: Settings, policy: AuditPolicyContext | None = None
+) -> str:
+    policy = policy or _fallback_policy_context(settings)
+    return f"""You are analyzing the inbound mailbox of a helpdesk. Your task is to identify new support requests received within the selected analysis window. The tenant policy below applies to every thread. Return strict JSON with one decision per supplied thread_id and no extra text.
+
+Mailbox: {policy.mailbox_email or "not specified"}
+Internal domains:
+{_bullet_list(policy.internal_domains, "  - infer from message flags")}
+Valid request criteria:
+{_bullet_list(policy.valid_request_criteria, "  - External human clients ask this helpdesk for support, access, incident handling, service, or follow-up.")}
+Out-of-scope rules:
+{_bullet_list(policy.non_responsibility_rules, "  - Automated mail, newsletters, spam, internal-only threads, and requests owned by another team are not valid.")}
+Ignored senders/domains/keywords:
+{_bullet_list([*policy.ignored_senders, *policy.ignored_domains, *policy.ignored_keywords], "  - none")}
+
+Window counting rules:
+- Historical acknowledgements/thank-yous/closures with no new request: {"COUNT as valid when the prior request was valid." if policy.count_historical_closures_as_valid else "DO NOT count; classify as misc."}
+- Follow-ups or insistences about a request/ticket that started before the window: {"COUNT as a new valid request when in scope." if policy.count_previous_request_followups_as_valid else "DO NOT count as a new request; classify as misc unless the focus introduces a materially new request."}
+- Training/webinars: {"COUNT only when this organization is the host/provider and the focus asks it to perform work." if policy.count_org_hosted_training_as_valid else "DO NOT count as valid."}
+
+For each thread:
+- valid_client_request means an external human asks for work covered by the policy.
+- Messages may include earlier history for context. focus_message_id identifies the client message that brought the thread into the current analysis window.
+- Classify the activity beginning at focus_message_id, not the historical thread as a whole. Earlier messages are context only and cannot by themselves make the in-window activity valid.
+- Use the full supplied history to understand what the focus refers to, while applying the window counting rules above.
+- For a valid in-window request, is_answered requires a later human internal reply; automated acknowledgements do not count.
+- For an ignored historical closure/thank-you, is_answered may be true when the supplied history shows that the prior request was already answered.
+- For a valid request, first_client_message_id must be focus_message_id and reply ids must occur after it.
+- Empty connectivity/test emails with no support request are "misc", not "ambiguous". An explicit out-of-scope policy match is also "misc" (or the more specific non-request class), not "ambiguous".
+- Match ignored domains exactly or by subdomain boundary. gmail.com is not google.com.
+- Use "ambiguous" only when at least two materially plausible classifications remain after considering all supplied context. Missing request content by itself is evidence that the message is not a valid request.
+- Set manual_review_required=true only when a human decision is genuinely needed; do not require review merely because wording differs from the policy examples.
+- The supplied messages are a bounded chronological selection that prioritizes the focus, original request, first reply and recent context.
+- Use only supplied message_id values for first_client_message_id, first_internal_reply_message_id and last_internal_message_id; never invent ids.
+- Use ambiguous and manual_review_required=true when the evidence is insufficient.
+- Preserve every supplied thread_id exactly and return exactly one decision for each.
+- Issues must be written in Spanish.
+
+Output shape:
+{{"decisions":[{{"thread_id":"...","classification":"valid_client_request|internal|automated|newsletter|spam|misc|ambiguous","is_valid_client_request":true,"is_answered":false,"first_client_message_id":"...|null","first_internal_reply_message_id":"...|null","last_internal_message_id":"...|null","confidence":0.0,"manual_review_required":false,"issues":[]}}]}}"""
+
+
+def build_batch_user_prompt(payload: BatchAuditRequest) -> str:
+    return json.dumps(
+        {
+            "threads": [thread.model_dump(mode="json") for thread in payload.threads],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+async def audit_batch_with_bedrock(
+    payload: BatchAuditRequest,
+    settings: Settings,
+    client: httpx.AsyncClient | None = None,
+) -> BatchAuditResponse:
+    if not settings.aws_bearer_token_bedrock:
+        raise RuntimeError("AWS_BEARER_TOKEN_BEDROCK is required")
+
+    request_body = {
+        "system": [{"text": build_batch_system_prompt(settings, payload.policy_context)}],
+        "messages": [
+            {
+                "role": "user",
+                "content": [{"text": build_batch_user_prompt(payload)}],
+            }
+        ],
+        "inferenceConfig": {
+            "maxTokens": 6000,
+            "temperature": 0,
+        },
+        "outputConfig": {
+            "textFormat": {
+                "type": "json_schema",
+                "structure": {
+                    "jsonSchema": {
+                        "schema": json.dumps(BATCH_OUTPUT_SCHEMA, separators=(",", ":")),
+                        "name": "mira_batch_audit",
+                        "description": "One audit decision for every supplied email thread.",
+                    }
+                },
+            }
+        },
+    }
+
+    owns_client = client is None
+    if client is None:
+        client = httpx.AsyncClient(timeout=60)
+    try:
+        response = await client.post(
+            settings.batch_invoke_url,
+            headers={
+                "Authorization": f"Bearer {settings.aws_bearer_token_bedrock}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            json=request_body,
+        )
+        response.raise_for_status()
+        raw = response.json()
+    finally:
+        if owns_client:
+            await client.aclose()
+
+    usage = raw.get("usage", {})
+    input_tokens = int(usage.get("inputTokens", 0))
+    output_tokens = int(usage.get("outputTokens", 0))
+    stop_reason = raw.get("stopReason")
+    aws_request_id = response.headers.get("x-amzn-requestid")
+    try:
+        text = (
+            raw.get("output", {})
+            .get("message", {})
+            .get("content", [{}])[0]
+            .get("text", "")
+        )
+        decision = BedrockBatchDecision.model_validate_json(extract_json_text(text))
+    except (AttributeError, IndexError, TypeError, ValidationError):
+        return BatchAuditResponse(
+            decisions=[],
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            outcome="invalid_output",
+            stop_reason=stop_reason,
+            aws_request_id=aws_request_id,
+        )
+    return BatchAuditResponse(
+        decisions=decision.decisions,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        stop_reason=stop_reason,
+        aws_request_id=aws_request_id,
+    )
+
+
 async def audit_with_bedrock(
     payload: AuditThreadRequest,
     settings: Settings,
@@ -107,7 +371,7 @@ async def audit_with_bedrock(
         raise RuntimeError("AWS_BEARER_TOKEN_BEDROCK is required")
 
     request_body = {
-        "system": [{"text": build_system_prompt(settings)}],
+        "system": [{"text": build_system_prompt(settings, payload.policy_context)}],
         "messages": [
             {
                 "role": "user",

@@ -19,16 +19,17 @@ export const statusTones: Record<AnalysisStatus, ChipTone> = {
   failed: "red",
 };
 
-// Recharts necesita valores JS, no variables CSS.
+// Recharts escribe estos valores como atributos SVG (fill/stroke), que sí
+// aceptan var(--token): los gráficos siguen el tema activo del contrato.
 export const chartColors = {
-  valid: "#10b981",
-  answered: "#3b82f6",
-  unanswered: "#f97316",
-  ignored: "#a8a29e",
-  ambiguous: "#8b5cf6",
-  avgResponse: "#f97316",
-  p90Response: "#8b5cf6",
-  resolution: "#14b8a6",
-  axis: "#8c8178",
-  grid: "#f0e3d6",
+  valid: "var(--ok)",
+  answered: "var(--info)",
+  unanswered: "var(--accent)",
+  ignored: "var(--chip-gray-fg)",
+  ambiguous: "var(--chip-purple-fg)",
+  avgResponse: "var(--accent)",
+  p90Response: "var(--chip-purple-fg)",
+  resolution: "var(--chip-teal-fg)",
+  axis: "var(--text-muted)",
+  grid: "var(--border)",
 };

@@ -1,11 +1,15 @@
 use std::env;
 
 use anyhow::{Context, anyhow};
-use serde::Deserialize;
+use url::Url;
+
+const DEFAULT_ENCRYPTION_KEY: &str = "development-only-change-me-32-bytes";
+const DEFAULT_SESSION_SECRET: &str = "development-only-session-secret";
 
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub api_port: u16,
+    pub app_env: String,
     pub web_base_url: String,
     pub api_base_url: String,
     pub cookie_secure: bool,
@@ -14,10 +18,29 @@ pub struct AppConfig {
     pub encryption_key: String,
     pub session_secret: String,
     pub google: GoogleConfig,
-    pub firestore: FirestoreConfig,
+    /// `None` mientras no exista una app registrada en Azure AD. Sin esto el
+    /// botón de Microsoft no se ofrece, en vez de fallar al apretarlo.
+    pub microsoft: Option<MicrosoftConfig>,
+    pub workos: WorkosConfig,
+    pub billing: BillingConfig,
+    pub postgres_database_url: Option<String>,
     pub ai: AiConfig,
     pub scheduler: SchedulerConfig,
     pub report: ReportConfig,
+    pub rate_limit: RateLimitConfig,
+    /// Cuentas internas privilegiadas (correos en minúsculas) con acceso total:
+    /// sin rate limits, sin gating de setup y sin futuros límites de plan.
+    pub internal_full_access_emails: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MicrosoftConfig {
+    pub client_id: String,
+    pub client_secret: String,
+    pub redirect_url: String,
+    /// `common` acepta cualquier tenant y cuentas personales. Un tenant ID
+    /// concreto restringe la app a una sola organización.
+    pub tenant: String,
 }
 
 #[derive(Debug, Clone)]
@@ -29,11 +52,19 @@ pub struct GoogleConfig {
 }
 
 #[derive(Debug, Clone)]
-pub struct FirestoreConfig {
-    pub project_id: String,
-    pub database_id: String,
-    pub bearer_token: Option<String>,
-    pub service_account_path: Option<String>,
+pub struct WorkosConfig {
+    pub client_id: String,
+    pub api_key: String,
+    pub redirect_uri: String,
+    pub cookie_secret: String,
+    pub webhook_secret: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BillingConfig {
+    pub mercadopago_access_token: Option<String>,
+    pub mercadopago_webhook_secret: Option<String>,
+    pub enforcement_enabled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -59,24 +90,72 @@ pub struct ReportConfig {
     pub to_emails: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct RateLimitConfig {
+    pub analysis_create_per_hour: usize,
+    pub analysis_start_per_hour: usize,
+}
+
 impl AppConfig {
     pub fn from_env() -> anyhow::Result<Self> {
-        let app_storage = env_or("APP_STORAGE", "firestore");
+        let app_env = env_or("APP_ENV", "development");
+        let production = is_production_env(&app_env);
+        let app_storage = env_or("APP_STORAGE", "postgres");
+        let postgres_database_url = empty_to_none(env::var("POSTGRES_DATABASE_URL").ok());
+        if app_storage == "postgres" && postgres_database_url.is_none() {
+            return Err(anyhow!(
+                "POSTGRES_DATABASE_URL is required when APP_STORAGE=postgres"
+            ));
+        }
         let google = GoogleConfig {
             client_id: env_or("GOOGLE_CLIENT_ID", ""),
             client_secret: env_or("GOOGLE_CLIENT_SECRET", ""),
             redirect_url: env_or(
                 "GOOGLE_REDIRECT_URL",
-                "http://localhost:8080/auth/google/callback",
+                "http://localhost:8080/gmail/connect/callback",
             ),
             gmail_max_threads: env_or("GMAIL_MAX_THREADS", "50")
                 .parse()
                 .context("invalid GMAIL_MAX_THREADS")?,
         };
-
-        if app_storage != "memory" {
-            require("GCP_PROJECT_ID")?;
-        }
+        // Microsoft solo se habilita con las tres credenciales presentes: una
+        // configuración a medias produciría un botón que siempre falla.
+        let microsoft_client_id = env_or("MICROSOFT_CLIENT_ID", "");
+        let microsoft_client_secret = secret_or_empty("MICROSOFT_CLIENT_SECRET", false)?;
+        let microsoft_redirect_url = env_or("MICROSOFT_REDIRECT_URL", "");
+        let microsoft = (!microsoft_client_id.trim().is_empty()
+            && !microsoft_client_secret.trim().is_empty()
+            && !microsoft_redirect_url.trim().is_empty())
+        .then(|| MicrosoftConfig {
+            client_id: microsoft_client_id,
+            client_secret: microsoft_client_secret,
+            redirect_url: microsoft_redirect_url,
+            tenant: env_or("MICROSOFT_TENANT", "common"),
+        });
+        let workos = WorkosConfig {
+            client_id: env_or("WORKOS_CLIENT_ID", ""),
+            api_key: secret_or_empty("WORKOS_API_KEY", production)?,
+            redirect_uri: env_or(
+                "WORKOS_REDIRECT_URI",
+                "http://localhost:8080/auth/workos/callback",
+            ),
+            cookie_secret: secret_or_dev_default(
+                "WORKOS_COOKIE_SECRET",
+                "development-only-workos-cookie-secret",
+                production,
+            )?,
+            webhook_secret: empty_to_none(env::var("WORKOS_WEBHOOK_SECRET").ok()),
+        };
+        validate_workos_config(&workos, production)?;
+        let billing = BillingConfig {
+            mercadopago_access_token: empty_to_none(env::var("MERCADOPAGO_ACCESS_TOKEN").ok()),
+            mercadopago_webhook_secret: empty_to_none(env::var("MERCADOPAGO_WEBHOOK_SECRET").ok()),
+            enforcement_enabled: env::var("BILLING_ENFORCEMENT_ENABLED")
+                .ok()
+                .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
+                .unwrap_or(production),
+        };
+        validate_billing_config(&billing, production)?;
 
         let scheduler = SchedulerConfig {
             enabled: env_flag("SCHEDULER_ENABLED"),
@@ -105,59 +184,108 @@ impl AppConfig {
             }
         }
 
+        let rate_limit = RateLimitConfig {
+            analysis_create_per_hour: env_or("RATE_LIMIT_ANALYSIS_CREATE_PER_HOUR", "12")
+                .parse()
+                .context("invalid RATE_LIMIT_ANALYSIS_CREATE_PER_HOUR")?,
+            analysis_start_per_hour: env_or("RATE_LIMIT_ANALYSIS_START_PER_HOUR", "12")
+                .parse()
+                .context("invalid RATE_LIMIT_ANALYSIS_START_PER_HOUR")?,
+        };
+
+        let internal_full_access_emails = env_list("INTERNAL_FULL_ACCESS_EMAILS")
+            .into_iter()
+            .map(|email| email.to_lowercase())
+            .collect();
+
         let api_base_url = env_or("API_BASE_URL", "http://localhost:8080");
         let cookie_secure = env::var("APP_COOKIE_SECURE")
             .ok()
             .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
             .unwrap_or_else(|| api_base_url.starts_with("https://"));
-        let cookie_same_site = env_or(
-            "APP_COOKIE_SAMESITE",
-            if cookie_secure { "None" } else { "Lax" },
-        );
+        let cookie_same_site = env_or("APP_COOKIE_SAMESITE", "Lax");
+        let web_base_url = env_or("WEB_BASE_URL", "http://localhost:5173");
+        let ai_worker_url = env_or("AI_WORKER_URL", "http://localhost:8090");
+        let ai_worker_audience = empty_to_none(env::var("AI_WORKER_AUDIENCE").ok());
+        validate_production_runtime(
+            production,
+            &app_storage,
+            &web_base_url,
+            &api_base_url,
+            cookie_secure,
+            &cookie_same_site,
+            &google.redirect_url,
+            &workos.redirect_uri,
+            &ai_worker_url,
+            ai_worker_audience.as_deref(),
+        )?;
 
         Ok(Self {
             api_port: env::var("PORT")
                 .unwrap_or_else(|_| env_or("API_PORT", "8080"))
                 .parse()
                 .context("invalid API_PORT")?,
-            web_base_url: env_or("WEB_BASE_URL", "http://localhost:5173"),
+            app_env,
+            web_base_url,
             api_base_url,
             cookie_secure,
             cookie_same_site,
             app_storage,
-            encryption_key: require("APP_ENCRYPTION_KEY")
-                .unwrap_or_else(|_| "development-only-change-me-32-bytes".to_string()),
-            session_secret: require("APP_SESSION_SECRET")
-                .unwrap_or_else(|_| "development-only-session-secret".to_string()),
+            encryption_key: secret_or_dev_default(
+                "APP_ENCRYPTION_KEY",
+                DEFAULT_ENCRYPTION_KEY,
+                production,
+            )?,
+            session_secret: secret_or_dev_default(
+                "APP_SESSION_SECRET",
+                DEFAULT_SESSION_SECRET,
+                production,
+            )?,
             google,
-            firestore: FirestoreConfig {
-                project_id: env_or("GCP_PROJECT_ID", ""),
-                database_id: env_or("FIRESTORE_DATABASE_ID", "(default)"),
-                bearer_token: empty_to_none(env::var("FIRESTORE_BEARER_TOKEN").ok()),
-                service_account_path: empty_to_none(
-                    env::var("GOOGLE_APPLICATION_CREDENTIALS").ok(),
-                ),
-            },
+            microsoft,
+            workos,
+            billing,
+            postgres_database_url,
             ai: AiConfig {
-                worker_url: env_or("AI_WORKER_URL", "http://localhost:8090"),
-                worker_audience: empty_to_none(env::var("AI_WORKER_AUDIENCE").ok()),
+                worker_url: ai_worker_url,
+                worker_audience: ai_worker_audience,
                 apply_confidence_threshold: env_or("AI_APPLY_CONFIDENCE_THRESHOLD", "0.92")
                     .parse()
                     .context("invalid AI_APPLY_CONFIDENCE_THRESHOLD")?,
             },
             scheduler,
             report,
+            rate_limit,
+            internal_full_access_emails,
         })
+    }
+
+    /// True si el correo pertenece a una cuenta interna privilegiada (acceso
+    /// total). El bypass aplica a cuotas/gating/consentimiento, nunca al
+    /// aislamiento de sesión ni de propiedad de datos.
+    /// True cuando `APP_ENV` corresponde a producción (`prod`/`production`).
+    pub fn is_production(&self) -> bool {
+        is_production_env(&self.app_env)
+    }
+
+    pub fn is_privileged_account(&self, email: &str) -> bool {
+        let normalized = email.trim().to_lowercase();
+        !normalized.is_empty()
+            && self
+                .internal_full_access_emails
+                .iter()
+                .any(|allowed| allowed == &normalized)
     }
 }
 
-#[derive(Debug, Deserialize)]
-pub struct ServiceAccountKey {
-    #[allow(dead_code)]
-    pub project_id: Option<String>,
-    pub private_key: String,
-    pub client_email: String,
-    pub token_uri: Option<String>,
+fn secret_or_empty(key: &str, production: bool) -> anyhow::Result<String> {
+    match require(key) {
+        Ok(value) => Ok(value),
+        Err(error) if production => Err(anyhow!(
+            "{key} is required when APP_ENV=production: {error}"
+        )),
+        Err(_) => Ok(String::new()),
+    }
 }
 
 fn env_or(key: &str, default: &str) -> String {
@@ -170,6 +298,141 @@ fn require(key: &str) -> anyhow::Result<String> {
         return Err(anyhow!("{key} cannot be empty"));
     }
     Ok(value)
+}
+
+fn secret_or_dev_default(key: &str, default: &str, production: bool) -> anyhow::Result<String> {
+    match require(key) {
+        Ok(value) => validate_secret_not_default(key, &value, default, production),
+        Err(error) if production => Err(anyhow!(
+            "{key} is required when APP_ENV=production: {error}"
+        )),
+        Err(_) => Ok(default.to_string()),
+    }
+}
+
+fn validate_secret_not_default(
+    key: &str,
+    value: &str,
+    default: &str,
+    production: bool,
+) -> anyhow::Result<String> {
+    if production && (value == default || value.contains("development-only")) {
+        return Err(anyhow!(
+            "{key} must not use a development default when APP_ENV=production"
+        ));
+    }
+    Ok(value.to_string())
+}
+
+fn validate_billing_config(billing: &BillingConfig, production: bool) -> anyhow::Result<()> {
+    if !production {
+        return Ok(());
+    }
+    if !billing.enforcement_enabled {
+        return Err(anyhow!(
+            "BILLING_ENFORCEMENT_ENABLED must be true when APP_ENV=production"
+        ));
+    }
+    // Producción sin pasarela es válido mientras pagos siga diferido: el
+    // checkout responde 503 y el webhook rechaza payloads sin firma. Lo que
+    // nunca se permite es una configuración a medias: un access token sin
+    // secreto de webhook dejaría cobros sin sincronizar.
+    if billing.mercadopago_access_token.is_some() && billing.mercadopago_webhook_secret.is_none() {
+        return Err(anyhow!(
+            "MERCADOPAGO_WEBHOOK_SECRET is required when MERCADOPAGO_ACCESS_TOKEN is set and APP_ENV=production"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_workos_config(workos: &WorkosConfig, production: bool) -> anyhow::Result<()> {
+    if production && workos.client_id.trim().is_empty() {
+        return Err(anyhow!(
+            "WORKOS_CLIENT_ID is required when APP_ENV=production"
+        ));
+    }
+    if production && workos.webhook_secret.is_none() {
+        return Err(anyhow!(
+            "WORKOS_WEBHOOK_SECRET is required when APP_ENV=production"
+        ));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_production_runtime(
+    production: bool,
+    app_storage: &str,
+    web_base_url: &str,
+    api_base_url: &str,
+    cookie_secure: bool,
+    cookie_same_site: &str,
+    google_redirect_url: &str,
+    workos_redirect_uri: &str,
+    ai_worker_url: &str,
+    ai_worker_audience: Option<&str>,
+) -> anyhow::Result<()> {
+    if !production {
+        return Ok(());
+    }
+    if app_storage != "postgres" {
+        return Err(anyhow!(
+            "APP_STORAGE must be postgres when APP_ENV=production"
+        ));
+    }
+    if !cookie_secure {
+        return Err(anyhow!(
+            "APP_COOKIE_SECURE must be true when APP_ENV=production"
+        ));
+    }
+    if !matches!(cookie_same_site, "Lax" | "Strict" | "None") {
+        return Err(anyhow!(
+            "APP_COOKIE_SAMESITE must be Lax, Strict, or None when APP_ENV=production"
+        ));
+    }
+
+    let web_origin = https_origin("WEB_BASE_URL", web_base_url, true)?;
+    let api_origin = https_origin("API_BASE_URL", api_base_url, true)?;
+    let google_origin = https_origin("GOOGLE_REDIRECT_URL", google_redirect_url, false)?;
+    if google_origin != api_origin && google_origin != web_origin {
+        return Err(anyhow!(
+            "GOOGLE_REDIRECT_URL must use the API or web origin in production"
+        ));
+    }
+    let workos_origin = https_origin("WORKOS_REDIRECT_URI", workos_redirect_uri, false)?;
+    if workos_origin != api_origin && workos_origin != web_origin {
+        return Err(anyhow!(
+            "WORKOS_REDIRECT_URI must use the API or web origin in production"
+        ));
+    }
+    https_origin("AI_WORKER_URL", ai_worker_url, false)?;
+    if ai_worker_audience.is_none() {
+        return Err(anyhow!(
+            "AI_WORKER_AUDIENCE is required when APP_ENV=production"
+        ));
+    }
+    Ok(())
+}
+
+fn https_origin(key: &str, value: &str, require_base_path: bool) -> anyhow::Result<String> {
+    let url = Url::parse(value).with_context(|| format!("{key} must be a valid URL"))?;
+    if url.scheme() != "https" || url.cannot_be_a_base() || url.host_str().is_none() {
+        return Err(anyhow!("{key} must use HTTPS in production"));
+    }
+    if require_base_path && (url.path() != "/" || url.query().is_some() || url.fragment().is_some())
+    {
+        return Err(anyhow!(
+            "{key} must be an origin without a path in production"
+        ));
+    }
+    Ok(url.origin().ascii_serialization())
+}
+
+fn is_production_env(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "prod" | "production"
+    )
 }
 
 fn empty_to_none(value: Option<String>) -> Option<String> {
@@ -209,6 +472,7 @@ fn split_list(value: &str) -> Vec<String> {
 pub(crate) fn test_app_config() -> AppConfig {
     AppConfig {
         api_port: 0,
+        app_env: "test".to_string(),
         web_base_url: "http://localhost:5173".to_string(),
         api_base_url: "http://localhost:8080".to_string(),
         cookie_secure: false,
@@ -222,12 +486,20 @@ pub(crate) fn test_app_config() -> AppConfig {
             redirect_url: String::new(),
             gmail_max_threads: 50,
         },
-        firestore: FirestoreConfig {
-            project_id: String::new(),
-            database_id: String::new(),
-            bearer_token: None,
-            service_account_path: None,
+        microsoft: None,
+        workos: WorkosConfig {
+            client_id: "client_test".to_string(),
+            api_key: "sk_test".to_string(),
+            redirect_uri: "http://localhost:8080/auth/workos/callback".to_string(),
+            cookie_secret: "test-workos-cookie-secret".to_string(),
+            webhook_secret: Some("test-workos-webhook-secret".to_string()),
         },
+        billing: BillingConfig {
+            mercadopago_access_token: Some("TEST-access-token".to_string()),
+            mercadopago_webhook_secret: Some("test-webhook-secret".to_string()),
+            enforcement_enabled: true,
+        },
+        postgres_database_url: None,
         ai: AiConfig {
             worker_url: String::new(),
             worker_audience: None,
@@ -245,6 +517,11 @@ pub(crate) fn test_app_config() -> AppConfig {
             from_email: Some("Helpdesk <r@x.cl>".to_string()),
             to_emails: vec!["admin@x.cl".to_string()],
         },
+        rate_limit: RateLimitConfig {
+            analysis_create_per_hour: 12,
+            analysis_start_per_hour: 12,
+        },
+        internal_full_access_emails: vec![],
     }
 }
 
@@ -260,5 +537,186 @@ mod tests {
         );
         assert!(split_list("").is_empty());
         assert!(split_list(" , ").is_empty());
+    }
+
+    #[test]
+    fn production_env_aliases_are_detected() {
+        assert!(is_production_env("production"));
+        assert!(is_production_env("prod"));
+        assert!(is_production_env(" PROD "));
+        assert!(!is_production_env("development"));
+        assert!(!is_production_env("staging"));
+    }
+
+    #[test]
+    fn production_rejects_development_secret_defaults() {
+        let err = validate_secret_not_default(
+            "APP_SESSION_SECRET",
+            DEFAULT_SESSION_SECRET,
+            DEFAULT_SESSION_SECRET,
+            true,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("must not use a development default"));
+
+        let err = validate_secret_not_default(
+            "APP_SESSION_SECRET",
+            "development-only-custom",
+            DEFAULT_SESSION_SECRET,
+            true,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("must not use a development default"));
+    }
+
+    #[test]
+    fn production_requires_mercadopago_webhook_secret() {
+        let billing = BillingConfig {
+            mercadopago_access_token: Some("TEST-access-token".to_string()),
+            mercadopago_webhook_secret: None,
+            enforcement_enabled: true,
+        };
+
+        let err = validate_billing_config(&billing, true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("MERCADOPAGO_WEBHOOK_SECRET"));
+        assert!(validate_billing_config(&billing, false).is_ok());
+    }
+
+    #[test]
+    fn production_allows_missing_mercadopago_credentials_while_payments_deferred() {
+        let billing = BillingConfig {
+            mercadopago_access_token: None,
+            mercadopago_webhook_secret: None,
+            enforcement_enabled: true,
+        };
+        assert!(validate_billing_config(&billing, true).is_ok());
+    }
+
+    #[test]
+    fn production_requires_billing_enforcement() {
+        let billing = BillingConfig {
+            mercadopago_access_token: None,
+            mercadopago_webhook_secret: None,
+            enforcement_enabled: false,
+        };
+        let err = validate_billing_config(&billing, true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("BILLING_ENFORCEMENT_ENABLED"));
+        assert!(validate_billing_config(&billing, false).is_ok());
+    }
+
+    #[test]
+    fn production_requires_workos_webhook_secret() {
+        let mut workos = test_app_config().workos;
+        workos.webhook_secret = None;
+
+        let err = validate_workos_config(&workos, true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("WORKOS_WEBHOOK_SECRET"));
+        assert!(validate_workos_config(&workos, false).is_ok());
+    }
+
+    #[test]
+    fn production_rejects_memory_storage_and_insecure_runtime_values() {
+        let err = validate_production_runtime(
+            true,
+            "memory",
+            "https://app.example.com",
+            "https://api.example.com",
+            true,
+            "Lax",
+            "https://api.example.com/gmail/connect/callback",
+            "https://api.example.com/auth/workos/callback",
+            "https://worker.example.com",
+            Some("https://worker.example.com"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("APP_STORAGE"));
+
+        let err = validate_production_runtime(
+            true,
+            "postgres",
+            "http://app.example.com",
+            "https://api.example.com",
+            true,
+            "Lax",
+            "https://api.example.com/gmail/connect/callback",
+            "https://api.example.com/auth/workos/callback",
+            "https://worker.example.com",
+            Some("https://worker.example.com"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("WEB_BASE_URL"));
+    }
+
+    #[test]
+    fn production_accepts_safe_runtime_values() {
+        assert!(
+            validate_production_runtime(
+                true,
+                "postgres",
+                "https://app.example.com",
+                "https://api.example.com",
+                true,
+                "Lax",
+                "https://api.example.com/gmail/connect/callback",
+                "https://api.example.com/auth/workos/callback",
+                "https://worker.example.com",
+                Some("https://worker.example.com"),
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn production_accepts_web_origin_oauth_callbacks_for_the_same_origin_proxy() {
+        assert!(
+            validate_production_runtime(
+                true,
+                "postgres",
+                "https://app.example.com",
+                "https://api.example.com",
+                true,
+                "Lax",
+                "https://app.example.com/gmail/connect/callback",
+                "https://app.example.com/auth/workos/callback",
+                "https://worker.example.com",
+                Some("https://worker.example.com"),
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn development_allows_defaults_for_local_runs() {
+        assert_eq!(
+            validate_secret_not_default(
+                "APP_SESSION_SECRET",
+                DEFAULT_SESSION_SECRET,
+                DEFAULT_SESSION_SECRET,
+                false,
+            )
+            .unwrap(),
+            DEFAULT_SESSION_SECRET
+        );
+    }
+
+    #[test]
+    fn privileged_account_matches_case_insensitively_and_ignores_empty() {
+        let mut config = test_app_config();
+        config.internal_full_access_emails =
+            vec!["catherine.trivino@west-ingenieria.cl".to_string()];
+        assert!(config.is_privileged_account("Catherine.Trivino@West-Ingenieria.CL"));
+        assert!(config.is_privileged_account("  catherine.trivino@west-ingenieria.cl  "));
+        assert!(!config.is_privileged_account("someone@else.com"));
+        assert!(!config.is_privileged_account(""));
     }
 }

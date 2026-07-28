@@ -37,7 +37,12 @@ impl ResendMailer {
             .clone()
             .ok_or_else(|| anyhow!("REPORT_FROM_EMAIL no está configurado"))?;
         Ok(Self {
-            http: reqwest::Client::new(),
+            // Mismos límites que los demás clientes salientes: un Resend
+            // colgado no debe detener un análisis programado.
+            http: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .build()?,
             api_key,
             from,
         })
@@ -61,10 +66,10 @@ impl ReportMailer for ResendMailer {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
         if !status.is_success() {
-            return Err(anyhow!("Resend rechazó el envío ({status}): {body}"));
+            return Err(anyhow!("Resend rechazó el envío ({status})"));
         }
         let parsed: ResendResponse = serde_json::from_str(&body)
-            .map_err(|error| anyhow!("Resend devolvió JSON inválido: {error}; body: {body}"))?;
+            .map_err(|error| anyhow!("Resend devolvió JSON inválido: {error}"))?;
         Ok(parsed.id)
     }
 }

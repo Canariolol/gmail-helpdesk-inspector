@@ -1,0 +1,272 @@
+/* ==========================================================================
+   Páginas públicas secundarias (pricing, nosotros, legales) + footer ampliado.
+   Reusa el contenedor .lp-focus (fondo cálido) y los tokens.
+   ========================================================================== */
+
+/* Enlaces centrales de la barra de navegación */
+.lp-focus-nav-links {
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+}
+
+/* Contenedor de las páginas secundarias */
+.lp-public {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: var(--space-6) var(--space-5) var(--space-7);
+  display: grid;
+  gap: var(--space-6);
+}
+
+.lp-public h1 {
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-size: clamp(1.9rem, 1.2rem + 2.4vw, 3rem);
+  letter-spacing: -0.025em;
+  color: var(--text-strong);
+}
+
+/* ---- Pricing ---- */
+.lp-pricing {
+  display: grid;
+  gap: var(--space-5);
+  justify-items: center;
+  text-align: center;
+}
+
+.lp-pricing-head {
+  display: grid;
+  gap: var(--space-2);
+  justify-items: center;
+}
+
+.lp-pricing-head p {
+  color: var(--text-muted);
+  font-size: var(--fs-md);
+}
+
+.lp-pricing .pricing-grid {
+  width: 100%;
+}
+
+.lp-pricing-state {
+  color: var(--text-muted);
+  font-weight: 700;
+}
+
+.lp-pricing-note {
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+  max-width: 56ch;
+}
+
+/* ---- Sobre nosotros ---- */
+.lp-about {
+  display: grid;
+  gap: var(--space-6);
+}
+
+.lp-about-head {
+  display: grid;
+  gap: var(--space-3);
+  max-width: 60ch;
+}
+
+.lp-about-head p {
+  color: var(--text-muted);
+  font-size: var(--fs-md);
+}
+
+.lp-about-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-4);
+}
+
+.lp-about-card {
+  display: grid;
+  gap: var(--space-2);
+  align-content: start;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
+  padding: var(--space-5);
+}
+
+.lp-about-icon {
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  background: var(--primary-soft);
+  color: var(--primary-strong);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.lp-about-card h3 {
+  font-size: var(--fs-md);
+  color: var(--text-strong);
+}
+
+.lp-about-card p {
+  color: var(--text-muted);
+  font-size: var(--fs-base);
+}
+
+.lp-about-cta {
+  display: grid;
+  justify-items: center;
+  gap: var(--space-4);
+  text-align: center;
+  padding: var(--space-6);
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+
+.lp-about-cta h2 {
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-size: clamp(1.5rem, 1.1rem + 1.6vw, 2.2rem);
+  color: var(--text-strong);
+}
+
+/* ---- Páginas legales ---- */
+.lp-legal {
+  display: grid;
+  gap: var(--space-5);
+  max-width: 760px;
+}
+
+.lp-legal-head {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.lp-legal-updated {
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+  font-weight: 700;
+}
+
+.lp-legal-draft {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  background: var(--chip-amber-bg);
+  color: var(--chip-amber-fg);
+  border-left: 3px solid var(--warn);
+  border-radius: var(--radius-md);
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--fs-sm);
+  font-weight: 700;
+}
+
+.lp-legal-intro {
+  color: var(--text);
+  font-size: var(--fs-md);
+}
+
+.lp-legal-body {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.lp-legal-body h2 {
+  font-size: var(--fs-md);
+  color: var(--text-strong);
+  margin-bottom: var(--space-1);
+}
+
+.lp-legal-body p {
+  color: var(--text-muted);
+  font-size: var(--fs-base);
+  line-height: 1.6;
+}
+
+/* ---- Footer ampliado ---- */
+.lp-public-footer {
+  border-top: 1px solid var(--border);
+  max-width: 1080px;
+  margin: var(--space-6) auto 0;
+  padding: var(--space-6) var(--space-5);
+  display: grid;
+  gap: var(--space-5);
+}
+
+.lp-public-footer-top {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-6);
+  justify-content: space-between;
+}
+
+.lp-public-footer-brand {
+  display: grid;
+  gap: var(--space-2);
+  max-width: 38ch;
+}
+
+.lp-public-footer-brand p {
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+
+.lp-public-footer-cols {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-7);
+}
+
+.lp-public-footer-col {
+  display: grid;
+  gap: var(--space-2);
+  align-content: start;
+}
+
+.lp-public-footer-col h4 {
+  font-size: var(--fs-sm);
+  font-weight: 800;
+  color: var(--text-strong);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.lp-public-footer-col a {
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  transition: color 150ms ease;
+}
+
+.lp-public-footer-col a:hover {
+  color: var(--primary-strong);
+}
+
+.lp-public-footer-bottom {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  justify-content: space-between;
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-4);
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+  font-weight: 700;
+}
+
+/* ---- Responsive ---- */
+@media (max-width: 860px) {
+  .lp-about-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 560px) {
+  .lp-focus-nav-links {
+    gap: var(--space-3);
+  }
+}

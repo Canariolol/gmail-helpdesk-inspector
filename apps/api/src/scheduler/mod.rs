@@ -3,7 +3,7 @@ pub mod window;
 
 use std::time::Duration;
 
-use chrono::{NaiveDate, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -11,9 +11,12 @@ use crate::{
     analysis::{AnalysisConfig, AnalysisMetrics, AnalysisRun, AnalysisStatus},
     auth::{
         decrypt_token, encrypt_token,
-        refresh::{RefreshError, refresh_google_access_token},
+        refresh::{RefreshError, refresh_access_token_for},
     },
+    billing::subscription_allows_access,
     http::{AppState, execute_analysis, mark_run_failed},
+    mailbox::mailbox_connection_is_active,
+    policies::{ReportMode, retention_expires_at, setup_state},
     report::{
         ReportMailer, ResendMailer,
         template::{ReviewItem, build_failure_email, build_report_email},
@@ -63,6 +66,15 @@ pub async fn run_scheduled_analysis(
         }]);
     };
     let configs = load_or_seed_configs(state).await?;
+    run_configs_for_window(state, mailer, configs, &window).await
+}
+
+pub async fn run_due_scheduled_analysis(
+    state: &AppState,
+    mailer: &dyn ReportMailer,
+    now_utc: DateTime<Utc>,
+) -> anyhow::Result<Vec<ScheduledOutcome>> {
+    let configs = load_or_seed_configs(state).await?;
     if configs.is_empty() {
         return Ok(vec![ScheduledOutcome::Skipped {
             user_email: None,
@@ -80,48 +92,95 @@ pub async fn run_scheduled_analysis(
             });
             continue;
         }
+        let Some(window) = window::due_window_for(now_utc, &config.timezone, &config.analysis_time)
+        else {
+            outcomes.push(ScheduledOutcome::Skipped {
+                user_email: Some(config.user_email),
+                reason: "fuera de horario programado".to_string(),
+            });
+            continue;
+        };
         outcomes.push(run_for_user(state, mailer, &config, &window).await);
     }
     Ok(outcomes)
 }
 
-/// Loop interno: despierta cada minuto y dispara una vez por día hábil desde
-/// las 08:00 de America/Santiago. La idempotencia real vive en ScheduleState,
-/// el memo en memoria solo evita relecturas de Firestore durante el día.
+async fn run_configs_for_window(
+    state: &AppState,
+    mailer: &dyn ReportMailer,
+    configs: Vec<ScheduleConfig>,
+    window: &AnalysisWindow,
+) -> anyhow::Result<Vec<ScheduledOutcome>> {
+    if configs.is_empty() {
+        return Ok(vec![ScheduledOutcome::Skipped {
+            user_email: None,
+            reason:
+                "sin configuración programada (scheduleConfigs vacío y sin SCHEDULE_USER_EMAIL)"
+                    .to_string(),
+        }]);
+    }
+    let mut outcomes = Vec::new();
+    for config in configs {
+        if !config.enabled {
+            outcomes.push(ScheduledOutcome::Skipped {
+                user_email: Some(config.user_email),
+                reason: "configuración deshabilitada".to_string(),
+            });
+            continue;
+        }
+        outcomes.push(run_for_user(state, mailer, &config, window).await);
+    }
+    Ok(outcomes)
+}
+
+/// Loop interno: despierta periódicamente y dispara una vez por día hábil desde
+/// la hora configurada. La idempotencia real vive en ScheduleState.
 pub fn spawn(state: AppState) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mailer = match ResendMailer::from_config(&state.config.report) {
             Ok(mailer) => mailer,
-            Err(error) => {
+            Err(_) => {
                 tracing::error!(
-                    ?error,
+                    operation = "scheduler_start",
                     "scheduler interno desactivado: mailer mal configurado"
                 );
                 return;
             }
         };
-        tracing::info!("scheduler interno activo (lunes a viernes 08:00 America/Santiago)");
-        let mut last_attempt_date: Option<NaiveDate> = None;
+        tracing::info!("scheduler interno activo (hora local configurable)");
         loop {
             tokio::time::sleep(POLL_INTERVAL).await;
-            let now_scl = Utc::now().with_timezone(&window::SCL);
-            if !window::is_fire_time(now_scl) {
-                continue;
-            }
-            let today = now_scl.date_naive();
-            if last_attempt_date == Some(today) {
-                continue;
-            }
-            match run_scheduled_analysis(&state, &mailer, today).await {
+            match run_due_scheduled_analysis(&state, &mailer, Utc::now()).await {
                 Ok(outcomes) => {
-                    let summary = serde_json::to_string(&outcomes).unwrap_or_default();
-                    tracing::info!(%summary, "tick del análisis programado completado");
-                    last_attempt_date = Some(today);
+                    if outcomes.iter().any(|outcome| {
+                        !matches!(
+                            outcome,
+                            ScheduledOutcome::Skipped { reason, .. }
+                                if reason == "fuera de horario programado"
+                        )
+                    }) {
+                        let completed = outcomes
+                            .iter()
+                            .filter(|outcome| matches!(outcome, ScheduledOutcome::Completed { .. }))
+                            .count();
+                        let failed = outcomes
+                            .iter()
+                            .filter(|outcome| matches!(outcome, ScheduledOutcome::Failed { .. }))
+                            .count();
+                        let skipped = outcomes.len() - completed - failed;
+                        tracing::info!(
+                            completed,
+                            failed,
+                            skipped,
+                            "tick del análisis programado completado"
+                        );
+                    }
                 }
-                Err(error) => {
-                    // Error duro antes de tocar correo/estado (p. ej. Firestore
-                    // caído): no memorizar el día para reintentar al minuto.
-                    tracing::error!(?error, "tick del análisis programado falló");
+                Err(_) => {
+                    tracing::error!(
+                        operation = "scheduler_tick",
+                        "tick del análisis programado falló"
+                    );
                 }
             }
         }
@@ -145,11 +204,15 @@ async fn load_or_seed_configs(state: &AppState) -> anyhow::Result<Vec<ScheduleCo
         ignored_domains: Vec::new(),
         ignored_keywords: Vec::new(),
         timezone: "America/Santiago".to_string(),
+        analysis_time: window::DEFAULT_ANALYSIS_TIME.to_string(),
         gmail_max_threads: state.config.scheduler.seed_gmail_max_threads,
         updated_at: Utc::now(),
     };
     state.storage.upsert_schedule_config(&seeded).await?;
-    tracing::info!(user_email = %seeded.user_email, "scheduleConfig sembrado desde variables de entorno");
+    tracing::info!(
+        operation = "scheduler_seed",
+        "scheduleConfig sembrado desde variables de entorno"
+    );
     Ok(vec![seeded])
 }
 
@@ -167,29 +230,42 @@ async fn run_for_user(
             };
         }
         Ok(None) => {}
-        Err(error) => {
+        Err(_) => {
             return ScheduledOutcome::Failed {
                 user_email: config.user_email.clone(),
-                error: format!("no se pudo registrar el estado del análisis: {error}"),
+                error: "scheduler_state_persist_failed".to_string(),
                 notice_sent: false,
             };
         }
     }
     match analyze_and_report(state, mailer, config, window).await {
         Ok(outcome) => outcome,
-        Err(error) => {
-            let message = error.to_string();
+        Err(_) => {
+            // Log ERROR dedicado: permite distinguir en Cloud Monitoring un
+            // fallo programado de uno manual, sin datos del correo.
+            tracing::error!(
+                operation = "scheduled_analysis",
+                "scheduled analysis failed"
+            );
+            let message = "scheduled_analysis_failed".to_string();
+            // El scheduler reintenta cada tick mientras la ventana siga fallando;
+            // el aviso, en cambio, se manda una sola vez por ventana.
+            let already_notified = notice_already_sent_for_window(state, config, window).await;
+            let notice_sent = if already_notified {
+                false
+            } else {
+                send_failure_notice(state, mailer, config, window, &message).await
+            };
             store_state(
                 state,
                 config,
                 window,
                 ScheduleRunStatus::Failed,
                 None,
-                false,
+                already_notified || notice_sent,
                 Some(message.clone()),
             )
             .await;
-            let notice_sent = send_failure_notice(state, mailer, config, window, &message).await;
             ScheduledOutcome::Failed {
                 user_email: config.user_email.clone(),
                 error: message,
@@ -199,49 +275,42 @@ async fn run_for_user(
     }
 }
 
-/// Devuelve Some(motivo) si la ventana ya está cubierta; si no, escribe el
-/// claim `Running`. Lectura-verificación-escritura sin transacción: suficiente
-/// para una instancia única; con múltiples instancias el hardening sería la
-/// precondición `currentDocument` de Firestore.
+/// Reserva atómicamente la ventana o devuelve por qué otra ejecución ya la
+/// cubrió. El backend toma un lock de fila (`SELECT … FOR UPDATE` dentro de la
+/// transacción del claim), por lo que dos instancias no pueden obtener el mismo
+/// claim sobre un `schedule_state` ya existente.
 async fn check_idempotency(
     state: &AppState,
     config: &ScheduleConfig,
     window: &AnalysisWindow,
 ) -> anyhow::Result<Option<String>> {
-    if let Some(existing) = state.storage.get_schedule_state(&config.user_email).await? {
-        let same_window = existing.window_date_from == window.date_from
-            && existing.window_date_to == window.date_to;
-        if same_window {
-            match existing.status {
-                ScheduleRunStatus::Completed => {
-                    return Ok(Some("ventana ya analizada".to_string()));
-                }
-                ScheduleRunStatus::Running
-                    if Utc::now() - existing.started_at
-                        < chrono::Duration::minutes(CLAIM_TTL_MINUTES) =>
-                {
-                    return Ok(Some("análisis en curso".to_string()));
-                }
-                _ => {}
-            }
-        }
-    }
     let now = Utc::now();
-    state
+    let claim = state
         .storage
-        .upsert_schedule_state(&ScheduleState {
-            user_email: config.user_email.clone(),
-            window_date_from: window.date_from.clone(),
-            window_date_to: window.date_to.clone(),
-            status: ScheduleRunStatus::Running,
-            run_id: None,
-            email_sent: false,
-            error_message: None,
-            started_at: now,
-            updated_at: now,
-        })
+        .claim_schedule_window(
+            &ScheduleState {
+                user_email: config.user_email.clone(),
+                window_date_from: window.date_from.clone(),
+                window_date_to: window.date_to.clone(),
+                status: ScheduleRunStatus::Running,
+                run_id: None,
+                email_sent: false,
+                error_message: None,
+                started_at: now,
+                updated_at: now,
+            },
+            now - chrono::Duration::minutes(CLAIM_TTL_MINUTES),
+        )
         .await?;
-    Ok(None)
+    Ok(match claim {
+        crate::storage::ScheduleWindowClaim::Claimed => None,
+        crate::storage::ScheduleWindowClaim::AlreadyCompleted => {
+            Some("ventana ya analizada".to_string())
+        }
+        crate::storage::ScheduleWindowClaim::AlreadyRunning => {
+            Some("análisis en curso".to_string())
+        }
+    })
 }
 
 async fn analyze_and_report(
@@ -267,7 +336,7 @@ async fn analyze_and_report(
         .get_analysis_run(&run.id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("el run programado desapareció del storage"))?;
-    let review_items = collect_review_items(state, &run.id).await?;
+    let review_items = collect_review_items_for_report(state, &run).await?;
     let email = build_report_email(&run, &review_items, &state.config.web_base_url);
 
     let recipients = recipients_for(state, config);
@@ -283,9 +352,9 @@ async fn analyze_and_report(
             tracing::info!(%provider_id, run_id = %run.id, "reporte programado enviado");
             (true, None)
         }
-        Err(error) => {
-            tracing::error!(?error, run_id = %run.id, "no se pudo enviar el reporte programado");
-            (false, Some(format!("el envío del reporte falló: {error}")))
+        Err(_) => {
+            tracing::error!(operation = "report_delivery", run_id = %run.id, "no se pudo enviar el reporte programado");
+            (false, Some("report_delivery_failed".to_string()))
         }
     };
     // El análisis ya corrió: el estado queda Completed aunque el correo falle,
@@ -308,31 +377,41 @@ async fn analyze_and_report(
 }
 
 async fn fresh_access_token(state: &AppState, config: &ScheduleConfig) -> anyhow::Result<String> {
-    let session = state
+    let connection = state
         .storage
-        .find_latest_session_with_refresh_token(&config.user_email)
+        .get_gmail_connection(&config.user_email)
         .await?
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "no hay una sesión con refresh token para {}; inicia sesión de nuevo en la aplicación",
+                "no hay una conexión de casilla activa para {}; vuelve a conectarla",
                 config.user_email
             )
         })?;
-    let encrypted_refresh = session
-        .refresh_token_encrypted
-        .clone()
-        .expect("session filtered by refresh token presence");
+    if !mailbox_connection_is_active(Some(&connection)) {
+        return Err(anyhow::anyhow!(
+            "la conexión de la casilla está revocada; vuelve a conectarla"
+        ));
+    }
+    let encrypted_refresh = connection.refresh_token_encrypted.clone().ok_or_else(|| {
+        anyhow::anyhow!("la conexión de la casilla no tiene refresh token; vuelve a conectarla")
+    })?;
     let refresh_token = decrypt_token(&encrypted_refresh, &state.config.encryption_key)?;
-    let token = refresh_google_access_token(&state.http, &state.config.google, &refresh_token)
-        .await
-        .map_err(|error| match error {
-            RefreshError::InvalidGrant => anyhow::anyhow!(
-                "Google rechazó el refresh token; vuelve a iniciar sesión en la aplicación para renovar el acceso a Gmail"
-            ),
-            RefreshError::Other(inner) => inner,
-        })?;
+    let token = refresh_access_token_for(
+        &state.http,
+        connection.provider,
+        &state.config.google,
+        state.config.microsoft.as_ref(),
+        &refresh_token,
+    )
+    .await
+    .map_err(|error| match error {
+        RefreshError::InvalidGrant => anyhow::anyhow!(
+            "el proveedor rechazó el refresh token; vuelve a conectar la casilla para renovar el acceso"
+        ),
+        RefreshError::Other(inner) => inner,
+    })?;
 
-    let mut updated = session;
+    let mut updated = connection.clone();
     updated.access_token_encrypted =
         encrypt_token(&token.access_token, &state.config.encryption_key)?;
     if let Some(rotated) = &token.refresh_token {
@@ -340,7 +419,16 @@ async fn fresh_access_token(state: &AppState, config: &ScheduleConfig) -> anyhow
             Some(encrypt_token(rotated, &state.config.encryption_key)?);
     }
     updated.updated_at = Utc::now();
-    state.storage.upsert_user_session(&updated).await?;
+    if state
+        .storage
+        .refresh_gmail_connection(&connection, &updated)
+        .await?
+        != crate::storage::MailboxConnectionRefresh::Updated
+    {
+        return Err(anyhow::anyhow!(
+            "la conexión de la casilla cambió durante el refresh; se canceló el análisis programado"
+        ));
+    }
     Ok(token.access_token)
 }
 
@@ -349,9 +437,93 @@ async fn create_scheduled_run(
     config: &ScheduleConfig,
     window: &AnalysisWindow,
 ) -> anyhow::Result<AnalysisRun> {
+    if let Some(bundle) = state
+        .storage
+        .get_org_config_for_user(&config.user_email)
+        .await?
+    {
+        if !bundle.draft.schedule_report_policy.scheduler_enabled {
+            return Err(anyhow::anyhow!(
+                "scheduler deshabilitado en la política de organización"
+            ));
+        }
+        let current_setup = setup_state(&bundle.draft);
+        let unrestricted = state.config.is_privileged_account(&config.user_email);
+        if !current_setup.ready_for_analysis && !unrestricted {
+            return Err(anyhow::anyhow!(
+                "configuración incompleta para análisis programado: {}",
+                current_setup.missing.join(", ")
+            ));
+        }
+        if state.config.billing.enforcement_enabled && !unrestricted {
+            let subscription = state
+                .storage
+                .get_subscription_for_org(&bundle.org.id)
+                .await?;
+            if !subscription_allows_access(subscription.as_ref(), Utc::now()) {
+                return Err(anyhow::anyhow!(
+                    "subscription_required: plan activo o trial vigente requerido para scheduler"
+                ));
+            }
+        }
+        let snapshot = bundle.policy_version.snapshot.clone();
+        let analysis = &snapshot.analysis_policy;
+        let now = Utc::now();
+        let run = AnalysisRun {
+            id: Uuid::new_v4().to_string(),
+            user_email: config.user_email.clone(),
+            org_id: Some(bundle.org.id),
+            mailbox_id: Some(snapshot.mailbox.id.clone()),
+            trigger_type: Some(crate::analysis::TriggerType::Scheduled),
+            policy_version_id: Some(bundle.policy_version.id),
+            policy_hash: Some(bundle.policy_version.policy_hash),
+            policy_snapshot: Some(snapshot.clone()),
+            gmail_scope_snapshot: snapshot.mailbox.gmail_scope_snapshot.clone(),
+            retention_expires_at: Some(retention_expires_at(now, &snapshot)),
+            data_minimization_mode: Some("metadata_snippets_excerpts_only".to_string()),
+            config: AnalysisConfig {
+                date_from: window.date_from.clone(),
+                date_to: window.date_to.clone(),
+                time_from: analysis.default_time_from.clone(),
+                time_to: analysis.default_time_to.clone(),
+                timezone: analysis.timezone.clone(),
+                internal_domains: analysis.internal_domains.clone(),
+                ignored_senders: analysis.ignored_senders.clone(),
+                ignored_domains: analysis.ignored_domains.clone(),
+                ignored_keywords: analysis.ignored_keywords.clone(),
+                include_labels: analysis.include_labels.clone(),
+                exclude_labels: analysis.exclude_labels.clone(),
+            },
+            status: AnalysisStatus::Running,
+            progress_message: "Análisis programado iniciando".to_string(),
+            processed_threads: 0,
+            total_candidate_threads: 0,
+            metrics: AnalysisMetrics::default(),
+            created_at: now,
+            completed_at: None,
+            error_message: None,
+        };
+        state.storage.create_analysis_run(&run).await?;
+        tracing::info!(
+            operation = "scheduled_analysis_run_created",
+            run_id = %run.id,
+            "scheduled analysis run created"
+        );
+        return Ok(run);
+    }
+
     let run = AnalysisRun {
         id: Uuid::new_v4().to_string(),
         user_email: config.user_email.clone(),
+        org_id: None,
+        mailbox_id: None,
+        trigger_type: Some(crate::analysis::TriggerType::Scheduled),
+        policy_version_id: None,
+        policy_hash: None,
+        policy_snapshot: None,
+        gmail_scope_snapshot: vec![],
+        retention_expires_at: None,
+        data_minimization_mode: Some("metadata_snippets_excerpts_only".to_string()),
         config: AnalysisConfig {
             date_from: window.date_from.clone(),
             date_to: window.date_to.clone(),
@@ -362,6 +534,8 @@ async fn create_scheduled_run(
             ignored_senders: config.ignored_senders.clone(),
             ignored_domains: config.ignored_domains.clone(),
             ignored_keywords: config.ignored_keywords.clone(),
+            include_labels: vec![],
+            exclude_labels: vec![],
         },
         status: AnalysisStatus::Running,
         progress_message: "Análisis programado iniciando".to_string(),
@@ -373,10 +547,40 @@ async fn create_scheduled_run(
         error_message: None,
     };
     state.storage.create_analysis_run(&run).await?;
+    tracing::info!(
+        operation = "scheduled_analysis_run_created",
+        run_id = %run.id,
+        "scheduled analysis run created"
+    );
     Ok(run)
 }
 
-async fn collect_review_items(state: &AppState, run_id: &str) -> anyhow::Result<Vec<ReviewItem>> {
+async fn collect_review_items_for_report(
+    state: &AppState,
+    run: &AnalysisRun,
+) -> anyhow::Result<Vec<ReviewItem>> {
+    let Some(snapshot) = &run.policy_snapshot else {
+        return collect_review_items(state, &run.id, true, true).await;
+    };
+    let content = &snapshot.schedule_report_policy.report_content;
+    if content.mode == ReportMode::MetricsOnly {
+        return Ok(Vec::new());
+    }
+    collect_review_items(
+        state,
+        &run.id,
+        content.include_subjects,
+        content.include_senders,
+    )
+    .await
+}
+
+async fn collect_review_items(
+    state: &AppState,
+    run_id: &str,
+    include_subjects: bool,
+    include_senders: bool,
+) -> anyhow::Result<Vec<ReviewItem>> {
     let threads = state.storage.list_threads(run_id).await?;
     let mut items = Vec::new();
     for thread in threads
@@ -390,8 +594,16 @@ async fn collect_review_items(state: &AppState, run_id: &str) -> anyhow::Result<
             .map(|message| message.from_email.clone())
             .unwrap_or_default();
         items.push(ReviewItem {
-            subject: thread.subject,
-            from_email,
+            subject: if include_subjects {
+                thread.subject
+            } else {
+                "Asunto oculto por política de reporte".to_string()
+            },
+            from_email: if include_senders {
+                from_email
+            } else {
+                "Remitente oculto por política de reporte".to_string()
+            },
             reason: thread
                 .reasons
                 .last()
@@ -407,6 +619,26 @@ fn recipients_for(state: &AppState, config: &ScheduleConfig) -> Vec<String> {
         state.config.report.to_emails.clone()
     } else {
         config.recipients.clone()
+    }
+}
+
+/// `email_sent` sobrevive al claim dentro de la misma ventana, así que sirve de
+/// marca de "ya se avisó por esta ventana" entre reintentos.
+async fn notice_already_sent_for_window(
+    state: &AppState,
+    config: &ScheduleConfig,
+    window: &AnalysisWindow,
+) -> bool {
+    match state.storage.get_schedule_state(&config.user_email).await {
+        Ok(Some(current)) => {
+            current.email_sent
+                && current.window_date_from == window.date_from
+                && current.window_date_to == window.date_to
+        }
+        // Sin lectura confiable preferimos avisar: perder el aviso de un fallo
+        // es peor que repetirlo.
+        Ok(None) => false,
+        Err(_) => false,
     }
 }
 
@@ -429,8 +661,11 @@ async fn send_failure_notice(
     );
     match mailer.send(&recipients, &email.subject, &email.html).await {
         Ok(_) => true,
-        Err(error) => {
-            tracing::error!(?error, "no se pudo enviar el aviso de fallo");
+        Err(_) => {
+            tracing::error!(
+                operation = "failure_notice",
+                "no se pudo enviar el aviso de fallo"
+            );
             false
         }
     }
@@ -469,9 +704,9 @@ async fn store_state(
             updated_at: now,
         })
         .await;
-    if let Err(error) = result {
+    if result.is_err() {
         tracing::error!(
-            ?error,
+            operation = "scheduler_state_persist",
             "no se pudo guardar el estado del análisis programado"
         );
     }
@@ -489,6 +724,7 @@ mod tests {
     use crate::{
         auth::UserSession,
         config::{AppConfig, test_app_config},
+        policies::{ReportMode, policy_version_from_draft, provision_default_config},
         storage::{MemoryStorage, StorageRepository},
     };
 
@@ -511,6 +747,7 @@ mod tests {
     fn test_config(seed_email: Option<&str>) -> AppConfig {
         let mut config = test_app_config();
         config.scheduler.seed_user_email = seed_email.map(ToOwned::to_owned);
+        config.billing.enforcement_enabled = false;
         config
     }
 
@@ -530,6 +767,7 @@ mod tests {
             ignored_domains: vec![],
             ignored_keywords: vec![],
             timezone: "America/Santiago".to_string(),
+            analysis_time: window::DEFAULT_ANALYSIS_TIME.to_string(),
             gmail_max_threads: None,
             updated_at: Utc::now(),
         }
@@ -560,6 +798,56 @@ mod tests {
         NaiveDate::parse_from_str(value, "%Y-%m-%d").unwrap()
     }
 
+    fn thread(id: &str, run_id: &str) -> crate::analysis::EmailThread {
+        let now = Utc::now();
+        crate::analysis::EmailThread {
+            id: id.to_string(),
+            analysis_run_id: run_id.to_string(),
+            thread_id: format!("gmail-{id}"),
+            subject: "Ayuda sensible".to_string(),
+            normalized_subject: "ayuda sensible".to_string(),
+            classification: crate::analysis::Classification::Ambiguous,
+            classification_source: crate::analysis::ClassificationSource::Rules,
+            classification_confidence: 0.5,
+            is_valid_client_request: true,
+            is_answered: false,
+            first_message_at: Some(now),
+            first_client_message_id: Some("msg-a".to_string()),
+            first_internal_reply_message_id: None,
+            last_internal_message_id: None,
+            first_client_message_at: Some(now),
+            first_internal_reply_at: None,
+            last_internal_message_at: None,
+            response_time_minutes: None,
+            resolution_time_minutes: None,
+            manual_review_required: true,
+            manual_override_applied: false,
+            reasons: vec!["Confianza baja".to_string()],
+            notes: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn message(id: &str, from: &str) -> crate::analysis::EmailMessage {
+        crate::analysis::EmailMessage {
+            id: id.to_string(),
+            message_id: format!("gmail-{id}"),
+            from_email: from.to_string(),
+            from_name: None,
+            to_emails: vec!["help@x.cl".to_string()],
+            cc_emails: vec![],
+            date: Utc::now(),
+            subject: "Ayuda sensible".to_string(),
+            snippet: "Necesito ayuda".to_string(),
+            headers: serde_json::json!({}),
+            is_internal: false,
+            is_external: true,
+            is_automated: false,
+            body_text: None,
+        }
+    }
+
     fn skip_reason(outcomes: &[ScheduledOutcome]) -> &str {
         match &outcomes[0] {
             ScheduledOutcome::Skipped { reason, .. } => reason,
@@ -588,6 +876,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn privileged_account_can_create_scheduled_run_without_subscription() {
+        let email = "alice@example.com";
+        let storage = Arc::new(MemoryStorage::default());
+        let mut config = test_config(None);
+        config.billing.enforcement_enabled = true;
+        config.internal_full_access_emails = vec![email.to_string()];
+        let state = AppState::new(config, storage.clone());
+        let mut bundle = provision_default_config(email, Utc::now());
+        bundle.draft.schedule_report_policy.scheduler_enabled = true;
+        bundle.draft.schedule_report_policy.report_recipients = vec![email.to_string()];
+        bundle.draft.analysis_policy.valid_request_criteria =
+            vec!["Solicitudes de soporte".to_string()];
+        bundle.policy_version =
+            policy_version_from_draft(&bundle.mailbox, &bundle.draft, 2, email, Utc::now());
+        storage.upsert_org_config(&bundle).await.unwrap();
+
+        let run = create_scheduled_run(
+            &state,
+            &schedule_config(email),
+            &AnalysisWindow {
+                date_from: "2026-07-22".to_string(),
+                date_to: "2026-07-22".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(run.user_email, email);
+        assert_eq!(run.org_id.as_deref(), Some(bundle.org.id.as_str()));
+    }
+
+    #[tokio::test]
     async fn seed_env_creates_config_and_missing_session_fails_with_notice() {
         let (state, storage) = app_state(Some("a@x.cl"));
         let mailer = FakeMailer::default();
@@ -607,7 +927,7 @@ mod tests {
                 notice_sent,
             } => {
                 assert_eq!(user_email, "a@x.cl");
-                assert!(error.contains("refresh token"));
+                assert_eq!(error, "scheduled_analysis_failed");
                 assert!(notice_sent);
             }
             other => panic!("expected Failed, got {other:?}"),
@@ -622,6 +942,35 @@ mod tests {
             .unwrap()
             .expect("state expected");
         assert_eq!(saved.status, ScheduleRunStatus::Failed);
+        assert_eq!(
+            saved.error_message.as_deref(),
+            Some("scheduled_analysis_failed")
+        );
+    }
+
+    #[tokio::test]
+    async fn persistent_failure_notifies_only_once_per_window() {
+        let (state, storage) = app_state(Some("a@x.cl"));
+        let mailer = FakeMailer::default();
+
+        // El scheduler despierta cada minuto: sin el guard, cada tick sobre la
+        // misma ventana rota mandaba otro aviso.
+        for _ in 0..3 {
+            let outcomes = run_scheduled_analysis(&state, &mailer, date("2026-06-12"))
+                .await
+                .unwrap();
+            assert!(matches!(outcomes[0], ScheduledOutcome::Failed { .. }));
+        }
+
+        assert_eq!(mailer.sent.lock().await.len(), 1);
+        // El reintento sigue vivo: el estado queda Failed y reclamable.
+        let saved = storage
+            .get_schedule_state("a@x.cl")
+            .await
+            .unwrap()
+            .expect("state expected");
+        assert_eq!(saved.status, ScheduleRunStatus::Failed);
+        assert!(saved.email_sent);
     }
 
     #[tokio::test]
@@ -691,6 +1040,217 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_claims_only_allow_one_scheduled_run() {
+        let (state, _) = app_state(None);
+        let config = schedule_config("a@x.cl");
+        let window = AnalysisWindow {
+            date_from: "2026-06-11".to_string(),
+            date_to: "2026-06-11".to_string(),
+        };
+
+        let (first, second) = tokio::join!(
+            check_idempotency(&state, &config, &window),
+            check_idempotency(&state, &config, &window),
+        );
+        let outcomes = [first.unwrap(), second.unwrap()];
+        assert_eq!(
+            outcomes.iter().filter(|outcome| outcome.is_none()).count(),
+            1
+        );
+        assert!(
+            outcomes
+                .iter()
+                .any(|outcome| { outcome.as_deref() == Some("análisis en curso") })
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_window_never_repeats_even_for_privileged_account() {
+        let (mut state, storage) = app_state(None);
+        let config = schedule_config("tester@example.com");
+        state.config.internal_full_access_emails = vec![config.user_email.clone()];
+        let window = AnalysisWindow {
+            date_from: "2026-06-11".to_string(),
+            date_to: "2026-06-11".to_string(),
+        };
+        storage
+            .upsert_schedule_state(&schedule_state(
+                &config.user_email,
+                &window.date_from,
+                &window.date_to,
+                ScheduleRunStatus::Completed,
+                // Más de una hora atrás: el override anterior habría permitido
+                // aquí una segunda corrida (y un segundo correo).
+                70,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            check_idempotency(&state, &config, &window)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("ventana ya analizada")
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduled_policy_run_uses_current_snapshot() {
+        let (state, storage) = app_state(None);
+        let mut bundle = provision_default_config("a@x.cl", Utc::now());
+        bundle.draft.analysis_policy.valid_request_criteria =
+            vec!["Clientes externos solicitan soporte".to_string()];
+        bundle.draft.analysis_policy.default_time_from = "08:30".to_string();
+        bundle.draft.analysis_policy.default_time_to = "18:15".to_string();
+        bundle.draft.schedule_report_policy.scheduler_enabled = true;
+        bundle.draft.schedule_report_policy.report_recipients = vec!["ops@x.cl".to_string()];
+        bundle.policy_version =
+            policy_version_from_draft(&bundle.mailbox, &bundle.draft, 2, "a@x.cl", Utc::now());
+        storage.upsert_org_config(&bundle).await.unwrap();
+
+        let run = create_scheduled_run(
+            &state,
+            &schedule_config("a@x.cl"),
+            &AnalysisWindow {
+                date_from: "2026-06-11".to_string(),
+                date_to: "2026-06-11".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(run.org_id, Some(bundle.org.id));
+        assert_eq!(run.policy_version_id, Some(bundle.policy_version.id));
+        assert!(run.policy_snapshot.is_some());
+        assert_eq!(run.config.time_from, "08:30");
+        assert_eq!(run.config.time_to, "18:15");
+        assert_eq!(run.config.internal_domains, vec!["x.cl"]);
+        assert!(run.retention_expires_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn scheduled_policy_report_respects_metrics_only_mode() {
+        let (state, storage) = app_state(None);
+        let mut run = AnalysisRun {
+            id: "run-policy".to_string(),
+            user_email: "a@x.cl".to_string(),
+            org_id: None,
+            mailbox_id: None,
+            trigger_type: Some(crate::analysis::TriggerType::Scheduled),
+            policy_version_id: None,
+            policy_hash: None,
+            policy_snapshot: None,
+            gmail_scope_snapshot: vec![],
+            retention_expires_at: None,
+            data_minimization_mode: None,
+            config: AnalysisConfig {
+                date_from: "2026-06-11".to_string(),
+                date_to: "2026-06-11".to_string(),
+                time_from: "00:00".to_string(),
+                time_to: "23:59".to_string(),
+                timezone: "America/Santiago".to_string(),
+                internal_domains: vec!["x.cl".to_string()],
+                ignored_senders: vec![],
+                ignored_domains: vec![],
+                ignored_keywords: vec![],
+                include_labels: vec![],
+                exclude_labels: vec![],
+            },
+            status: AnalysisStatus::Completed,
+            progress_message: String::new(),
+            processed_threads: 1,
+            total_candidate_threads: 1,
+            metrics: AnalysisMetrics::default(),
+            created_at: Utc::now(),
+            completed_at: Some(Utc::now()),
+            error_message: None,
+        };
+        let bundle = provision_default_config("a@x.cl", Utc::now());
+        run.policy_snapshot = Some(bundle.policy_version.snapshot);
+        storage.create_analysis_run(&run).await.unwrap();
+        storage
+            .upsert_thread(
+                &thread("thread-policy", "run-policy"),
+                &[message("msg-policy", "cliente@example.com")],
+            )
+            .await
+            .unwrap();
+
+        let items = collect_review_items_for_report(&state, &run).await.unwrap();
+        assert!(items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn scheduled_policy_report_redacts_subjects_and_senders_when_disabled() {
+        let (state, storage) = app_state(None);
+        let mut bundle = provision_default_config("a@x.cl", Utc::now());
+        bundle.draft.schedule_report_policy.report_content.mode = ReportMode::MetricsAndReviewItems;
+        bundle
+            .draft
+            .schedule_report_policy
+            .report_content
+            .include_subjects = false;
+        bundle
+            .draft
+            .schedule_report_policy
+            .report_content
+            .include_senders = false;
+        bundle.policy_version =
+            policy_version_from_draft(&bundle.mailbox, &bundle.draft, 2, "a@x.cl", Utc::now());
+        let run = AnalysisRun {
+            id: "run-redacted".to_string(),
+            user_email: "a@x.cl".to_string(),
+            org_id: Some(bundle.org.id.clone()),
+            mailbox_id: Some(bundle.mailbox.id.clone()),
+            trigger_type: Some(crate::analysis::TriggerType::Scheduled),
+            policy_version_id: Some(bundle.policy_version.id.clone()),
+            policy_hash: Some(bundle.policy_version.policy_hash.clone()),
+            policy_snapshot: Some(bundle.policy_version.snapshot.clone()),
+            gmail_scope_snapshot: bundle.mailbox.gmail_scope_snapshot.clone(),
+            retention_expires_at: None,
+            data_minimization_mode: None,
+            config: AnalysisConfig {
+                date_from: "2026-06-11".to_string(),
+                date_to: "2026-06-11".to_string(),
+                time_from: "00:00".to_string(),
+                time_to: "23:59".to_string(),
+                timezone: "America/Santiago".to_string(),
+                internal_domains: vec!["x.cl".to_string()],
+                ignored_senders: vec![],
+                ignored_domains: vec![],
+                ignored_keywords: vec![],
+                include_labels: vec![],
+                exclude_labels: vec![],
+            },
+            status: AnalysisStatus::Completed,
+            progress_message: String::new(),
+            processed_threads: 1,
+            total_candidate_threads: 1,
+            metrics: AnalysisMetrics::default(),
+            created_at: Utc::now(),
+            completed_at: Some(Utc::now()),
+            error_message: None,
+        };
+        storage.create_analysis_run(&run).await.unwrap();
+        storage
+            .upsert_thread(
+                &thread("thread-redacted", "run-redacted"),
+                &[message("msg-redacted", "cliente@example.com")],
+            )
+            .await
+            .unwrap();
+
+        let items = collect_review_items_for_report(&state, &run).await.unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].subject, "Asunto oculto por política de reporte");
+        assert_eq!(
+            items[0].from_email,
+            "Remitente oculto por política de reporte"
+        );
+    }
+
+    #[tokio::test]
     async fn disabled_config_is_skipped() {
         let (state, storage) = app_state(None);
         let mut config = schedule_config("a@x.cl");
@@ -714,9 +1274,16 @@ mod tests {
         storage
             .upsert_user_session(&UserSession {
                 id: "s1".to_string(),
+                workos_user_id: Some("workos-s1".to_string()),
+                workos_session_id: None,
                 google_account_email: "a@x.cl".to_string(),
+                gmail_account_email: Some("a@x.cl".to_string()),
                 access_token_encrypted: "x".to_string(),
                 refresh_token_encrypted: None,
+                gmail_access_token_encrypted: None,
+                gmail_refresh_token_encrypted: None,
+                expires_at: None,
+                revoked_at: None,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             })

@@ -1,5 +1,30 @@
 # TLDR Redeploy:
 
+## Revisión candidata sin tráfico
+
+Antes de promocionar una imagen, crea una revisión aislada y etiquetada:
+
+```bash
+scripts/redeploy-gcp.sh --no-traffic api
+```
+
+El script conserva el tráfico existente, etiqueta la nueva revisión como
+`candidate` e imprime su URL directa. Con `all`, la web candidata proxya a la
+API candidata, no a la API que sigue recibiendo tráfico. Para API, prueba al
+menos:
+
+```bash
+curl -fsS "https://candidate---<api-service-identifier>.run.app/health"
+```
+
+No promociones tráfico hasta completar los smoke tests. Cloud Run permite usar
+un tag para probar una revisión que no recibe tráfico de usuarios.
+
+`redeploy-gcp.sh` etiqueta las imágenes con los primeros 12 caracteres del
+commit actual y exige un árbol Git limpio, para que ese tag corresponda al
+artefacto construido. Para reconstruir desde un tag explícito, exporta
+`IMAGE_TAG` antes de ejecutarlo.
+
 ## Prep Variables (puede ser todo junto)
 
 export GCP_PROJECT_ID="$(gcloud config get-value project 2>/dev/null)"
@@ -9,36 +34,48 @@ export API_SERVICE="ghmi-api"
 export WORKER_SERVICE="ghmi-ai-worker"
 export WEB_SERVICE="ghmi-web"
 export IMAGE_BASE="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${ARTIFACT_REPO}"
+export IMAGE_TAG="${IMAGE_TAG:-$(git rev-parse --short=12 HEAD)}"
 
-printf 'GCP_PROJECT_ID=%s\nGCP_REGION=%s\nAPI_SERVICE=%s\nIMAGE_BASE=%s\n' \
-  "$GCP_PROJECT_ID" "$GCP_REGION" "$API_SERVICE" "$IMAGE_BASE"
+printf 'GCP_PROJECT_ID=%s\nGCP_REGION=%s\nAPI_SERVICE=%s\nIMAGE_BASE=%s\nIMAGE_TAG=%s\n' \
+  "$GCP_PROJECT_ID" "$GCP_REGION" "$API_SERVICE" "$IMAGE_BASE" "$IMAGE_TAG"
 
 : "${GCP_PROJECT_ID:?Falta GCP_PROJECT_ID}"
 : "${IMAGE_BASE:?Falta IMAGE_BASE}"
+: "${IMAGE_TAG:?Falta IMAGE_TAG}"
 : "${API_SERVICE:?Falta API_SERVICE}"
 
 ## API
-docker build -f apps/api/Dockerfile -t "${IMAGE_BASE}/api:latest" .
-docker push "${IMAGE_BASE}/api:latest"
+docker build -f apps/api/Dockerfile -t "${IMAGE_BASE}/api:${IMAGE_TAG}" .
+docker push "${IMAGE_BASE}/api:${IMAGE_TAG}"
 gcloud run deploy "$API_SERVICE" \
-  --image "${IMAGE_BASE}/api:latest" \
+  --image "${IMAGE_BASE}/api:${IMAGE_TAG}" \
   --region "$GCP_REGION"
 
 ## AI worker, solo si cambió apps/ai-worker
-docker build -f apps/ai-worker/Dockerfile -t "${IMAGE_BASE}/ai-worker:latest" .
-docker push "${IMAGE_BASE}/ai-worker:latest"
+docker build -f apps/ai-worker/Dockerfile -t "${IMAGE_BASE}/ai-worker:${IMAGE_TAG}" .
+docker push "${IMAGE_BASE}/ai-worker:${IMAGE_TAG}"
 gcloud run deploy "$WORKER_SERVICE" \
-  --image "${IMAGE_BASE}/ai-worker:latest" \
+  --image "${IMAGE_BASE}/ai-worker:${IMAGE_TAG}" \
   --region "$GCP_REGION"
 
 ## Web, solo si cambió apps/web
 docker build -f apps/web/Dockerfile \
   --build-arg "VITE_API_BASE_URL=" \
-  -t "${IMAGE_BASE}/web:latest" .
-docker push "${IMAGE_BASE}/web:latest"
+  --build-arg "VITE_MERCADOPAGO_PUBLIC_KEY=${VITE_MERCADOPAGO_PUBLIC_KEY}" \
+  -t "${IMAGE_BASE}/web:${IMAGE_TAG}" .
+docker push "${IMAGE_BASE}/web:${IMAGE_TAG}"
 gcloud run deploy "$WEB_SERVICE" \
-  --image "${IMAGE_BASE}/web:latest" \
+  --image "${IMAGE_BASE}/web:${IMAGE_TAG}" \
   --region "$GCP_REGION"
+
+## Si agrego env vars
+
+### CORRECTO: agrega/modifica sin borrar el resto (WorkOS, Google, etc. quedan intactos)
+gcloud run services update ghmi-api --region us-central1 \
+--update-env-vars "NUEVA_VAR=valor" --update-secrets "NUEVA=secreto:latest"
+
+### PELIGRO: --set-env-vars REEMPLAZA TODO el entorno → borra WorkOS y todo lo demás
+
 
 
 # Despliegue en GCP
@@ -46,7 +83,7 @@ gcloud run deploy "$WEB_SERVICE" \
 Este runbook despliega tres servicios en Cloud Run:
 
 - `ghmi-ai-worker`: privado, recibe llamadas solo desde la API.
-- `ghmi-api`: publico, maneja OAuth Google, Gmail, Firestore y sesiones.
+- `ghmi-api`: publico, maneja OAuth Google, Gmail, PostgreSQL (Supabase) y sesiones.
 - `ghmi-web`: publico, sirve el frontend estatico.
 
 ## 1. Variables locales
@@ -78,7 +115,6 @@ gcloud config set project "$GCP_PROJECT_ID"
 gcloud services enable \
   artifactregistry.googleapis.com \
   run.googleapis.com \
-  firestore.googleapis.com \
   secretmanager.googleapis.com
 
 gcloud artifacts repositories create "$ARTIFACT_REPO" \
@@ -90,15 +126,14 @@ gcloud iam service-accounts create ghmi-runtime \
   --display-name="Gmail Helpdesk Inspector runtime"
 ```
 
-Si el proyecto aun no tiene base Firestore, creala como Firestore Native en la consola de Google Cloud antes del primer analisis.
+La base de datos es PostgreSQL en Supabase, fuera de GCP: no hay que crear nada
+en Google Cloud para persistencia. La cadena de conexion vive en el secreto
+`mira-postgres-url` y las migraciones se aplican con
+`scripts/apply-supabase-migrations.sh`.
 
 Permisos minimos del runtime:
 
 ```bash
-gcloud projects add-iam-policy-binding "$GCP_PROJECT_ID" \
-  --member="serviceAccount:${RUN_SA}" \
-  --role="roles/datastore.user"
-
 gcloud projects add-iam-policy-binding "$GCP_PROJECT_ID" \
   --member="serviceAccount:${RUN_SA}" \
   --role="roles/secretmanager.secretAccessor"
@@ -150,23 +185,24 @@ gcloud secrets list --filter='name:(google-client-secret OR app-encryption-key O
 
 ```bash
 export IMAGE_BASE="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${ARTIFACT_REPO}"
+export IMAGE_TAG="${IMAGE_TAG:-$(git rev-parse --short=12 HEAD)}"
 
 gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev"
 
 docker build -f apps/ai-worker/Dockerfile \
-  -t "${IMAGE_BASE}/ai-worker:latest" .
-docker push "${IMAGE_BASE}/ai-worker:latest"
+  -t "${IMAGE_BASE}/ai-worker:${IMAGE_TAG}" .
+docker push "${IMAGE_BASE}/ai-worker:${IMAGE_TAG}"
 
 docker build -f apps/api/Dockerfile \
-  -t "${IMAGE_BASE}/api:latest" .
-docker push "${IMAGE_BASE}/api:latest"
+  -t "${IMAGE_BASE}/api:${IMAGE_TAG}" .
+docker push "${IMAGE_BASE}/api:${IMAGE_TAG}"
 ```
 
 ## 5. Desplegar worker privado
 
 ```bash
 gcloud run deploy "$WORKER_SERVICE" \
-  --image "${IMAGE_BASE}/ai-worker:latest" \
+  --image "${IMAGE_BASE}/ai-worker:${IMAGE_TAG}" \
   --region "$GCP_REGION" \
   --service-account "$RUN_SA" \
   --no-allow-unauthenticated \
@@ -191,15 +227,15 @@ Primer despliegue para obtener URL:
 
 ```bash
 gcloud run deploy "$API_SERVICE" \
-  --image "${IMAGE_BASE}/api:latest" \
+  --image "${IMAGE_BASE}/api:${IMAGE_TAG}" \
   --region "$GCP_REGION" \
   --service-account "$RUN_SA" \
   --allow-unauthenticated \
   --cpu 1 \
   --memory 512Mi \
   --no-cpu-throttling \
-  --set-env-vars "APP_STORAGE=firestore,GCP_PROJECT_ID=${GCP_PROJECT_ID},FIRESTORE_DATABASE_ID=(default),AI_WORKER_URL=${WORKER_URL},AI_WORKER_AUDIENCE=${WORKER_URL},WEB_BASE_URL=https://placeholder.invalid,API_BASE_URL=https://placeholder.invalid,APP_COOKIE_SECURE=true,APP_COOKIE_SAMESITE=None,GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID},GOOGLE_REDIRECT_URL=https://placeholder.invalid/auth/google/callback,GMAIL_MAX_THREADS=100" \
-  --set-secrets "GOOGLE_CLIENT_SECRET=google-client-secret:latest,APP_ENCRYPTION_KEY=app-encryption-key:latest,APP_SESSION_SECRET=app-session-secret:latest"
+  --set-env-vars "APP_STORAGE=postgres,GCP_PROJECT_ID=${GCP_PROJECT_ID},AI_WORKER_URL=${WORKER_URL},AI_WORKER_AUDIENCE=${WORKER_URL},WEB_BASE_URL=https://placeholder.invalid,API_BASE_URL=https://placeholder.invalid,APP_COOKIE_SECURE=true,APP_COOKIE_SAMESITE=None,GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID},GOOGLE_REDIRECT_URL=https://placeholder.invalid/gmail/connect/callback,GMAIL_MAX_THREADS=100" \
+  --set-secrets "POSTGRES_DATABASE_URL=mira-postgres-url:latest,GOOGLE_CLIENT_SECRET=google-client-secret:latest,APP_ENCRYPTION_KEY=app-encryption-key:latest,APP_SESSION_SECRET=app-session-secret:latest"
 
 export API_URL="$(gcloud run services describe "$API_SERVICE" --region "$GCP_REGION" --format='value(status.url)')"
 ```
@@ -217,15 +253,16 @@ gcloud run services update "$API_SERVICE" \
 ```bash
 docker build -f apps/web/Dockerfile \
   --build-arg "VITE_API_BASE_URL=" \
-  -t "${IMAGE_BASE}/web:latest" .
-docker push "${IMAGE_BASE}/web:latest"
+  --build-arg "VITE_MERCADOPAGO_PUBLIC_KEY=${VITE_MERCADOPAGO_PUBLIC_KEY}" \
+  -t "${IMAGE_BASE}/web:${IMAGE_TAG}" .
+docker push "${IMAGE_BASE}/web:${IMAGE_TAG}"
 ```
 
 Despliega:
 
 ```bash
 gcloud run deploy "$WEB_SERVICE" \
-  --image "${IMAGE_BASE}/web:latest" \
+  --image "${IMAGE_BASE}/web:${IMAGE_TAG}" \
   --region "$GCP_REGION" \
   --allow-unauthenticated \
   --set-env-vars "API_PROXY_TARGET=${API_URL}"
@@ -233,18 +270,25 @@ gcloud run deploy "$WEB_SERVICE" \
 export WEB_URL="$(gcloud run services describe "$WEB_SERVICE" --region "$GCP_REGION" --format='value(status.url)')"
 ```
 
+Para asociar una revisión al commit desplegado, inspecciona la imagen versionada:
+
+```bash
+gcloud run revisions list --service "$WEB_SERVICE" --region "$GCP_REGION" \
+  --format='table(metadata.name,spec.containers[0].image)'
+```
+
 Actualiza la API con la URL final del frontend y el redirect que pasa por el proxy de la web:
 
 ```bash
 gcloud run services update "$API_SERVICE" \
   --region "$GCP_REGION" \
-  --update-env-vars "WEB_BASE_URL=${WEB_URL},GOOGLE_REDIRECT_URL=${WEB_URL}/auth/google/callback"
+  --update-env-vars "WEB_BASE_URL=${WEB_URL},GOOGLE_REDIRECT_URL=${WEB_URL}/gmail/connect/callback"
 ```
 
 Agrega `GOOGLE_REDIRECT_URL` en tu OAuth Client de Google Cloud:
 
 ```text
-${WEB_URL}/auth/google/callback
+${WEB_URL}/gmail/connect/callback
 ```
 
 ## 8. Smoke test
@@ -263,17 +307,19 @@ Abre `WEB_URL` en el navegador e inicia sesion con Google.
 
 ## 9. Dominio propio
 
-Para este proyecto usa dos subdominios:
+Para este proyecto usa un solo dominio publico para usuarios:
 
-- Web: `helpdesk.tu-dominio.cl` -> servicio `ghmi-web`.
-- API: `api-helpdesk.tu-dominio.cl` -> servicio `ghmi-api`.
+- Web publica: `mira.ninfasolutions.com` -> servicio `ghmi-web`.
+- API publica de usuario: proxied same-origin por `ghmi-web` hacia `ghmi-api`.
+- Webhook Mercado Pago: directo al servicio API de Cloud Run.
 
-El worker queda privado y no necesita dominio propio.
+El worker queda privado y no necesita dominio propio. La API tampoco necesita
+dominio custom para el lanzamiento inicial si el webhook usa la URL `run.app`.
 
 ```bash
-export BASE_DOMAIN="tu-dominio.cl"
-export WEB_DOMAIN="helpdesk.${BASE_DOMAIN}"
-export API_DOMAIN="api-helpdesk.${BASE_DOMAIN}"
+export BASE_DOMAIN="ninfasolutions.com"
+export WEB_DOMAIN="mira.${BASE_DOMAIN}"
+export WEB_URL="https://${WEB_DOMAIN}"
 ```
 
 Verifica propiedad del dominio base en Google:
@@ -290,11 +336,6 @@ gcloud beta run domain-mappings create \
   --service "$WEB_SERVICE" \
   --domain "$WEB_DOMAIN" \
   --region "$GCP_REGION"
-
-gcloud beta run domain-mappings create \
-  --service "$API_SERVICE" \
-  --domain "$API_DOMAIN" \
-  --region "$GCP_REGION"
 ```
 
 Obtén los registros DNS que debes crear:
@@ -302,11 +343,6 @@ Obtén los registros DNS que debes crear:
 ```bash
 gcloud beta run domain-mappings describe \
   --domain "$WEB_DOMAIN" \
-  --region "$GCP_REGION" \
-  --format="yaml(status.resourceRecords)"
-
-gcloud beta run domain-mappings describe \
-  --domain "$API_DOMAIN" \
   --region "$GCP_REGION" \
   --format="yaml(status.resourceRecords)"
 ```
@@ -317,11 +353,11 @@ Actualiza la API para que use los dominios finales:
 
 ```bash
 export WEB_URL="https://${WEB_DOMAIN}"
-export API_URL="https://${API_DOMAIN}"
+export API_URL="$(gcloud run services describe "$API_SERVICE" --region "$GCP_REGION" --format='value(status.url)')"
 
 gcloud run services update "$API_SERVICE" \
   --region "$GCP_REGION" \
-  --update-env-vars "WEB_BASE_URL=${WEB_URL},API_BASE_URL=${API_URL},GOOGLE_REDIRECT_URL=${WEB_URL}/auth/google/callback"
+  --update-env-vars "WEB_BASE_URL=${WEB_URL},API_BASE_URL=${API_URL},GOOGLE_REDIRECT_URL=${WEB_URL}/gmail/connect/callback"
 ```
 
 Reconstruye y redespliega la web. Para evitar cookies third-party entre dos dominios `*.run.app`, la web debe llamar a la API por el mismo origen y el servidor web proxy reenvia a Cloud Run API:
@@ -329,25 +365,33 @@ Reconstruye y redespliega la web. Para evitar cookies third-party entre dos domi
 ```bash
 docker build -f apps/web/Dockerfile \
   --build-arg "VITE_API_BASE_URL=" \
-  -t "${IMAGE_BASE}/web:latest" .
-docker push "${IMAGE_BASE}/web:latest"
+  --build-arg "VITE_MERCADOPAGO_PUBLIC_KEY=${VITE_MERCADOPAGO_PUBLIC_KEY}" \
+  -t "${IMAGE_BASE}/web:${IMAGE_TAG}" .
+docker push "${IMAGE_BASE}/web:${IMAGE_TAG}"
 
 gcloud run deploy "$WEB_SERVICE" \
-  --image "${IMAGE_BASE}/web:latest" \
+  --image "${IMAGE_BASE}/web:${IMAGE_TAG}" \
   --region "$GCP_REGION" \
   --allow-unauthenticated \
   --set-env-vars "API_PROXY_TARGET=${API_URL}"
 ```
 
+Configura Mercado Pago live con este webhook:
+
+```text
+${API_URL}/billing/mercadopago/webhook
+```
+
 En el OAuth Client de Google agrega:
 
-- URI de redireccionamiento: `https://${WEB_DOMAIN}/auth/google/callback`.
+- URI de redireccionamiento: `https://${WEB_DOMAIN}/gmail/connect/callback`.
 - Origen JavaScript autorizado: `https://${WEB_DOMAIN}`.
 
 ## 10. Programador diario (Cloud Scheduler)
 
-El analisis programado corre de lunes a viernes a las 08:00 (America/Santiago)
-y envia el reporte por correo via Resend. En Cloud Run usa Cloud Scheduler con
+El analisis programado permite cuatro horarios de lunes a viernes: 08:00,
+14:00, 18:00 y 22:00 (America/Santiago), y envia el reporte por correo via
+Resend. En Cloud Run usa Cloud Scheduler con
 `SCHEDULER_ENABLED=false`: el servicio puede escalar a cero y el loop interno
 no es confiable ahi. El loop interno (`SCHEDULER_ENABLED=true`) es para hosts
 always-on como docker-compose o una VPS.
@@ -385,7 +429,7 @@ gcloud services enable cloudscheduler.googleapis.com
 
 gcloud scheduler jobs create http ghmi-daily-report \
   --location "$GCP_REGION" \
-  --schedule "0 8 * * 1-5" \
+  --schedule "0 8,14,18,22 * * 1-5" \
   --time-zone "America/Santiago" \
   --uri "${API_URL}/internal/scheduled-analysis" \
   --http-method POST \
@@ -419,13 +463,13 @@ Si el callback de Google funciona pero la web vuelve al login y `/auth/me` respo
 
 1. En modo recomendado, la web debe estar construida con `VITE_API_BASE_URL=` y desplegada con `API_PROXY_TARGET=${API_URL}`.
 2. La API debe tener `WEB_BASE_URL` igual al origen exacto de la web.
-3. El OAuth Client debe usar como redirect la URL de la web: `${WEB_URL}/auth/google/callback`.
+3. El OAuth Client debe usar como redirect la URL de la web: `${WEB_URL}/gmail/connect/callback`.
 4. La API debe usar ese mismo redirect:
 
 ```bash
 gcloud run services update "$API_SERVICE" \
   --region "$GCP_REGION" \
-  --update-env-vars "WEB_BASE_URL=${WEB_URL},GOOGLE_REDIRECT_URL=${WEB_URL}/auth/google/callback"
+  --update-env-vars "WEB_BASE_URL=${WEB_URL},GOOGLE_REDIRECT_URL=${WEB_URL}/gmail/connect/callback"
 ```
 
 Si aun llamas directo desde web a API en dominios distintos, la API debe tener cookies cross-site activas:

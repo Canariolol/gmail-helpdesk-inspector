@@ -1,4 +1,4 @@
-import { Ban, Bot, CheckCheck, CheckCircle2, ClipboardList, Clock, HelpCircle, History, Mail, Reply, ShieldCheck, Timer } from "lucide-react";
+import { Ban, CheckCheck, CheckCircle2, ClipboardList, Clock, HelpCircle, History, Mail, Reply, ShieldCheck, Timer } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { AnalysisRun } from "../api/types";
 import { ReportTrendCharts } from "../components/charts/ReportTrendCharts";
@@ -6,7 +6,7 @@ import { EmptyState } from "../components/common/EmptyState";
 import { MetricCard } from "../components/common/MetricCard";
 import { RangeField } from "../components/filters/RangeField";
 import { aggregateRuns, buildTrendPoints, selectReportRuns } from "../lib/aggregate";
-import { formatDuration, formatNumber, formatPercent } from "../lib/format";
+import { formatDuration, formatPercent } from "../lib/format";
 
 type Props = {
   runs: AnalysisRun[];
@@ -48,7 +48,7 @@ export function ReportesView({ runs }: Props) {
         <div>
           <h2>Reporte consolidado</h2>
           <p className="muted-note">
-            Métricas agregadas de los análisis completados cuyo periodo auditado intersecta el rango seleccionado.
+            Resumen de los análisis completados que coinciden con el período seleccionado.
           </p>
         </div>
         <RangeField label="Periodo del reporte" type="date" fromValue={from} toValue={to} onFromChange={setFromOverride} onToChange={setToOverride} />
@@ -66,15 +66,14 @@ export function ReportesView({ runs }: Props) {
             <MetricCard icon={CheckCircle2} label="Válidas" value={totals.validRequests} tone="mint" />
             <MetricCard icon={Reply} label="Respondidas" value={totals.answered} tone="teal" />
             <MetricCard icon={Clock} label="Sin respuesta" value={totals.unanswered} tone="orange" />
-            <MetricCard icon={HelpCircle} label="Ambiguas" value={totals.ambiguous} tone="amber" />
+            <MetricCard icon={HelpCircle} label="Pendientes de revisión" value={totals.pendingReview} tone="amber" />
           </div>
           <div className="metric-grid primary">
             <MetricCard icon={Ban} label="Ignoradas" value={totals.ignored} tone="gray" />
-            <MetricCard icon={ClipboardList} label="Overrides manuales" value={totals.manualOverrides} tone="purple" />
-            <MetricCard icon={ShieldCheck} label="Confianza ponderada" value={formatPercent(totals.reportConfidence)} tone="purple" />
+            <MetricCard icon={ClipboardList} label="Correcciones manuales" value={totals.manualOverrides} tone="purple" />
+            <MetricCard icon={ShieldCheck} label="Clasificación automática" value={formatPercent(totals.reportConfidence)} tone="purple" description="Porcentaje de conversaciones que Mira pudo clasificar sin pedir una revisión manual, considerando todos los análisis incluidos." />
             <MetricCard icon={Timer} label="T. medio respuesta" value={formatDuration(totals.avgFirstResponseMinutes)} tone="gray" />
             <MetricCard icon={CheckCheck} label="Cierre medio" value={formatDuration(totals.avgResolutionMinutes)} tone="gray" />
-            <MetricCard icon={Bot} label="Tokens IA (in · out)" value={`${formatNumber(totals.aiInputTokens)} · ${formatNumber(totals.aiOutputTokens)}`} tone="gray" />
           </div>
           {selectedRuns.length >= 2 ? (
             <ReportTrendCharts points={points} />

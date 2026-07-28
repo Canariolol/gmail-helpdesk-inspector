@@ -1,6 +1,10 @@
 .env
+.env.*.local
 secrets/*
 !secrets/.gitkeep
+
+# Respaldos locales de PostgreSQL (scripts/backup-postgres.sh)
+backups/
 
 # Rust
 target/
@@ -18,6 +22,12 @@ __pycache__/
 *.pyc
 *.egg-info/
 apps/ai-worker/src/*.egg-info/
+apps/ai-worker/.venv/
+
+# Agent orchestration
+.agent-orchestration/runs/**/*.log
 
 # OS/editor
 .DS_Store
+.agent-orchestration/runs/TASK-008/claude-implementation.md
+.keys

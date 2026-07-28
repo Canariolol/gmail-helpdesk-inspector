@@ -1,0 +1,868 @@
+/* ===========================================================================
+   Estados de acceso: sin plan, checkout pendiente, plan bloqueado,
+   conectar Gmail, carga, modal de planes y banner de límite de uso.
+   Estética cálida (naranja/crema) alineada con tokens.css.
+   =========================================================================== */
+
+.access-shell {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-5);
+  padding: var(--space-6) var(--space-4);
+  background:
+    radial-gradient(1100px 520px at 50% -10%, var(--primary-soft), transparent 60%),
+    var(--bg);
+}
+
+.access-shell-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-weight: 800;
+  color: var(--text-strong);
+  letter-spacing: -0.01em;
+}
+
+.access-shell-brand img {
+  border-radius: var(--radius-sm);
+}
+
+.access-shell-footer {
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+}
+
+.access-card {
+  width: 100%;
+  max-width: 540px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
+  padding: clamp(var(--space-5), 4vw, var(--space-7));
+}
+
+.access-card-wide {
+  max-width: 940px;
+}
+
+/* ---- Encabezado del bloque ---- */
+.access-head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.access-head-center {
+  align-items: center;
+  text-align: center;
+}
+
+.access-head h1 {
+  font-size: clamp(1.4rem, 1rem + 1.6vw, 1.9rem);
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+}
+
+.access-eyebrow {
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  color: var(--primary-strong);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.access-lede {
+  color: var(--text);
+  font-size: var(--fs-md);
+  line-height: 1.5;
+  max-width: 60ch;
+}
+
+.access-note-muted {
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+}
+
+.access-note-center {
+  text-align: center;
+}
+
+/* ---- Badges de estado ---- */
+.access-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  padding: 4px 11px;
+  border-radius: var(--radius-pill);
+  font-size: var(--fs-sm);
+  font-weight: 700;
+}
+
+.access-badge-ok {
+  background: var(--chip-mint-bg);
+  color: var(--chip-mint-fg);
+}
+
+.access-badge-warn {
+  background: var(--chip-amber-bg);
+  color: var(--chip-amber-fg);
+}
+
+/* ---- Notas de pago / garantías (listas con íconos) ---- */
+.access-notes,
+.access-guarantees {
+  list-style: none;
+  margin: 0;
+  padding: var(--space-4);
+  display: grid;
+  gap: var(--space-2);
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+.access-notes li,
+.access-guarantees li {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  font-size: var(--fs-base);
+  color: var(--text);
+  line-height: 1.4;
+}
+
+.access-notes svg,
+.access-guarantees svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: var(--primary-strong);
+}
+
+.access-guarantees svg {
+  color: var(--chip-red-fg);
+}
+
+/* ---- Acciones ---- */
+.access-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.access-head-center + .access-actions,
+.access-actions:has(.access-text-btn) {
+  justify-content: center;
+}
+
+/* Lista de proveedores: una fila por opción, con el subtítulo bajo el nombre. */
+.access-actions-stack {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.access-actions-stack > a,
+.access-actions-stack > button {
+  justify-content: flex-start;
+  min-height: 56px;
+  text-align: left;
+}
+
+/* Tercera opción: formulario de detección por dominio. */
+.access-detect {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  text-align: left;
+}
+
+.access-detect > .btn-primary {
+  justify-content: center;
+  min-height: 44px;
+}
+
+.access-provider-label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  line-height: 1.25;
+}
+
+.access-provider-label small {
+  font-weight: 500;
+  font-size: 0.8125rem;
+  opacity: 0.75;
+}
+
+.access-foot-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
+
+.access-text-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  transition: color 150ms ease;
+}
+
+.access-text-btn:hover {
+  color: var(--primary-strong);
+}
+
+.access-error {
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--chip-red-bg);
+  color: var(--chip-red-fg);
+  font-size: var(--fs-base);
+  font-weight: 600;
+}
+
+/* ---- Spinner ---- */
+.access-spinner {
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  border-radius: var(--radius-pill);
+  background: var(--primary-soft);
+  color: var(--primary-strong);
+}
+
+.access-spinner svg {
+  animation: access-spin 1s linear infinite;
+}
+
+@keyframes access-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .access-spinner svg {
+    animation: none;
+  }
+}
+
+/* ===========================================================================
+   Grilla de planes
+   =========================================================================== */
+.pricing-grid {
+  display: grid;
+  gap: var(--space-4);
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.pricing-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-5);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  transition: transform 150ms ease, box-shadow 150ms ease, border-color 150ms ease;
+}
+
+.pricing-card:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-card);
+}
+
+.pricing-card.is-featured {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 1px var(--primary), var(--shadow-card);
+  background: linear-gradient(180deg, var(--primary-soft) 0%, var(--surface) 38%);
+}
+
+.pricing-tag {
+  position: absolute;
+  top: calc(var(--space-3) * -1);
+  left: var(--space-4);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: var(--radius-pill);
+  background: var(--primary-grad);
+  color: #fff;
+  font-size: var(--fs-sm);
+  font-weight: 800;
+  box-shadow: 0 4px 12px rgba(249, 115, 22, 0.32);
+}
+
+.pricing-name {
+  font-size: var(--fs-md);
+  font-weight: 800;
+}
+
+.pricing-price {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--text-strong);
+}
+
+.pricing-price strong {
+  font-size: 1.7rem;
+  letter-spacing: -0.02em;
+}
+
+.pricing-price span {
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  color: var(--text-muted);
+}
+
+.pricing-usd {
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+}
+
+.pricing-trial {
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  color: var(--chip-mint-fg);
+}
+
+.pricing-trial-empty {
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.pricing-feats {
+  list-style: none;
+  margin: var(--space-2) 0 var(--space-3);
+  padding: var(--space-3) 0 0;
+  border-top: 1px solid var(--border);
+  display: grid;
+  gap: var(--space-2);
+}
+
+.pricing-feats li {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  font-size: var(--fs-base);
+  color: var(--text);
+}
+
+.pricing-feats svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: var(--chip-mint-fg);
+}
+
+.pricing-card .btn-primary,
+.pricing-card .btn-ghost {
+  margin-top: auto;
+  width: 100%;
+}
+
+.pricing-iva-note {
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+}
+
+.pricing-interval-toggle {
+  display: inline-flex;
+  gap: 2px;
+  margin: 0 0 var(--space-4);
+  padding: 3px;
+  background: var(--surface-muted, var(--surface));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+}
+
+.pricing-interval-toggle button {
+  padding: 6px 14px;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 150ms ease, color 150ms ease;
+}
+
+.pricing-interval-toggle button.is-active {
+  background: var(--primary-grad);
+  color: #fff;
+}
+
+/* ===========================================================================
+   Empresa — tarjeta de contacto, visualmente separada de la grilla de planes
+   =========================================================================== */
+.pricing-enterprise {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  margin-top: var(--space-5);
+  padding: var(--space-4) var(--space-5);
+  background: transparent;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-md);
+}
+
+.pricing-enterprise-icon {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius-md);
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+
+.pricing-enterprise-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.pricing-enterprise-body h3 {
+  font-size: var(--fs-md);
+  font-weight: 800;
+}
+
+.pricing-enterprise-body p {
+  margin: 4px 0 var(--space-2);
+  font-size: var(--fs-base);
+  color: var(--text-muted);
+}
+
+.pricing-enterprise-body ul {
+  list-style: none;
+  display: grid;
+  gap: 4px;
+  font-size: var(--fs-sm);
+  color: var(--text);
+}
+
+.pricing-enterprise-body ul li::before {
+  content: "—";
+  margin-right: 6px;
+  color: var(--text-muted);
+}
+
+.pricing-enterprise-cta {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+  .pricing-enterprise {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .pricing-enterprise-cta {
+    width: 100%;
+    text-align: center;
+  }
+}
+
+/* ===========================================================================
+   Modal de planes (subir de plan)
+   =========================================================================== */
+.access-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  padding: var(--space-4);
+  background: rgba(41, 37, 36, 0.55);
+  backdrop-filter: blur(3px);
+  overflow-y: auto;
+}
+
+.access-modal {
+  position: relative;
+  width: 100%;
+  max-width: 940px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 24px 64px rgba(120, 80, 35, 0.22);
+  padding: clamp(var(--space-5), 4vw, var(--space-7));
+  margin: auto;
+}
+
+.access-modal-close {
+  position: absolute;
+  top: var(--space-4);
+  right: var(--space-4);
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-soft);
+  color: var(--text-muted);
+  transition: background-color 150ms ease, color 150ms ease;
+}
+
+.access-modal-close:hover {
+  background: var(--primary-soft);
+  color: var(--primary-strong);
+}
+
+/* ===========================================================================
+   Banner de límite de uso (dentro de la app)
+   =========================================================================== */
+.usage-limit-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+  padding: var(--space-4);
+  background: var(--chip-amber-bg);
+  border: 1px solid var(--chip-amber-fg);
+  border-radius: var(--radius-md);
+  color: var(--chip-amber-fg);
+}
+
+.usage-limit-icon {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 38px;
+  height: 38px;
+  border-radius: var(--radius-pill);
+  background: rgba(180, 83, 9, 0.14);
+}
+
+.usage-limit-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.usage-limit-copy strong {
+  color: var(--text-strong);
+  font-size: var(--fs-base);
+}
+
+.usage-limit-copy span {
+  color: var(--text);
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+}
+
+.usage-limit-cta {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+  .usage-limit-banner {
+    flex-wrap: wrap;
+  }
+
+  .usage-limit-cta {
+    width: 100%;
+  }
+}
+
+/* ===========================================================================
+   Banner de plan bloqueado (dentro del shell restringido)
+   =========================================================================== */
+.blocked-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+  padding: var(--space-4);
+  background: var(--chip-red-bg);
+  border: 1px solid var(--chip-red-fg);
+  border-radius: var(--radius-md);
+  color: var(--chip-red-fg);
+}
+
+.blocked-banner-icon {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 38px;
+  height: 38px;
+  border-radius: var(--radius-pill);
+  background: rgba(185, 28, 28, 0.14);
+}
+
+.blocked-banner-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.blocked-banner-copy strong {
+  color: var(--text-strong);
+  font-size: var(--fs-base);
+}
+
+.blocked-banner-copy span {
+  color: var(--text);
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+}
+
+.blocked-banner-cta {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+  .blocked-banner {
+    flex-wrap: wrap;
+  }
+
+  .blocked-banner-cta {
+    width: 100%;
+  }
+}
+
+/* ===========================================================================
+   Vista "Plan y cuenta"
+   =========================================================================== */
+.cuenta-view {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.cuenta-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.cuenta-head h2 {
+  font-size: var(--fs-md);
+  margin-top: var(--space-1);
+}
+
+.cuenta-plan {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-5);
+  margin-top: var(--space-5);
+}
+
+/* Fila con la info a la izquierda y la acción a la derecha: evita botones que
+   cruzan la tarjeta de borde a borde. */
+.cuenta-row {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+}
+
+/* Los botones de acción se ajustan a su contenido, nunca al ancho de la tarjeta. */
+.cuenta-plan > button,
+.cuenta-actions > button {
+  align-self: flex-start;
+  width: auto;
+}
+
+.cuenta-plan > .cuenta-confirm {
+  flex-basis: 100%;
+  max-width: 46ch;
+}
+
+.cuenta-plan-name {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+}
+
+.cuenta-plan-name strong {
+  display: block;
+  margin-top: 4px;
+  font-family: var(--font-sans);
+  font-size: var(--fs-md);
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: normal;
+  color: var(--text-strong);
+}
+
+.cuenta-note-warn {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  font-size: var(--fs-base);
+  font-weight: 600;
+  color: var(--chip-amber-fg);
+  line-height: 1.4;
+}
+
+.cuenta-note-warn svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.cuenta-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.cuenta-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface-soft);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  font-size: var(--fs-sm);
+  color: var(--text);
+}
+
+.cuenta-confirm-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+/* Salida discreta al final del modal de planes: no compite con los CTA. */
+.plans-modal-cancel {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  border-top: 1px solid var(--border);
+  margin-top: var(--space-4);
+  padding-top: var(--space-3);
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+}
+
+/* ---- Checkout embebido (Mercado Pago Brick) ---- */
+.checkout-back {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.checkout-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-4);
+}
+
+.checkout-summary > div {
+  display: grid;
+  gap: 2px;
+}
+
+.checkout-summary span {
+  font-weight: 800;
+  color: var(--text-strong);
+}
+
+.checkout-summary small {
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+
+.checkout-summary strong {
+  font-size: var(--fs-md);
+  color: var(--text-strong);
+  white-space: nowrap;
+}
+
+.checkout-summary strong em {
+  font-style: normal;
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  color: var(--text-muted);
+}
+
+.checkout-brick {
+  position: relative;
+  min-height: 120px;
+}
+
+.checkout-loading {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text-muted);
+  font-weight: 700;
+  font-size: var(--fs-sm);
+}
+
+.checkout-overlay {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  gap: var(--space-2);
+  grid-auto-flow: column;
+  align-items: center;
+  background: rgba(255, 255, 255, 0.78);
+  backdrop-filter: blur(2px);
+  border-radius: var(--radius-md);
+  color: var(--text-strong);
+  font-weight: 800;
+}
+
+.checkout-secure {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+
+.checkout-secure svg {
+  color: var(--primary-strong);
+  flex: 0 0 auto;
+}

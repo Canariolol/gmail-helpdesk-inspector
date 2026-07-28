@@ -12,12 +12,33 @@ use sha2::{Digest, Sha256};
 
 type HmacSha256 = Hmac<Sha256>;
 
+/// Lectura de correo y refresh token. `offline_access` es lo que hace que
+/// Microsoft entregue un refresh token; `User.Read` da la identidad de la casilla.
+pub const MICROSOFT_MAIL_SCOPE: &str = "offline_access User.Read Mail.Read";
+
+const SESSION_TTL_DAYS: i64 = 30;
+const SESSION_MAX_AGE_SECONDS: i64 = SESSION_TTL_DAYS * 24 * 60 * 60;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserSession {
     pub id: String,
+    #[serde(default)]
+    pub workos_user_id: Option<String>,
+    #[serde(default)]
+    pub workos_session_id: Option<String>,
     pub google_account_email: String,
+    #[serde(default)]
+    pub gmail_account_email: Option<String>,
     pub access_token_encrypted: String,
     pub refresh_token_encrypted: Option<String>,
+    #[serde(default)]
+    pub gmail_access_token_encrypted: Option<String>,
+    #[serde(default)]
+    pub gmail_refresh_token_encrypted: Option<String>,
+    #[serde(default)]
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
@@ -79,8 +100,25 @@ pub fn verify_session_cookie(cookie_value: &str, secret: &str) -> Option<String>
     }
 }
 
+pub fn session_expires_at(now: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chrono::Utc> {
+    now + chrono::Duration::days(SESSION_TTL_DAYS)
+}
+
+pub fn session_is_active(session: &UserSession, now: chrono::DateTime<chrono::Utc>) -> bool {
+    session.revoked_at.is_none()
+        && session
+            .expires_at
+            .is_some_and(|expires_at| expires_at > now)
+}
+
 pub fn session_cookie(value: &str, same_site: &str, secure: bool) -> String {
-    cookie("ghmi_session", value, 2_592_000, same_site, secure)
+    cookie(
+        "ghmi_session",
+        value,
+        SESSION_MAX_AGE_SECONDS,
+        same_site,
+        secure,
+    )
 }
 
 pub fn oauth_cookie(value: &str, same_site: &str, secure: bool) -> String {
@@ -100,4 +138,19 @@ fn cookie(name: &str, value: &str, max_age: i64, same_site: &str, secure: bool) 
     format!(
         "{name}={value}; Path=/; HttpOnly; SameSite={same_site}; Max-Age={max_age}{secure_attr}"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_and_oauth_cookies_keep_the_required_security_attributes() {
+        let session = session_cookie("signed", "Lax", true);
+        assert!(session.contains("Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000; Secure"));
+        assert!(!session.contains("Domain="));
+
+        let oauth = oauth_cookie("state", "Lax", true);
+        assert!(oauth.contains("Path=/; HttpOnly; SameSite=Lax; Max-Age=600; Secure"));
+    }
 }

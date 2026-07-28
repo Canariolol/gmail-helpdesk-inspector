@@ -3,10 +3,17 @@
 1. Create a Google Cloud project.
 2. Configure an OAuth consent screen for private/testing use.
 3. Create an OAuth web client.
-4. Add this redirect URI:
+4. Add the redirect URI that matches `GOOGLE_REDIRECT_URL` exactly. For local
+   development use:
 
    ```text
-   http://localhost:8080/auth/google/callback
+   http://localhost:8080/gmail/connect/callback
+   ```
+
+   For Mira's public candidate use:
+
+   ```text
+   https://mira.ninfasolutions.com/gmail/connect/callback
    ```
 
 5. Put the client values in `.env`.

@@ -20,30 +20,27 @@ if [[ ! -f .env ]]; then
   exit 1
 fi
 
-google_credentials="$(awk -F= '$1 == "GOOGLE_APPLICATION_CREDENTIALS" {print $2}' .env | tail -n 1 | tr -d '"' | tr -d "'")"
-firestore_bearer="$(awk -F= '$1 == "FIRESTORE_BEARER_TOKEN" {print $2}' .env | tail -n 1 | tr -d '"' | tr -d "'")"
+env_value() {
+  awk -F= -v key="$1" '$1 == key {print $2}' .env | tail -n 1 | tr -d '"' | tr -d "'"
+}
 
-if [[ -z "$firestore_bearer" && -z "$google_credentials" ]]; then
-  echo "Firestore auth is not configured." >&2
-  echo "Set GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/gcp-service-account.json in .env." >&2
-  exit 1
-fi
+app_storage="$(env_value APP_STORAGE)"
+app_storage="${app_storage:-postgres}"
 
-if [[ "$google_credentials" == /run/secrets/* ]]; then
-  local_secret_path="secrets/${google_credentials#/run/secrets/}"
-  if [[ ! -f "$local_secret_path" ]]; then
-    echo "Missing service account JSON at $local_secret_path." >&2
-    echo "Copy your GCP service account key there, or update GOOGLE_APPLICATION_CREDENTIALS." >&2
+case "$app_storage" in
+  postgres)
+    if [[ -z "$(env_value POSTGRES_DATABASE_URL)" ]]; then
+      echo "APP_STORAGE=postgres requires POSTGRES_DATABASE_URL in .env." >&2
+      exit 1
+    fi
+    ;;
+  memory)
+    ;;
+  *)
+    echo "Unsupported APP_STORAGE=$app_storage (expected postgres or memory)." >&2
     exit 1
-  fi
-elif [[ "$google_credentials" == /secrets/* ]]; then
-  local_secret_path="secrets/${google_credentials#/secrets/}"
-  if [[ ! -f "$local_secret_path" ]]; then
-    echo "Missing service account JSON at $local_secret_path." >&2
-    echo "Copy your GCP service account key there, or update GOOGLE_APPLICATION_CREDENTIALS." >&2
-    exit 1
-  fi
-fi
+    ;;
+esac
 
 echo "Starting Gmail Helpdesk Inspector..."
 echo "Web:        http://127.0.0.1:5173"

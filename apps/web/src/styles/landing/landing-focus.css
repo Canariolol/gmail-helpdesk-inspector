@@ -1,0 +1,944 @@
+/* ==========================================================================
+   Variante: Producto en foco (.lp-focus) — minimalista, demo protagonista
+   ========================================================================== */
+.lp-focus {
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  position: relative;
+  isolation: isolate; /* mantiene las capas de fondo (z negativo) dentro del contexto */
+  background: var(--bg);
+  color: var(--text);
+  overflow-x: hidden; /* permite franjas full-bleed sin scroll horizontal */
+}
+
+/* Retícula técnica: papel milimétrico tenue que se desvanece hacia abajo.
+   Habla de "auditable" sin recurrir a glows. */
+.lp-focus::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: clamp(560px, 72vh, 860px);
+  z-index: -2;
+  pointer-events: none;
+  background-image: radial-gradient(
+    circle,
+    color-mix(in srgb, var(--text-muted) 30%, transparent) 1px,
+    transparent 1.3px
+  );
+  background-size: 26px 26px;
+  mask-image: linear-gradient(180deg, #000 0%, #000 45%, transparent 96%);
+  -webkit-mask-image: linear-gradient(180deg, #000 0%, #000 45%, transparent 96%);
+}
+
+/* Grano: textura muy tenue para quitar el aspecto plano. */
+.lp-focus::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  opacity: 0.035;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size: 160px 160px;
+}
+
+/* Divisor de pulso: la firma Cadencia como separador de sección. */
+.lp-pulse-divider {
+  display: block;
+  width: 64px;
+  height: 3px;
+  border-radius: var(--radius-pill);
+  background: var(--pulse-grad);
+}
+
+.lp-focus main {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 0 var(--space-5);
+}
+
+/* Nav --------------------------------------------------------------------- */
+.lp-focus-nav {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: var(--space-5);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.lp-focus-link {
+  font-weight: 800;
+  color: var(--primary-strong);
+  font-size: var(--fs-base);
+  padding: 8px 4px;
+  border-bottom: 2px solid transparent;
+  transition: border-color 150ms ease;
+}
+
+.lp-focus-link:hover {
+  border-color: var(--primary);
+}
+
+.lp-focus-nav-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+
+/* CTA compacta para la barra de navegación (más chica que la del hero). */
+.lp-focus-nav-cta {
+  padding: 9px 18px;
+  font-size: var(--fs-sm);
+}
+
+/* Hero asimétrico Cadencia: copy a la izquierda, dato protagonista a la derecha */
+.lp-focus-hero {
+  min-height: min(62vh, 600px);
+  display: grid;
+  grid-template-columns: 1.25fr 1fr;
+  align-content: center;
+  align-items: center;
+  gap: var(--space-7);
+  padding-block: var(--space-7) var(--space-7);
+}
+
+.lp-focus-hero-head {
+  display: grid;
+  justify-items: start;
+  gap: var(--space-4);
+  text-align: left;
+}
+
+.lp-focus-kicker {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--accent);
+}
+
+.lp-focus-hero h1 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: clamp(2rem, 1.2rem + 2.6vw, 3.1rem);
+  line-height: 1.08;
+  letter-spacing: -0.028em;
+  color: var(--text-strong);
+  max-width: 18ch;
+}
+
+.lp-focus-hero h1 em {
+  font-style: normal;
+  color: var(--accent);
+}
+
+.lp-focus-hero-head p {
+  font-size: clamp(var(--fs-md), 1rem + 0.3vw, 1.15rem);
+  color: var(--text-muted);
+  max-width: 48ch;
+}
+
+.lp-focus-hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-start;
+  gap: var(--space-4);
+  margin-top: var(--space-1);
+}
+
+/* Dato protagonista con pulso y sparkline (la firma Cadencia) */
+.lp-focus-stat {
+  display: grid;
+  justify-items: start;
+  justify-self: end; /* pega el bloque al borde derecho de su columna */
+  align-content: center;
+}
+
+.lp-focus-stat strong {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: clamp(4rem, 2.6rem + 5vw, 6rem);
+  line-height: 1;
+  letter-spacing: -0.04em;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-strong);
+}
+
+.lp-focus-stat strong i {
+  font-style: normal;
+  color: var(--accent);
+}
+
+.lp-focus-stat-pulse {
+  width: 150px;
+  height: 4px;
+  border-radius: var(--radius-pill);
+  background: var(--pulse-grad);
+  margin: var(--space-4) 0 var(--space-3);
+}
+
+.lp-focus-stat-label {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-muted);
+  margin-bottom: var(--space-5);
+}
+
+.lp-focus-spark line {
+  stroke: var(--border);
+  stroke-width: 1;
+}
+
+.lp-focus-spark polyline {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .lp-focus-spark polyline {
+    stroke-dasharray: 320;
+    stroke-dashoffset: 320;
+    animation: lp-spark-draw 1.4s var(--ease-out) 300ms forwards;
+  }
+}
+
+@keyframes lp-spark-draw {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+/* Demo en su propia sección */
+.lp-focus-demo {
+  display: grid;
+  justify-items: center;
+  gap: var(--space-4);
+  padding-block: var(--space-6) var(--space-7);
+}
+
+.lp-focus-demo .lp-di {
+  width: 100%;
+  box-shadow:
+    0 30px 70px -22px color-mix(in srgb, var(--accent) 28%, transparent),
+    0 18px 44px color-mix(in srgb, var(--text-strong) 12%, transparent);
+}
+
+/* Tilt de perspectiva en los mocks: se enderezan al pasar el mouse. */
+@media (prefers-reduced-motion: no-preference) {
+  .lp-focus-demo .lp-di,
+  .lp-focus-reports-mock .lp-rep {
+    transform: perspective(1400px) rotateX(3.5deg);
+    transition: transform 450ms var(--ease-out);
+  }
+
+  .lp-focus-demo:hover .lp-di,
+  .lp-focus-reports-mock:hover .lp-rep {
+    transform: perspective(1400px) rotateX(0deg);
+  }
+}
+
+/* Banda de confianza full-bleed ------------------------------------------- */
+.lp-focus-trustband {
+  margin-inline: calc(-50vw + 50%);
+  width: 100vw;
+  background: var(--side-bg);
+  color: var(--side-ink);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3) var(--space-7);
+  padding: var(--space-6) var(--space-5);
+}
+
+.lp-focus-trustband strong {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: clamp(1.3rem, 1rem + 1.2vw, 1.8rem);
+  color: var(--side-ink);
+}
+
+.lp-focus-trustband ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3) var(--space-5);
+}
+
+.lp-focus-trustband li {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-weight: 500;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--side-muted);
+}
+
+.lp-focus-trustband li svg {
+  color: var(--side-on);
+}
+
+/* Ventajas ---------------------------------------------------------------- */
+.lp-focus-advantages {
+  display: grid;
+  gap: var(--space-5);
+  margin-inline: calc(-50vw + 50%);
+  width: 100vw;
+  padding: clamp(var(--space-7), 7vw, 96px) max(var(--space-5), calc((100vw - 760px) / 2));
+  background: var(--surface-soft);
+  border-block: 1px solid var(--border);
+}
+
+.lp-focus-adv {
+  display: flex;
+  gap: var(--space-4);
+  align-items: flex-start;
+  padding-bottom: var(--space-5);
+  border-bottom: 1px solid var(--border);
+}
+
+/* Mira asomándose junto a la ventaja de la auditora IA */
+.lp-adv-media {
+  flex-shrink: 0;
+  width: 128px;
+  height: 128px;
+  object-fit: cover;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  box-shadow: 0 10px 26px color-mix(in srgb, var(--text-strong) 14%, transparent);
+  transform: rotate(2deg);
+  align-self: center;
+}
+
+.lp-focus-advantages .lp-reveal:last-child .lp-focus-adv {
+  border-bottom: 0;
+}
+
+.lp-focus-adv-icon {
+  flex-shrink: 0;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.lp-focus-adv h3 {
+  font-size: 1.2rem;
+  color: var(--text-strong);
+  margin-bottom: 4px;
+}
+
+.lp-focus-adv p {
+  font-size: var(--fs-md);
+  color: var(--text-muted);
+}
+
+/* Reportes automáticos (dos columnas) ------------------------------------- */
+.lp-focus-reports {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-7);
+  align-items: center;
+  margin-inline: calc(-50vw + 50%);
+  width: 100vw;
+  padding: clamp(var(--space-7), 7vw, 96px) max(var(--space-5), calc((100vw - 1080px) / 2));
+  background: color-mix(in srgb, var(--accent) 4%, var(--bg));
+}
+
+.lp-focus-reports-copy {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.lp-focus-reports-copy h2 {
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-size: clamp(1.6rem, 1.1rem + 1.8vw, 2.6rem);
+  letter-spacing: -0.02em;
+  color: var(--text-strong);
+}
+
+.lp-focus-reports-copy > p {
+  font-size: var(--fs-md);
+  color: var(--text-muted);
+  max-width: 46ch;
+}
+
+.lp-focus-reports-list {
+  list-style: none;
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-2);
+}
+
+.lp-focus-reports-list li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-weight: 700;
+  color: var(--text);
+  font-size: var(--fs-base);
+}
+
+.lp-focus-reports-list svg {
+  color: var(--primary-strong);
+  flex-shrink: 0;
+}
+
+/* El mock de reporte también se eleva sobre el fondo. */
+.lp-focus-reports-mock .lp-rep {
+  box-shadow:
+    0 26px 60px -24px color-mix(in srgb, var(--accent) 24%, transparent),
+    0 16px 38px color-mix(in srgb, var(--text-strong) 12%, transparent);
+}
+
+/* Secciones genéricas (pasos) --------------------------------------------- */
+.lp-focus-section {
+  margin-inline: calc(-50vw + 50%);
+  width: 100vw;
+  padding: clamp(var(--space-7), 7vw, 96px) max(var(--space-5), calc((100vw - 1080px) / 2));
+  text-align: center;
+  display: grid;
+  justify-items: center;
+  gap: var(--space-3);
+  border-block: 1px solid var(--border);
+}
+
+.lp-focus-eyebrow {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--accent);
+}
+
+.lp-focus-section h2 {
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-size: clamp(1.6rem, 1.1rem + 1.8vw, 2.6rem);
+  letter-spacing: -0.02em;
+  color: var(--text-strong);
+  margin-bottom: var(--space-4);
+}
+
+/* Pasos horizontales ------------------------------------------------------ */
+.lp-focus-steps-row {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-5);
+  width: 100%;
+  text-align: left;
+}
+
+.lp-focus-steps-row li {
+  border-left: 1px solid var(--border);
+  padding: var(--space-2) var(--space-5);
+  display: grid;
+  gap: var(--space-2);
+  align-content: start;
+}
+
+.lp-focus-steps-row li:first-child {
+  border-left: 0;
+  padding-left: 0;
+}
+
+.lp-focus-step-n {
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  font-weight: 600;
+  color: var(--accent);
+  letter-spacing: 0.08em;
+}
+
+.lp-focus-step-n::before {
+  content: "0";
+}
+
+.lp-focus-steps-row h3 {
+  font-size: var(--fs-md);
+  color: var(--text-strong);
+}
+
+.lp-focus-steps-row p {
+  font-size: var(--fs-base);
+  color: var(--text-muted);
+}
+
+/* Final ------------------------------------------------------------------- */
+.lp-focus-final {
+  display: grid;
+  grid-template-columns: minmax(0, 380px) minmax(0, 1fr);
+  align-items: center;
+  justify-content: center;
+  gap: clamp(var(--space-6), 5vw, 72px);
+  max-width: 920px;
+  margin-inline: auto;
+  padding: clamp(var(--space-7), 7vw, 96px) var(--space-5) clamp(var(--space-7), 7vw, 110px);
+}
+
+/* Retrato enmarcado de la mascota (el fondo horneado se asume como parte
+   de la ilustración, tipo lámina). */
+.lp-mira-card {
+  width: 100%;
+  height: auto;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+  box-shadow:
+    0 24px 56px -20px color-mix(in srgb, var(--accent) 26%, transparent),
+    0 14px 34px color-mix(in srgb, var(--text-strong) 14%, transparent);
+  transform: rotate(-2deg);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .lp-mira-card {
+    transition: transform 450ms var(--ease-out);
+  }
+
+  .lp-focus-final:hover .lp-mira-card {
+    transform: rotate(0deg) scale(1.015);
+  }
+}
+
+.lp-focus-final-copy {
+  display: grid;
+  justify-items: start;
+  gap: var(--space-4);
+  text-align: left;
+}
+
+.lp-focus-final-copy p {
+  color: var(--text-muted);
+  font-size: var(--fs-md);
+  max-width: 34ch;
+}
+
+.lp-focus-final h2 {
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-size: clamp(1.8rem, 1.2rem + 2.4vw, 3rem);
+  letter-spacing: -0.02em;
+  color: var(--text-strong);
+}
+
+/* Footer ------------------------------------------------------------------ */
+.lp-focus-footer {
+  border-top: 1px solid var(--border);
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: var(--space-5);
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  justify-content: space-between;
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+  font-weight: 700;
+}
+
+/* Responsive -------------------------------------------------------------- */
+@media (max-width: 860px) {
+  .lp-focus-hero {
+    grid-template-columns: 1fr;
+    gap: var(--space-6);
+  }
+  .lp-focus-reports {
+    grid-template-columns: 1fr;
+    gap: var(--space-5);
+  }
+  .lp-focus-steps-row {
+    grid-template-columns: 1fr;
+  }
+  .lp-focus-steps-row li {
+    border-left: 0;
+    padding-left: 0;
+  }
+}
+
+@media (max-width: 760px) {
+  .lp-focus-final {
+    grid-template-columns: minmax(0, 1fr);
+    justify-items: center;
+  }
+
+  .lp-focus-final .lp-mira-card {
+    max-width: 320px;
+  }
+
+  .lp-focus-final-copy {
+    justify-items: center;
+    text-align: center;
+  }
+}
+
+@media (max-width: 560px) {
+  .lp-focus-adv {
+    gap: var(--space-3);
+    flex-wrap: wrap;
+  }
+  .lp-adv-media {
+    width: 96px;
+    height: 96px;
+  }
+  .lp-focus-hero {
+    min-height: 0;
+    padding-block: var(--space-6);
+  }
+}
+
+/* ==========================================================================
+   Radiografía: el hilo que se analiza frente al visitante (.rx)
+   ========================================================================== */
+.lp-focus-rx {
+  display: grid;
+  justify-items: center;
+  gap: var(--space-3);
+  padding-block: var(--space-6) var(--space-7);
+  text-align: center;
+}
+
+.lp-focus-rx h2 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: clamp(1.5rem, 1.1rem + 1.4vw, 2.2rem);
+  letter-spacing: -0.02em;
+  color: var(--text-strong);
+  margin-bottom: var(--space-3);
+}
+
+.rx {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 220px;
+  gap: var(--space-5);
+  width: 100%;
+  max-width: 880px;
+  text-align: left;
+  align-items: start;
+}
+
+/* --- El correo --- */
+.rx-mail {
+  position: relative;
+  overflow: hidden;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
+  padding: var(--space-5);
+  display: grid;
+  gap: var(--space-4);
+}
+
+.rx-scanline {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -4px;
+  height: 3px;
+  border-radius: var(--radius-pill);
+  background: var(--pulse-grad);
+  opacity: 0;
+  pointer-events: none;
+}
+
+.rx-scanning .rx-scanline {
+  opacity: 1;
+  animation: rx-scan 1.9s var(--ease-out) forwards;
+}
+
+@keyframes rx-scan {
+  from { transform: translateY(0); }
+  to { transform: translateY(min(52vh, 460px)); opacity: 0; }
+}
+
+.rx-mail-head {
+  display: grid;
+  gap: var(--space-2);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: var(--space-3);
+}
+
+.rx-mail-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--fs-sm);
+  color: var(--text);
+  flex-wrap: wrap;
+}
+
+.rx-mail-label {
+  font-family: var(--font-mono);
+  font-size: 0.64rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  width: 44px;
+  flex-shrink: 0;
+}
+
+.rx-mail-row strong {
+  color: var(--text-strong);
+}
+
+/* Resaltado del dominio del remitente */
+.rx-mark {
+  font-style: normal;
+  border-radius: 4px;
+  padding: 0 2px;
+  transition: background-color 300ms ease, color 300ms ease;
+}
+
+.rx-mark.on {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+/* Etiquetas mono que va dejando el análisis */
+.rx-tag {
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--accent-strong);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: var(--radius-pill);
+  padding: 2px 8px;
+  font-style: normal;
+  opacity: 0;
+  transform: translateY(4px);
+  transition: opacity 300ms ease, transform 300ms var(--ease-out);
+}
+
+.rx-tag.on {
+  opacity: 1;
+  transform: none;
+}
+
+.rx-tag-ok {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 45%, transparent);
+}
+
+/* Chip de clasificación que se estampa sobre el asunto */
+.rx-chip {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--chip-mint-fg);
+  background: var(--chip-mint-bg);
+  border-radius: var(--radius-pill);
+  padding: 3px 10px;
+  opacity: 0;
+  transform: scale(1.6) rotate(-4deg);
+}
+
+.rx-chip.on {
+  animation: rx-stamp 420ms var(--ease-out) forwards;
+}
+
+@keyframes rx-stamp {
+  from { opacity: 0; transform: scale(1.6) rotate(-4deg); }
+  60% { opacity: 1; transform: scale(0.94) rotate(1deg); }
+  to { opacity: 1; transform: scale(1) rotate(0); }
+}
+
+/* Mensajes del hilo */
+.rx-msg {
+  display: grid;
+  gap: var(--space-1);
+  border-left: 3px solid var(--info);
+  border-radius: var(--radius-sm);
+  background: var(--surface-soft);
+  padding: var(--space-3);
+  transition: border-color 300ms ease, background-color 300ms ease;
+}
+
+.rx-msg header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--fs-sm);
+  flex-wrap: wrap;
+}
+
+.rx-msg header strong {
+  color: var(--text-strong);
+}
+
+.rx-msg p {
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+}
+
+.rx-time {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
+.rx-msg-reply {
+  border-left-color: var(--chip-teal-fg);
+}
+
+.rx-msg-reply.on {
+  background: color-mix(in srgb, var(--ok) 8%, var(--surface-soft));
+  border-left-color: var(--ok);
+}
+
+.rx-actions {
+  display: flex;
+  justify-content: center;
+  min-height: 44px;
+}
+
+/* --- Marcador lateral --- */
+.rx-board {
+  display: grid;
+  gap: var(--space-3);
+  align-content: start;
+  border-left: 1px solid var(--border);
+  padding-left: var(--space-5);
+}
+
+.rx-board-title {
+  font-family: var(--font-mono);
+  font-size: 0.64rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-muted);
+}
+
+.rx-stat {
+  display: grid;
+  gap: 2px;
+}
+
+.rx-stat span {
+  font-family: var(--font-mono);
+  font-size: 0.64rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+}
+
+.rx-stat strong {
+  font-family: var(--font-display);
+  font-size: 1.5rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  color: var(--text-strong);
+}
+
+.rx-stat.pop strong {
+  color: var(--accent);
+  animation: rx-pop 420ms var(--ease-out);
+}
+
+@keyframes rx-pop {
+  from { transform: scale(1); }
+  45% { transform: scale(1.18); }
+  to { transform: scale(1); }
+}
+
+.rx-board-note {
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-3);
+}
+
+/* --- Tachado animado en la franja de confianza --- */
+.lp-strike {
+  position: relative;
+  text-decoration: none;
+}
+
+.lp-strike::after {
+  content: "";
+  position: absolute;
+  left: -2px;
+  right: -2px;
+  top: 52%;
+  height: 2px;
+  border-radius: var(--radius-pill);
+  background: var(--side-on);
+  transform: scaleX(0);
+  transform-origin: left center;
+}
+
+.lp-reveal.is-visible .lp-strike::after {
+  transition: transform 500ms var(--ease-out) calc(400ms + var(--strike-i, 0) * 260ms);
+  transform: scaleX(1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rx-scanning .rx-scanline {
+    animation: none;
+    opacity: 0;
+  }
+
+  .rx-chip.on {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
+
+  .rx-stat.pop strong {
+    animation: none;
+  }
+
+  .lp-reveal .lp-strike::after {
+    transition: none;
+    transform: scaleX(1);
+  }
+}
+
+@media (max-width: 760px) {
+  .rx {
+    grid-template-columns: 1fr;
+  }
+
+  .rx-board {
+    border-left: 0;
+    padding-left: 0;
+    border-top: 1px solid var(--border);
+    padding-top: var(--space-4);
+    grid-template-columns: repeat(3, 1fr);
+  }
+
+  .rx-board-title,
+  .rx-board-note {
+    grid-column: 1 / -1;
+  }
+}

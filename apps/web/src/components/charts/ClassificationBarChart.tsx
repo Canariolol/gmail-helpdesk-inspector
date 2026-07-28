@@ -22,9 +22,9 @@ export function ClassificationBarChart({ metrics }: Props) {
           <CartesianGrid strokeDasharray="3 3" vertical={false} stroke={chartColors.grid} />
           <XAxis dataKey="name" tickLine={false} axisLine={false} tick={{ fill: chartColors.axis, fontSize: 12 }} />
           <YAxis allowDecimals={false} tickLine={false} axisLine={false} tick={{ fill: chartColors.axis, fontSize: 12 }} />
-          <Tooltip cursor={{ fill: "rgba(249, 115, 22, 0.06)" }} />
-          <Bar dataKey="value" radius={[8, 8, 0, 0]} maxBarSize={46}>
-            <LabelList dataKey="value" position="top" fill="#44403c" fontSize={12} fontWeight={700} />
+          <Tooltip cursor={{ fill: "var(--accent-soft)" }} />
+          <Bar dataKey="value" radius={[5, 5, 0, 0]} maxBarSize={40}>
+            <LabelList dataKey="value" position="top" fill="var(--text)" fontSize={12} fontWeight={600} />
             {data.map((entry) => (
               <Cell key={entry.name} fill={entry.color} />
             ))}

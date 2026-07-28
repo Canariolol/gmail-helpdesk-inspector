@@ -18,10 +18,10 @@ export const statusLabels: Record<AnalysisStatus, string> = {
 };
 
 const sourceLabels: Record<string, string> = {
-  rules: "Reglas automáticas",
-  heuristics: "Heurística",
-  ai: "IA",
-  manual: "Manual",
+  rules: "Clasificado automáticamente",
+  heuristics: "Clasificado automáticamente",
+  ai: "Revisado por Mira",
+  manual: "Revisado por tu equipo",
 };
 
 const reasonLabels: Record<string, string> = {
@@ -37,9 +37,9 @@ const reasonLabels: Record<string, string> = {
   "first relevant message comes from an external human sender": "El primer mensaje relevante viene de un remitente externo humano.",
   "found later internal non-automated reply": "Se encontró una respuesta interna posterior no automática.",
   "no later internal reply found": "No se encontró una respuesta interna posterior.",
-  "thread shape is suspicious and should be audited": "La forma del hilo es sospechosa y requiere auditoría.",
-  "AI audit auto-applied above strict threshold": "La auditoría IA se aplicó automáticamente por alta confianza.",
-  "AI audit requires manual confirmation": "La auditoría IA requiere confirmación manual.",
+  "thread shape is suspicious and should be audited": "Mira detectó señales que requieren revisión.",
+  "AI audit auto-applied above strict threshold": "Mira confirmó esta clasificación con alta confianza.",
+  "AI audit requires manual confirmation": "Mira necesita tu confirmación para esta clasificación.",
 };
 
 export function split(value: string): string[] {
@@ -90,7 +90,7 @@ export function formatSource(value: string): string {
 export function formatReason(value: string): string {
   if (reasonLabels[value]) return reasonLabels[value];
   if (value.startsWith("AI audit failed:")) {
-    return value.replace("AI audit failed:", "La auditoría IA falló:");
+    return value.replace("AI audit failed:", "Mira no pudo completar esta revisión:");
   }
   return value;
 }

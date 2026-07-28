@@ -1,0 +1,9 @@
+# Configuración de cargo-audit (CI y local).
+[advisories]
+ignore = [
+  # RSA Marvin Attack (sin fix publicado). `rsa` llega vía `jsonwebtoken`,
+  # que sólo firma JWT localmente para service accounts; no hay descifrado
+  # RSA expuesto a mediciones de tiempo remotas. Reevaluar cuando exista
+  # una versión corregida de `rsa`.
+  "RUSTSEC-2023-0071",
+]

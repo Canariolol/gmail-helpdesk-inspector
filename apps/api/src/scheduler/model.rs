@@ -1,9 +1,10 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// Configuración del análisis programado de un usuario. Vive en Firestore en
-/// `scheduleConfigs/{user_email}` y todos los campos opcionales tienen default
-/// para que el documento pueda editarse a mano sin romper la deserialización.
+/// Configuración del análisis programado de un usuario. Vive en
+/// `mira.records` con `kind='schedule_config'` e `id={user_email}`, y todos los
+/// campos opcionales tienen default para que el JSON pueda editarse a mano sin
+/// romper la deserialización.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScheduleConfig {
     pub user_email: String,
@@ -21,6 +22,8 @@ pub struct ScheduleConfig {
     pub ignored_keywords: Vec<String>,
     #[serde(default = "default_timezone")]
     pub timezone: String,
+    #[serde(default = "default_analysis_time")]
+    pub analysis_time: String,
     #[serde(default)]
     pub gmail_max_threads: Option<u32>,
     pub updated_at: DateTime<Utc>,
@@ -55,4 +58,8 @@ fn default_true() -> bool {
 
 fn default_timezone() -> String {
     "America/Santiago".to_string()
+}
+
+fn default_analysis_time() -> String {
+    "08:00".to_string()
 }

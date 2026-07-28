@@ -1,4 +1,5 @@
 import type { Classification } from "../api/types";
+import { PrivacyCallout } from "../components/common/PrivacyCallout";
 import { StatusBadge } from "../components/common/StatusBadge";
 
 const classifications: Classification[] = [
@@ -15,7 +16,7 @@ export function AyudaView() {
   return (
     <div className="view ayuda">
       <section className="card">
-        <h2>Cómo usar Gmail Inspector</h2>
+        <h2>Cómo usar Mira</h2>
         <ol className="help-steps">
           <li>
             <strong>Configura y analiza.</strong> En <em>Resumen</em>, define el rango de fechas y horario, los dominios
@@ -23,7 +24,7 @@ export function AyudaView() {
             crear e iniciar el análisis de la casilla.
           </li>
           <li>
-            <strong>Sigue el progreso.</strong> El banner muestra el avance (hilos procesados y tokens de IA consumidos).
+            <strong>Sigue el progreso.</strong> El banner muestra el avance y los hilos procesados.
             Las métricas y gráficos se actualizan automáticamente cada pocos segundos.
           </li>
           <li>
@@ -32,7 +33,7 @@ export function AyudaView() {
             clasificación.
           </li>
           <li>
-            <strong>Revisa manualmente.</strong> En <em>Revisión manual</em> encontrarás los hilos donde la IA tuvo dudas.
+            <strong>Revisa manualmente.</strong> En <em>Revisión manual</em> encontrarás las conversaciones donde Mira necesita tu confirmación.
             Corrige la clasificación, marca si fue respondido y guarda la revisión: las métricas se recalculan.
           </li>
           <li>
@@ -55,10 +56,28 @@ export function AyudaView() {
       <section className="card">
         <h2>Métricas</h2>
         <ul className="help-list plain">
-          <li><strong>T. medio respuesta:</strong> promedio entre la recepción del primer mensaje del cliente y la primera respuesta interna.</li>
+          <li>
+            <strong>T. medio respuesta:</strong> promedio entre la recepción del primer mensaje del cliente y la primera
+            respuesta interna.
+          </li>
           <li><strong>P90 respuesta:</strong> el 90% de las solicitudes se respondió en este tiempo o menos.</li>
           <li><strong>Cierre medio:</strong> promedio entre la recepción y el último envío interno del hilo.</li>
-          <li><strong>Confianza:</strong> certeza promedio de la clasificación automática (reglas + IA).</li>
+          <li><strong>Pendientes de revisión:</strong> conversaciones donde Mira necesita tu confirmación; pueden tener un estado tentativo mientras esperan revisión.</li>
+          <li><strong>Clasificación automática:</strong> proporción de hilos que no están pendientes de revisión manual.</li>
+        </ul>
+      </section>
+      <section className="card">
+        <h2>Privacidad y permisos</h2>
+        <PrivacyCallout />
+        <ul className="help-list plain">
+          <li>El permiso sobre tu casilla es exclusivamente de solo lectura.</li>
+          <li>Mira no envía, etiqueta, archiva, edita ni elimina correos.</li>
+          <li>Los cuerpos completos se usan solo durante el análisis/auditoría y no se conservan como datos de producto.</li>
+          <li>
+            Mira viene activa para mejorar la clasificación. Puedes desactivarla desde
+            <em> Configuración</em>; los casos inciertos pasarán a revisión manual y el cambio se aplicará al próximo análisis.
+          </li>
+          <li>Las métricas guardan trazabilidad: puedes revisar qué hilos componen cada número.</li>
         </ul>
       </section>
     </div>
@@ -72,5 +91,5 @@ const classificationDescriptions: Record<Classification, string> = {
   newsletter: "Boletines y correos de marketing.",
   spam: "Correo no deseado.",
   misc: "Correo ignorado según los filtros configurados.",
-  ambiguous: "La IA no pudo clasificarlo con certeza; requiere revisión manual.",
+  ambiguous: "Mira necesita una revisión manual para confirmar esta clasificación.",
 };

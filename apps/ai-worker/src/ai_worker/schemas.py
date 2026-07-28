@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 
 Classification = Literal[
@@ -52,9 +52,78 @@ class EmailMessage(BaseModel):
     body_text: str | None = None
 
 
+class AuditPolicyContext(BaseModel):
+    mailbox_email: str = ""
+    mailbox_display_name: str = ""
+    workspace_domain: str = ""
+    internal_domains: list[str] = Field(default_factory=list)
+    responder_emails: list[str] = Field(default_factory=list)
+    mailbox_aliases: list[str] = Field(default_factory=list)
+    valid_request_criteria: list[str] = Field(default_factory=list)
+    non_responsibility_rules: list[str] = Field(default_factory=list)
+    ignored_senders: list[str] = Field(default_factory=list)
+    ignored_domains: list[str] = Field(default_factory=list)
+    ignored_keywords: list[str] = Field(default_factory=list)
+    count_historical_closures_as_valid: bool = False
+    count_previous_request_followups_as_valid: bool = False
+    count_org_hosted_training_as_valid: bool = True
+    prompt_version: str = ""
+    allowed_fields: list[str] = Field(default_factory=list)
+
+
 class AuditThreadRequest(BaseModel):
     thread: EmailThread
     messages: list[EmailMessage]
+    policy_context: AuditPolicyContext | None = None
+    # Etiquetas/pestañas de Gmail del hilo (INBOX, CATEGORY_*, etiquetas de
+    # usuario). Señal adicional para la decisión; opcional por compatibilidad.
+    gmail_labels: list[str] = Field(default_factory=list)
+
+
+class BatchMessageSummary(BaseModel):
+    message_id: str
+    from_email: str
+    date: datetime
+    is_internal: bool
+    is_automated: bool
+    content: str = Field(default="", validation_alias=AliasChoices("content", "excerpt"))
+
+
+class BatchThreadSummary(BaseModel):
+    thread_id: str
+    subject: str
+    gmail_labels: list[str] = Field(default_factory=list)
+    focus_message_id: str | None = None
+    messages: list[BatchMessageSummary] = Field(default_factory=list)
+
+
+class BatchAuditRequest(BaseModel):
+    run_id: str = ""
+    attempt_id: str = ""
+    policy_context: AuditPolicyContext | None = None
+    threads: list[BatchThreadSummary] = Field(min_length=1, max_length=20)
+
+
+class BatchAuditDecision(BaseModel):
+    thread_id: str
+    classification: Classification
+    is_valid_client_request: bool
+    is_answered: bool
+    first_client_message_id: str | None = None
+    first_internal_reply_message_id: str | None = None
+    last_internal_message_id: str | None = None
+    confidence: float = Field(ge=0, le=1)
+    manual_review_required: bool
+    issues: list[str] = Field(default_factory=list)
+
+
+class BatchAuditResponse(BaseModel):
+    decisions: list[BatchAuditDecision]
+    input_tokens: int = Field(ge=0)
+    output_tokens: int = Field(ge=0)
+    outcome: Literal["valid", "invalid_output"] = "valid"
+    stop_reason: str | None = None
+    aws_request_id: str | None = None
 
 
 class AuditThreadResponse(BaseModel):
@@ -81,3 +150,7 @@ class BedrockDecision(BaseModel):
     confidence: float = Field(ge=0, le=1)
     manual_review_required: bool
     issues: list[str] = Field(default_factory=list)
+
+
+class BedrockBatchDecision(BaseModel):
+    decisions: list[BatchAuditDecision]

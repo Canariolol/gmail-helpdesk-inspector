@@ -1,10 +1,17 @@
 import json
+from uuid import UUID
 
 import httpx
 import pytest
 
-from ai_worker.bedrock import audit_with_bedrock
-from ai_worker.schemas import AuditThreadRequest
+from ai_worker.bedrock import (
+    audit_batch_with_bedrock,
+    audit_with_bedrock,
+    build_batch_system_prompt,
+    build_batch_user_prompt,
+    build_system_prompt,
+)
+from ai_worker.schemas import AuditPolicyContext, AuditThreadRequest, BatchAuditRequest
 from ai_worker.settings import Settings
 
 
@@ -45,6 +52,84 @@ def payload() -> AuditThreadRequest:
             ],
         }
     )
+
+
+def batch_payload() -> BatchAuditRequest:
+    return BatchAuditRequest.model_validate(
+        {
+            "policy_context": {
+                "mailbox_email": "help@acme.test",
+                "internal_domains": ["acme.test"],
+                "valid_request_criteria": ["Clientes externos piden soporte"],
+            },
+            "threads": [
+                {
+                    "thread_id": "g1",
+                    "subject": "Ayuda",
+                    "focus_message_id": "m1",
+                    "messages": [
+                        {
+                            "message_id": "m1",
+                            "from_email": "client@example.com",
+                            "date": "2026-06-12T10:00:00Z",
+                            "is_internal": False,
+                            "is_automated": False,
+                            "content": "Necesito ayuda",
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_worker_redacts_bedrock_errors_and_returns_request_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ai_worker import main
+
+    async def fail_bedrock(*_args: object, **_kwargs: object):
+        raise RuntimeError("provider body contains secret-token")
+
+    monkeypatch.setattr(main, "audit_with_bedrock", fail_bedrock)
+    main.app.state.bedrock_client = object()
+    transport = httpx.ASGITransport(app=main.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/audit/thread", json=payload().model_dump(mode="json")
+        )
+
+    assert response.status_code == 502
+    assert response.json() == {"detail": "AI worker unavailable"}
+    assert "secret-token" not in response.text
+    UUID(response.headers["x-request-id"])
+
+
+@pytest.mark.asyncio
+async def test_worker_validation_error_does_not_echo_request_payload() -> None:
+    from ai_worker.main import app
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/audit/thread", json={"thread": "secret-token"})
+
+    assert response.status_code == 422
+    assert response.json() == {"detail": "Invalid audit request"}
+    assert "secret-token" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_worker_uses_only_valid_forwarded_request_ids() -> None:
+    from ai_worker.main import app
+
+    forwarded = "a0b7c4d2-83ef-4d23-bd0f-9f6a1e659edb"
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/health", headers={"x-request-id": forwarded})
+        invalid = await client.get("/health", headers={"x-request-id": "not-a-uuid"})
+
+    assert response.headers["x-request-id"] == forwarded
+    assert invalid.headers["x-request-id"] != "not-a-uuid"
+    UUID(invalid.headers["x-request-id"])
 
 
 @pytest.mark.asyncio
@@ -99,8 +184,37 @@ async def test_audit_parses_bedrock_response() -> None:
     assert result.output_tokens == 45
 
 
-def test_settings_default_model_is_nova_2_lite() -> None:
-    assert Settings.model_fields["bedrock_model_id"].default == NOVA_2_LITE_MODEL_ID
+def test_settings_default_model_is_sonnet() -> None:
+    assert Settings.model_fields["bedrock_model_id"].default == "us.anthropic.claude-sonnet-4-6"
+
+
+def test_system_prompt_has_no_tenant_hardcodes_by_default() -> None:
+    prompt = build_system_prompt(Settings())
+    forbidden = ["west-ingenieria", "West Ingeniería", "catherine.trivino"]
+    for value in forbidden:
+        assert value not in prompt
+
+
+def test_system_prompt_uses_request_policy_context() -> None:
+    prompt = build_system_prompt(
+        Settings(),
+        AuditPolicyContext(
+            mailbox_email="soporte@acme.test",
+            mailbox_display_name="Soporte Acme",
+            workspace_domain="acme.test",
+            internal_domains=["acme.test"],
+            responder_emails=["agent@acme.test"],
+            mailbox_aliases=["help@acme.test"],
+            valid_request_criteria=["Clientes externos piden soporte de plataforma"],
+            non_responsibility_rules=["Facturación no es responsabilidad de soporte"],
+            ignored_domains=["calendar.google.com"],
+            prompt_version="test_v1",
+        ),
+    )
+    assert "soporte@acme.test" in prompt
+    assert "help@acme.test" in prompt
+    assert "Clientes externos piden soporte de plataforma" in prompt
+    assert "Facturación no es responsabilidad de soporte" in prompt
 
 
 @pytest.mark.asyncio
@@ -146,3 +260,146 @@ async def test_audit_parses_fenced_json_response() -> None:
     assert result.manual_review_required is True
     assert result.input_tokens == 100
     assert result.output_tokens == 20
+
+
+def test_batch_prompt_uses_only_selected_content_and_metadata() -> None:
+    prompt = build_batch_user_prompt(batch_payload())
+    body = json.loads(prompt)
+    assert body["threads"][0]["focus_message_id"] == "m1"
+    message = body["threads"][0]["messages"][0]
+    assert message["content"] == "Necesito ayuda"
+    assert set(message) == {
+        "message_id",
+        "from_email",
+        "date",
+        "is_internal",
+        "is_automated",
+        "content",
+    }
+    assert "snippet" not in message
+    assert "text" not in message
+    assert "automatic_classification" not in body["threads"][0]
+    assert "policy_context" not in body
+
+
+def test_batch_system_prompt_resolves_clear_non_requests_without_review() -> None:
+    prompt = build_batch_system_prompt(Settings(), batch_payload().policy_context)
+
+    assert 'test emails with no support request are "misc"' in prompt
+    assert 'Use "ambiguous" only when at least two materially plausible' in prompt
+    assert "manual_review_required=true only when a human decision is genuinely needed" in prompt
+    assert "Earlier messages are context only" in prompt
+    assert "gmail.com is not google.com" in prompt
+    assert "Historical acknowledgements/thank-yous/closures" in prompt
+
+
+def test_batch_payload_accepts_legacy_excerpt() -> None:
+    legacy = batch_payload().model_dump(mode="json")
+    message = legacy["threads"][0]["messages"][0]
+    message["excerpt"] = message.pop("content")
+
+    parsed = BatchAuditRequest.model_validate(legacy)
+
+    assert parsed.threads[0].messages[0].content == "Necesito ayuda"
+
+
+@pytest.mark.asyncio
+async def test_batch_audit_parses_decisions_and_uses_batch_model() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url == httpx.URL(
+            "https://bedrock-runtime.us-east-1.amazonaws.com"
+            "/model/amazon.nova-2-lite-v1%3A0/converse"
+        )
+        request_json = json.loads(request.content)
+        assert len(request_json["system"]) == 1
+        assert request_json["inferenceConfig"]["maxTokens"] == 6000
+        output_format = request_json["outputConfig"]["textFormat"]
+        assert output_format["type"] == "json_schema"
+        schema = json.loads(output_format["structure"]["jsonSchema"]["schema"])
+        assert schema["properties"]["decisions"]["minItems"] == 1
+        return httpx.Response(
+            200,
+            headers={"x-amzn-requestid": "aws-request-1"},
+            json={
+                "output": {
+                    "message": {
+                        "content": [
+                            {
+                                "text": json.dumps(
+                                    {
+                                        "decisions": [
+                                            {
+                                                "thread_id": "g1",
+                                                "classification": "valid_client_request",
+                                                "is_valid_client_request": True,
+                                                "is_answered": False,
+                                                "first_client_message_id": "m1",
+                                                "first_internal_reply_message_id": None,
+                                                "last_internal_message_id": None,
+                                                "confidence": 0.95,
+                                                "manual_review_required": False,
+                                                "issues": [],
+                                            }
+                                        ]
+                                    }
+                                )
+                            }
+                        ]
+                    }
+                },
+                "stopReason": "end_turn",
+                "usage": {"inputTokens": 321, "outputTokens": 54},
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        result = await audit_batch_with_bedrock(
+            batch_payload(),
+            Settings(
+                AWS_BEARER_TOKEN_BEDROCK="token",
+                BEDROCK_BATCH_MODEL_ID=NOVA_2_LITE_MODEL_ID,
+            ),
+            client,
+        )
+
+    assert result.decisions[0].thread_id == "g1"
+    assert result.decisions[0].first_client_message_id == "m1"
+    assert result.input_tokens == 321
+    assert result.output_tokens == 54
+    assert result.outcome == "valid"
+    assert result.stop_reason == "end_turn"
+    assert result.aws_request_id == "aws-request-1"
+
+
+@pytest.mark.asyncio
+async def test_batch_audit_preserves_usage_when_model_output_is_invalid() -> None:
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"x-amzn-requestid": "aws-invalid-1"},
+            json={
+                "output": {
+                    "message": {
+                        "content": [{"text": '{"decisions":[{"thread_id":"g1"}]}'}]
+                    }
+                },
+                "stopReason": "end_turn",
+                "usage": {"inputTokens": 987, "outputTokens": 65},
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        result = await audit_batch_with_bedrock(
+            batch_payload(),
+            Settings(AWS_BEARER_TOKEN_BEDROCK="token"),
+            client,
+        )
+
+    assert result.decisions == []
+    assert result.outcome == "invalid_output"
+    assert result.input_tokens == 987
+    assert result.output_tokens == 65
+    assert result.stop_reason == "end_turn"
+    assert result.aws_request_id == "aws-invalid-1"

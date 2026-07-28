@@ -15,7 +15,7 @@ export function ThreadList(props: Props) {
   return (
     <section className="card thread-section">
       <div className="card-toolbar">
-        <h2>Hilos auditables</h2>
+        <h2>Conversaciones</h2>
         <ThreadFilterSelect value={props.filter} onChange={props.onFilter} />
       </div>
       <div className="thread-list">

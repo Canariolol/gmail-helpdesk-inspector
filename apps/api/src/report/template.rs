@@ -49,7 +49,7 @@ pub fn build_report_email(
     let body = format!(
         "{}{}{}{}",
         metrics_section(run),
-        findings_section(run, review_items.len()),
+        findings_section(run),
         review_section(review_items),
         cta_section(web_base_url)
     );
@@ -105,7 +105,7 @@ fn wrap_html(title: &str, window: &str, greeting: &str, body_rows: &str) -> Stri
 <tr><td style="padding:24px 28px 8px 28px;color:{TEXT};font-size:15px;line-height:1.6;">{}</td></tr>
 {body_rows}
 <tr><td style="padding:20px 28px 28px 28px;border-top:1px solid {BORDER};color:{TEXT_MUTED};font-size:12px;line-height:1.6;">
-Generado automáticamente por Gmail Helpdesk Inspector · análisis programado de lunes a viernes a las 08:00 (America/Santiago).
+Generado automáticamente por Gmail Helpdesk Inspector · análisis programado según la configuración de tu organización.
 </td></tr>
 </table>
 </td></tr>
@@ -152,9 +152,14 @@ fn metrics_section(run: &AnalysisRun) -> String {
             None,
         ),
         metric_card("Hilos ambiguos", &metrics.ambiguous.to_string(), None),
+        metric_card(
+            "Pendientes de revisión",
+            &metrics.pending_review.to_string(),
+            None,
+        ),
         metric_card("Descartados", &metrics.ignored.to_string(), None),
         metric_card(
-            "Confianza del reporte",
+            "Clasificación automática",
             &format!("{:.0}%", metrics.report_confidence * 100.0),
             None,
         ),
@@ -195,7 +200,7 @@ fn metric_card(label: &str, value: &str, colors: Option<(&str, &str)>) -> String
     )
 }
 
-fn findings_section(run: &AnalysisRun, review_count: usize) -> String {
+fn findings_section(run: &AnalysisRun) -> String {
     let metrics = &run.metrics;
     let mut findings = Vec::new();
     if metrics.unanswered > 0 {
@@ -213,10 +218,11 @@ fn findings_section(run: &AnalysisRun, review_count: usize) -> String {
             plural(metrics.ambiguous, "hilo quedó", "hilos quedaron"),
         ));
     }
-    if review_count > 0 {
+    if metrics.pending_review > 0 {
         findings.push(format!(
-            "<strong>{review_count}</strong> {} tu revisión manual (detalle más abajo).",
-            plural(review_count as u64, "hilo espera", "hilos esperan"),
+            "<strong>{}</strong> {} tu revisión manual (detalle más abajo).",
+            metrics.pending_review,
+            plural(metrics.pending_review, "hilo espera", "hilos esperan"),
         ));
     }
     if findings.is_empty() {
@@ -354,6 +360,15 @@ mod tests {
         AnalysisRun {
             id: "run-1".to_string(),
             user_email: "a@x.cl".to_string(),
+            org_id: None,
+            mailbox_id: None,
+            trigger_type: None,
+            policy_version_id: None,
+            policy_hash: None,
+            policy_snapshot: None,
+            gmail_scope_snapshot: vec![],
+            retention_expires_at: None,
+            data_minimization_mode: None,
             config: AnalysisConfig {
                 date_from: "2026-06-12".to_string(),
                 date_to: "2026-06-14".to_string(),
@@ -364,6 +379,8 @@ mod tests {
                 ignored_senders: vec![],
                 ignored_domains: vec![],
                 ignored_keywords: vec![],
+                include_labels: vec![],
+                exclude_labels: vec![],
             },
             status: AnalysisStatus::Completed,
             progress_message: String::new(),

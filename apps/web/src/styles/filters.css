@@ -1,0 +1,439 @@
+/* ============================================================
+   Selectores de filtros: popover genérico + calendario + horario + presets
+   ============================================================ */
+
+/* ---- Popover genérico (disparador + panel anclado) ---- */
+.fpop {
+  position: relative;
+  display: inline-flex;
+}
+
+.fpop-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 38px;
+  max-width: 280px;
+  padding: 6px 13px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-strong);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 150ms ease, background-color 150ms ease, box-shadow 150ms ease;
+}
+
+.fpop-trigger:hover,
+.fpop.is-open .fpop-trigger {
+  border-color: var(--primary);
+  background: var(--surface-soft);
+  box-shadow: 0 0 0 3px var(--primary-soft);
+}
+
+.fpop-trigger.is-active {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+  color: var(--primary-strong);
+}
+
+.fpop-icon {
+  flex: 0 0 auto;
+  color: var(--primary-strong);
+}
+
+.fpop-value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  font-weight: 500;
+}
+
+.fpop-sep {
+  color: var(--text-muted);
+  font-weight: 700;
+}
+
+.fpop-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  z-index: 50;
+  min-width: 240px;
+  max-width: min(92vw, 360px);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 18px 48px rgba(120, 80, 35, 0.18);
+  padding: var(--space-3);
+  animation: fpop-in 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.fpop-start {
+  left: 0;
+}
+
+.fpop-end {
+  right: 0;
+}
+
+@keyframes fpop-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.98);
+  }
+}
+
+/* ---- Calendario ---- */
+.cal {
+  display: grid;
+  gap: var(--space-3);
+  width: 260px;
+}
+
+.cal-presets,
+.timepick-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.cal-preset {
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--text);
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  padding: 4px 10px;
+  cursor: pointer;
+  transition: border-color 120ms ease, background-color 120ms ease, color 120ms ease;
+}
+
+.cal-preset:hover {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+  color: var(--primary-strong);
+}
+
+.cal-head {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.cal-title {
+  text-align: center;
+  font-weight: 800;
+  color: var(--text-strong);
+  font-size: var(--fs-base);
+}
+
+.cal-nav {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: border-color 120ms ease, background-color 120ms ease, color 120ms ease;
+}
+
+.cal-nav:hover {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+  color: var(--primary-strong);
+}
+
+.cal-weekdays {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 2px;
+  font-size: 0.7rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.cal-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 2px;
+}
+
+.cal-day {
+  position: relative;
+  display: grid;
+  place-items: center;
+  height: 32px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.cal-day:hover {
+  background: var(--primary-soft);
+  color: var(--primary-strong);
+}
+
+.cal-day.is-muted {
+  color: var(--text-muted);
+  opacity: 0.5;
+}
+
+.cal-day.in-range {
+  background: var(--primary-soft);
+  color: var(--primary-strong);
+  border-radius: 0;
+}
+
+.cal-day.is-selected {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-radius: var(--radius-sm);
+}
+
+.cal-day.is-today::after {
+  content: "";
+  position: absolute;
+  bottom: 4px;
+  width: 4px;
+  height: 4px;
+  border-radius: var(--radius-pill);
+  background: var(--primary);
+}
+
+.cal-day.is-selected.is-today::after {
+  background: var(--accent-ink);
+}
+
+/* ---- Selector de horario ---- */
+.timepick {
+  display: grid;
+  gap: var(--space-3);
+  width: 240px;
+}
+
+.timepick-cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-2);
+}
+
+.timecol {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.timecol-title {
+  font-size: 0.7rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+}
+
+.timecol-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  display: grid;
+  gap: 2px;
+  max-height: 200px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-soft);
+}
+
+.timecol-opt {
+  width: 100%;
+  text-align: center;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  padding: 6px 0;
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.timecol-opt:hover {
+  background: var(--primary-soft);
+  color: var(--primary-strong);
+}
+
+.timecol-opt.is-active {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+/* ---- Filtros guardados ---- */
+.presets {
+  display: grid;
+  gap: var(--space-3);
+  width: 260px;
+}
+
+.presets-list {
+  display: grid;
+  gap: 2px;
+}
+
+.presets-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 2px;
+  border-radius: var(--radius-md);
+}
+
+.presets-row.is-active {
+  background: var(--primary-soft);
+}
+
+.presets-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  width: 100%;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text);
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  padding: 8px 10px;
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.presets-item:hover {
+  background: var(--surface-soft);
+  color: var(--primary-strong);
+}
+
+.presets-item.is-active {
+  color: var(--primary-strong);
+}
+
+.presets-item-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.presets-item svg {
+  flex: 0 0 auto;
+  color: var(--primary-strong);
+}
+
+.presets-del {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.presets-del:hover {
+  background: var(--chip-red-bg);
+  color: var(--chip-red-fg);
+}
+
+.presets-empty {
+  margin: 0;
+  padding: var(--space-2);
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+}
+
+.presets-save {
+  display: flex;
+  gap: var(--space-2);
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-3);
+}
+
+.presets-save input {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 36px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  padding: 6px 10px;
+  font-size: var(--fs-sm);
+  background: var(--surface);
+}
+
+.presets-save-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  padding: 0 12px;
+  cursor: pointer;
+  transition: filter 150ms ease;
+}
+
+.presets-save-btn:hover:not(:disabled) {
+  filter: brightness(1.05);
+}
+
+.presets-save-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ---- Responsive: pills a ancho completo en móvil ---- */
+@media (max-width: 760px) {
+  .filter-bar .fpop,
+  .filter-bar .label-picker-trigger {
+    flex: 1 1 100%;
+  }
+
+  .fpop-trigger,
+  .filter-bar .label-picker-trigger {
+    max-width: none;
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .fpop-panel {
+    max-width: min(92vw, 320px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fpop-panel {
+    animation: none;
+  }
+}
