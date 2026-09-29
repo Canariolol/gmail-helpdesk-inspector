@@ -22,6 +22,7 @@ Environment overrides:
   API_DEPLOY_EXTRA_ARGS  Optional; extra gcloud args for the api deploy
                          (e.g. "--update-env-vars APP_ENV=production")
   VITE_MERCADOPAGO_PUBLIC_KEY  Required to build embedded Mercado Pago checkout
+  SKIP_CHECKS      Set to 1 to skip scripts/check-all.sh (CI already ran it)
   MICROSOFT_TENANT             Defaults to common
   MICROSOFT_REDIRECT_URL_PROD  Defaults to WEB_BASE_URL of the deployed service
                                + /mailbox/connect/microsoft/callback
@@ -135,6 +136,18 @@ print_candidate_url() {
   fi
 }
 
+# `gcloud run deploy` no mueve el tráfico si quedó anclado a una revisión por
+# nombre (secuela de un deploy --no-traffic): la revisión nueva queda sin
+# usuarios y el deploy "exitoso" no cambia nada. Pasó con el worker 24-07→29-09.
+promote_latest() {
+  [[ "$no_traffic" == true ]] && return 0
+  gcloud run services update-traffic "$1" \
+    --project "$GCP_PROJECT_ID" \
+    --region "$GCP_REGION" \
+    --to-latest \
+    --quiet
+}
+
 build_push_deploy() {
   local name="$1"
   local dockerfile="$2"
@@ -159,6 +172,7 @@ build_push_deploy() {
     --quiet \
     "${deploy_traffic_args[@]}" \
     "$@"
+  promote_latest "$service"
 
   if [[ "$no_traffic" == true ]]; then
     print_candidate_url "$service"
@@ -335,6 +349,7 @@ deploy_web() {
     --set-env-vars "API_PROXY_TARGET=${api_url}" \
     --quiet \
     "${deploy_traffic_args[@]}"
+  promote_latest "$WEB_SERVICE"
 
   if [[ "$no_traffic" == true ]]; then
     print_candidate_url "$WEB_SERVICE"
@@ -356,8 +371,12 @@ if [[ "$target" == "web" || "$target" == "all" ]] && [[ -z "${VITE_MERCADOPAGO_P
   exit 1
 fi
 
-echo "Running pre-deploy checks..."
-./scripts/check-all.sh
+if [[ "${SKIP_CHECKS:-}" == 1 ]]; then
+  echo "Skipping pre-deploy checks (SKIP_CHECKS=1)."
+else
+  echo "Running pre-deploy checks..."
+  ./scripts/check-all.sh
+fi
 
 gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
 

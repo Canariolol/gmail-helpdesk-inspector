@@ -42,3 +42,26 @@ jobs:
         run: |
           uv export --directory apps/ai-worker --frozen --no-emit-project --format requirements-txt -o /tmp/ai-worker-requirements.txt
           uvx pip-audit --requirement /tmp/ai-worker-requirements.txt --disable-pip
+
+  deploy:
+    needs: verify
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    concurrency: production-deploy
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      GCP_PROJECT_ID: gmail-helpdesk-inspector
+      SKIP_CHECKS: "1"
+      VITE_MERCADOPAGO_PUBLIC_KEY: ${{ vars.VITE_MERCADOPAGO_PUBLIC_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      # Sin llaves: el pool solo acepta tokens OIDC de este repo en refs/heads/main.
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/715291187926/locations/global/workloadIdentityPools/github/providers/github-oidc
+          service_account: github-deployer@gmail-helpdesk-inspector.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v3
+      # ponytail: despliega los tres servicios en cada push; filtrar por paths si el build se vuelve lento.
+      - run: ./scripts/redeploy-gcp.sh all

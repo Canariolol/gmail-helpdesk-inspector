@@ -1,5 +1,21 @@
 # TLDR Redeploy:
 
+## Deploy automático (CI)
+
+Cada push a `main` corre el job `verify` de `.github/workflows/ci.yml` y, si
+pasa, el job `deploy` ejecuta `scripts/redeploy-gcp.sh all` con
+`SKIP_CHECKS=1` (los checks ya corrieron en `verify`). Autentica sin llaves vía
+Workload Identity Federation: pool `github`, provider `github-oidc` (solo
+acepta `Canariolol/gmail-helpdesk-inspector` en `refs/heads/main`) y cuenta
+`github-deployer@gmail-helpdesk-inspector.iam.gserviceaccount.com` con
+`run.developer`, `artifactregistry.writer` sobre `ghmi` y `serviceAccountUser`
+sobre las tres cuentas runtime. La web toma `VITE_MERCADOPAGO_PUBLIC_KEY` de
+las variables del repo en GitHub. Las credenciales de Microsoft no viajan al
+CI: `--update-env-vars` conserva las que ya tiene el servicio.
+
+El script ahora devuelve el tráfico a la última revisión tras cada deploy
+normal (`promote_latest`); solo `--no-traffic` deja el tráfico donde estaba.
+
 ## Revisión candidata sin tráfico
 
 Antes de promocionar una imagen, crea una revisión aislada y etiquetada:
