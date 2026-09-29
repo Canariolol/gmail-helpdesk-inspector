@@ -184,6 +184,54 @@ async def test_audit_parses_bedrock_response() -> None:
     assert result.output_tokens == 45
 
 
+@pytest.mark.asyncio
+async def test_audit_skips_reasoning_blocks_before_json() -> None:
+    """Los modelos con razonamiento (minimax) ponen el JSON despues del reasoning."""
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "output": {
+                    "message": {
+                        "content": [
+                            {"reasoningContent": {"reasoningText": {"text": "pienso..."}}},
+                            {
+                                "text": json.dumps(
+                                    {
+                                        "classification": "valid_client_request",
+                                        "is_valid_client_request": True,
+                                        "is_answered": False,
+                                        "first_client_message_id": "m1",
+                                        "first_internal_reply_message_id": None,
+                                        "last_internal_message_id": None,
+                                        "confidence": 0.88,
+                                        "manual_review_required": False,
+                                        "issues": [],
+                                    }
+                                )
+                            },
+                        ]
+                    }
+                },
+                "usage": {"inputTokens": 10, "outputTokens": 20},
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        result = await audit_with_bedrock(
+            payload(),
+            Settings(
+                AWS_BEARER_TOKEN_BEDROCK="token",
+                BEDROCK_MODEL_ID="minimax.minimax-m2.5",
+            ),
+            client,
+        )
+
+    assert result.confidence == 0.88
+
+
 def test_settings_default_model_is_sonnet() -> None:
     assert Settings.model_fields["bedrock_model_id"].default == "us.anthropic.claude-sonnet-4-6"
 

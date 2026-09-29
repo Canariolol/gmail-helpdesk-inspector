@@ -170,6 +170,21 @@ Answer guidance:
 FENCED_JSON_RE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.DOTALL | re.IGNORECASE)
 
 
+def output_text(raw: dict) -> str:
+    """Primer bloque de texto de la respuesta Converse.
+
+    No se puede asumir content[0]: los modelos con razonamiento (minimax) emiten
+    uno o más bloques `reasoningContent` antes del `text` con el JSON pedido.
+    """
+    blocks = raw.get("output", {}).get("message", {}).get("content", [])
+    if not isinstance(blocks, list):
+        return ""
+    for block in blocks:
+        if isinstance(block, dict) and isinstance(block.get("text"), str):
+            return block["text"]
+    return ""
+
+
 def extract_json_text(text: str) -> str:
     match = FENCED_JSON_RE.match(text)
     if match:
@@ -337,13 +352,9 @@ async def audit_batch_with_bedrock(
     stop_reason = raw.get("stopReason")
     aws_request_id = response.headers.get("x-amzn-requestid")
     try:
-        text = (
-            raw.get("output", {})
-            .get("message", {})
-            .get("content", [{}])[0]
-            .get("text", "")
+        decision = BedrockBatchDecision.model_validate_json(
+            extract_json_text(output_text(raw))
         )
-        decision = BedrockBatchDecision.model_validate_json(extract_json_text(text))
     except (AttributeError, IndexError, TypeError, ValidationError):
         return BatchAuditResponse(
             decisions=[],
@@ -403,13 +414,7 @@ async def audit_with_bedrock(
         if owns_client:
             await client.aclose()
 
-    text = (
-        raw.get("output", {})
-        .get("message", {})
-        .get("content", [{}])[0]
-        .get("text", "")
-    )
-    decision = BedrockDecision.model_validate_json(extract_json_text(text))
+    decision = BedrockDecision.model_validate_json(extract_json_text(output_text(raw)))
     usage = raw.get("usage", {})
     return AuditThreadResponse(
         **decision.model_dump(),
