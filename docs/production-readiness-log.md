@@ -3350,7 +3350,7 @@ en `bedrock.py` (bloques `reasoningContent`) sigue sin desplegar.
 
 ## 2026-09-29 — Deploy automático en push a `main`
 
-**Estado:** configurado; falta el primer push a `main` para verificarlo.
+**Estado:** terminado y verificado en GCP (run 36602788340 de GitHub Actions).
 
 **Qué se hizo:** job `deploy` en `.github/workflows/ci.yml` (depende de
 `verify`, solo en push a `main`, `concurrency: production-deploy`) que corre
@@ -3372,6 +3372,14 @@ RUSTSEC-2026-0285 (rustls 0.23.40, TLS 1.3), que habría dejado `verify` en
 rojo y bloqueado todo deploy: `cargo update -p rustls` → 0.23.45 (y
 rustls-webpki 0.103.15), 213 tests de API en verde y auditoría limpia.
 
-**Qué sigue:** `main` está 106 commits detrás de `saas-scaling`, que es lo
-que corre en producción; hay que avanzar `main` hasta `saas-scaling` antes
-del primer push, o el CI desplegaría código viejo.
+`main` estaba 106 commits detrás de `saas-scaling` (lo que corría en
+producción) y se avanzó por fast-forward. El primer run falló porque
+`google-github-actions/auth` deja `gha-creds-*.json` en el workspace y el
+script rechaza árboles sucios; se agregó a `.gitignore`. El segundo run
+desplegó `fd3a91722b6a` en worker (`00035-2fc`), API (`00070-t7g`) y web
+(`00043-kbn`), las tres con `latestRevision: true` al 100 %, la API con sus
+36 env vars intactas y `/mailbox/providers` ofreciendo google y microsoft;
+`/health/ready` 200 y `POST /audit/thread` 200.
+
+**Qué sigue:** cada deploy reconstruye los tres servicios; filtrar por paths
+si el tiempo del job molesta.
