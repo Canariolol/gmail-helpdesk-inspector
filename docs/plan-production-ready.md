@@ -1536,7 +1536,8 @@ Decisión inicial recomendada:
   - Los uptime checks de Cloud Monitoring sondean desde varias regiones por
     defecto; no se restringió la lista.
 - [x] Crear canal de notificación.
-  - Email `teamgerencia.west@west-ingenieria.cl`
+  - Email `rodrigo.iyagar@gmail.com` (antes `teamgerencia.west@west-ingenieria.cl`,
+    corregido 2026-09-25)
     (`notificationChannels/3109576765012899242`).
 - [x] Probar alerta provocando una condición controlada.
   - Drill 2026-07-18: un check temporal contra una ruta 404 de la API falló al

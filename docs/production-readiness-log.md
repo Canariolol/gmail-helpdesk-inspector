@@ -3298,3 +3298,80 @@ las cinco tablas de `billing`; respaldo posterior verificado (14 MB).
 
 **Qué sigue:** decidir cuándo limpiar las filas viejas de `subscription`/
 `checkout`/`usage_ledger` que quedaron inertes en `mira.records`.
+
+## 2026-09-25 — Destinatario de alertas corregido
+
+**Estado:** terminado y verificado en GCP.
+
+**Qué se hizo:** el canal `Mira Ops Email`
+(`notificationChannels/3109576765012899242`) se creó el 2026-07-18 con
+`teamgerencia.west@west-ingenieria.cl`, un correo del cliente y no del
+responsable de la operación. Se cambió a `rodrigo.iyagar@gmail.com`. Las
+políticas «errores de aplicación en API o worker» y «respuestas 5xx en API o
+web» apuntan al mismo ID de canal, así que no hubo que tocarlas.
+
+**Evidencia:** `gcloud beta monitoring channels list` muestra el nuevo correo
+con el canal habilitado.
+
+## 2026-09-29 — Bedrock movido a otra cuenta AWS; worker desanclado
+
+**Estado:** terminado y verificado en GCP.
+
+**Qué se hizo:** la API key de Bedrock del worker (`bedrock-token:1`) dejó de
+autenticar (403 «API Key is valid») porque la cuenta AWS original se quedó sin
+créditos; desde al menos el 2026-09-25 los análisis programados caían a
+heurística con «Mira no pudo auditar este hilo». En la cuenta AWS
+`894759052251` se creó el usuario IAM `mira-bedrock-worker` con una única
+política inline (`bedrock:InvokeModel`, `InvokeModelWithResponseStream`,
+`CallWithBearerToken`) y una API key de Bedrock sin vencimiento
+(`ServiceSpecificCredentialId ACCA5AU6LUPN5QJ6PMWP3`). Las llaves de admin de
+esa cuenta no se cargaron al runtime. La key quedó como `bedrock-token:2`;
+la versión 1 se deshabilitó. El worker no cambió de código ni de modelo
+(`us.anthropic.claude-sonnet-4-6`).
+
+De paso se corrigió el anclaje de tráfico del worker detectado el 2026-09-04:
+seguía sirviendo `ghmi-ai-worker-00031-pay` (24-07). Se creó
+`ghmi-ai-worker-00034-82d` (misma imagen que `00033`, commit `1e6be07`, sin
+cambios de worker respecto de `00031-pay`) y se ejecutó
+`update-traffic --to-latest`.
+
+**Evidencia:** Converse directo con la key nueva → 200. `POST /audit/thread`
+contra el worker desplegado con token de identidad → 200 en 4,8 s con
+clasificación y tokens reales. `status.traffic` del worker muestra
+`latestRevision: true` al 100 %.
+
+**Qué sigue:** el análisis programado de 08:00 del 29-09 falló antes de crear
+el run (sin refrescar la conexión de casilla, cuya última renovación fue el
+28-09). El reintento de las 14:00 falló igual y la conexión tampoco se
+renovó; el cliente OAuth de Google responde bien, así que lo más probable es
+que Google rechace el refresh token de la casilla programada y haya que
+reconectarla desde Mira. El cambio minimax sin commit
+en `bedrock.py` (bloques `reasoningContent`) sigue sin desplegar.
+
+## 2026-09-29 — Deploy automático en push a `main`
+
+**Estado:** configurado; falta el primer push a `main` para verificarlo.
+
+**Qué se hizo:** job `deploy` en `.github/workflows/ci.yml` (depende de
+`verify`, solo en push a `main`, `concurrency: production-deploy`) que corre
+`scripts/redeploy-gcp.sh all`. En GCP: APIs `iamcredentials` y `sts`, cuenta
+`github-deployer` con permisos mínimos de deploy y pool WIF `github`/
+`github-oidc` restringido al repo y a `refs/heads/main`. Variable de repo
+`VITE_MERCADOPAGO_PUBLIC_KEY` con la clave pública que ya servía la web.
+El script ganó `SKIP_CHECKS=1` y `promote_latest`, que ejecuta
+`update-traffic --to-latest` tras cada deploy sin `--no-traffic`, para que un
+anclaje por nombre no vuelva a dejar deploys sin tráfico en silencio.
+
+**Motivo:** el despliegue dependía de correr el script a mano, y el anclaje
+del worker mostró que un deploy «exitoso» podía no llegar a producción.
+
+**Evidencia:** script ejecutado con `gcloud`/`docker` simulados: `all` hace
+deploy + `update-traffic --to-latest` de worker, API y web; `--no-traffic`
+no promueve nada. `check-all.sh` en verde; `cargo audit` marcaba
+RUSTSEC-2026-0285 (rustls 0.23.40, TLS 1.3), que habría dejado `verify` en
+rojo y bloqueado todo deploy: `cargo update -p rustls` → 0.23.45 (y
+rustls-webpki 0.103.15), 213 tests de API en verde y auditoría limpia.
+
+**Qué sigue:** `main` está 106 commits detrás de `saas-scaling`, que es lo
+que corre en producción; hay que avanzar `main` hasta `saas-scaling` antes
+del primer push, o el CI desplegaría código viejo.
