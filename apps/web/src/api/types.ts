@@ -8,6 +8,8 @@ export type Classification =
   | "misc"
   | "ambiguous";
 
+export type RequestScope = "external" | "internal" | "all";
+
 export interface ClassificationBreakdown {
   valid_client_request: number;
   internal: number;
@@ -30,6 +32,8 @@ export interface DroppedThreadInfo {
 }
 
 export interface AnalysisFunnel {
+  failed_threads?: number;
+  truncated_threads?: number;
   dropped_not_primary_inbox: number;
   dropped_no_external_in_window: number;
   dropped_samples: DroppedThreadInfo[];
@@ -102,6 +106,15 @@ export interface EmailThread {
   classification: Classification;
   classification_source: string;
   classification_confidence: number;
+  ai_suggestion?: {
+    classification: Classification;
+    is_answered: boolean;
+    confidence: number;
+    first_client_message_id: string | null;
+    first_internal_reply_message_id: string | null;
+    last_internal_message_id: string | null;
+    issues: string[];
+  } | null;
   is_valid_client_request: boolean;
   is_answered: boolean;
   first_message_at?: string | null;
@@ -186,13 +199,14 @@ export interface AccountStatus {
   workos_user_id: string | null;
   org_id: string;
   gmail_connected: boolean;
+  mailbox_needs_reauth: boolean;
   gmail_account_email: string | null;
   /** Proveedor de la casilla conectada. `null` si no hay conexión activa. */
   mailbox_provider: MailboxProviderId | null;
   entitlement: EntitlementSnapshot;
 }
 
-export type MailboxProviderId = "google" | "microsoft";
+export type MailboxProviderId = "google" | "microsoft" | "imap";
 
 export interface CheckoutSession {
   id: string;
@@ -256,6 +270,7 @@ export interface AnalysisPolicy {
   timezone: string;
   internal_domains: string[];
   responder_emails: string[];
+  request_scope?: RequestScope;
   mailbox_aliases: string[];
   valid_request_criteria: string[];
   non_responsibility_rules: string[];
@@ -295,6 +310,7 @@ export interface ScheduleReportPolicy {
   preset: string;
   timezone: string;
   analysis_time: string;
+  days_of_week?: number[];
   report_recipients: string[];
   report_content: ReportContentPolicy;
   failure_notice_enabled: boolean;
@@ -345,6 +361,7 @@ export interface MailboxMetadata {
   send_as: GmailSendAs[];
   filters_count: number;
   synced_at: string;
+  folders_truncated?: boolean;
 }
 
 export interface FilterPreset {
@@ -377,6 +394,13 @@ export interface OrgConfig {
 export interface PutConfigResponse {
   policy_version: PolicyVersionInfo;
   setup_state: SetupState;
+}
+
+export interface ConsolidatedReport {
+  threads: EmailThread[];
+  metrics: Metrics;
+  timezone: string;
+  run_count: number;
 }
 
 // ---- Privacy & Data Summary ----

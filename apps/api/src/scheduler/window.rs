@@ -1,10 +1,11 @@
-use chrono::{DateTime, Datelike, Days, NaiveDate, NaiveTime, Timelike, Utc, Weekday};
+#[cfg(test)]
+use chrono::Weekday;
+use chrono::{DateTime, Datelike, Days, NaiveDate, NaiveTime, Utc};
 use chrono_tz::Tz;
 
 #[cfg(test)]
 pub const SCL: Tz = chrono_tz::America::Santiago;
 pub const DEFAULT_ANALYSIS_TIME: &str = "08:00";
-pub const ALLOWED_ANALYSIS_TIMES: [&str; 4] = ["08:00", "14:00", "18:00", "22:00"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnalysisWindow {
@@ -15,6 +16,7 @@ pub struct AnalysisWindow {
 /// Ventana a analizar cuando el tick ocurre en `today` (fecha local SCL).
 /// Lunes cubre viernes a domingo; martes a viernes cubren el día anterior;
 /// sábado y domingo no generan ventana.
+#[cfg(test)]
 pub fn analysis_window_for(today: NaiveDate) -> Option<AnalysisWindow> {
     let days_back_from = match today.weekday() {
         Weekday::Mon => 3,
@@ -35,29 +37,67 @@ pub fn is_fire_time(now_scl: DateTime<Tz>) -> bool {
     is_fire_time_local(now_scl, DEFAULT_ANALYSIS_TIME)
 }
 
+#[cfg(test)]
 pub fn due_window_for(
     now_utc: DateTime<Utc>,
     timezone: &str,
     analysis_time: &str,
 ) -> Option<AnalysisWindow> {
-    let tz = parse_timezone(timezone)?;
-    let local_now = now_utc.with_timezone(&tz);
-    if !is_fire_time_local(local_now, analysis_time) {
-        return None;
-    }
-    analysis_window_for(local_now.date_naive())
+    due_window_for_days(now_utc, timezone, analysis_time, &[1, 2, 3, 4, 5])
 }
 
+pub fn due_window_for_days(
+    now_utc: DateTime<Utc>,
+    timezone: &str,
+    analysis_time: &str,
+    days: &[u8],
+) -> Option<AnalysisWindow> {
+    let tz = parse_timezone(timezone)?;
+    let local_now = now_utc.with_timezone(&tz);
+    if local_now.time() < parse_analysis_time(analysis_time)? {
+        return None;
+    }
+    analysis_window_for_days(local_now.date_naive(), days)
+}
+
+pub fn analysis_window_for_days(today: NaiveDate, days: &[u8]) -> Option<AnalysisWindow> {
+    if !days.contains(&(today.weekday().number_from_monday() as u8)) {
+        return None;
+    }
+    let date_from = (1..=7).find_map(|back| {
+        let day = today.checked_sub_days(Days::new(back))?;
+        days.contains(&(day.weekday().number_from_monday() as u8))
+            .then_some(day)
+    })?;
+    Some(AnalysisWindow {
+        date_from: date_from.format("%Y-%m-%d").to_string(),
+        date_to: today
+            .checked_sub_days(Days::new(1))?
+            .format("%Y-%m-%d")
+            .to_string(),
+    })
+}
+
+#[cfg(test)]
 pub fn next_fire_time_label(
     now_utc: DateTime<Utc>,
     timezone: &str,
     analysis_time: &str,
 ) -> Option<String> {
+    next_fire_time_for_days(now_utc, timezone, analysis_time, &[1, 2, 3, 4, 5])
+}
+
+pub fn next_fire_time_for_days(
+    now_utc: DateTime<Utc>,
+    timezone: &str,
+    analysis_time: &str,
+    days: &[u8],
+) -> Option<String> {
     let tz = parse_timezone(timezone)?;
     let mut day = now_utc.with_timezone(&tz).date_naive();
     let fire_at = parse_analysis_time(analysis_time)?;
     for _ in 0..10 {
-        if !matches!(day.weekday(), Weekday::Sat | Weekday::Sun) {
+        if days.contains(&(day.weekday().number_from_monday() as u8)) {
             let local_fire = day.and_time(fire_at).and_local_timezone(tz).single();
             if let Some(local_fire) = local_fire
                 && local_fire.with_timezone(&Utc) > now_utc
@@ -70,6 +110,7 @@ pub fn next_fire_time_label(
     None
 }
 
+#[cfg(test)]
 fn is_fire_time_local(now_local: DateTime<Tz>, analysis_time: &str) -> bool {
     let Some(fire_at) = parse_analysis_time(analysis_time) else {
         return false;
@@ -82,9 +123,7 @@ fn parse_timezone(timezone: &str) -> Option<Tz> {
 }
 
 fn parse_analysis_time(value: &str) -> Option<NaiveTime> {
-    NaiveTime::parse_from_str(value, "%H:%M")
-        .ok()
-        .filter(|time| time.minute() == 0)
+    NaiveTime::parse_from_str(value, "%H:%M").ok()
 }
 
 #[cfg(test)]
@@ -197,13 +236,33 @@ mod tests {
     }
 
     #[test]
-    fn invalid_or_partial_hours_do_not_fire() {
+    fn partial_hours_are_supported_and_invalid_hours_do_not_fire() {
         let monday = Utc.with_ymd_and_hms(2026, 6, 15, 16, 0, 0).unwrap();
-        assert_eq!(due_window_for(monday, "America/Santiago", "08:30"), None);
+        assert_eq!(
+            due_window_for(monday, "America/Santiago", "08:30"),
+            Some(window("2026-06-12", "2026-06-14"))
+        );
         assert_eq!(
             next_fire_time_label(monday, "America/Santiago", "not-a-time"),
             None
         );
+    }
+
+    #[test]
+    fn custom_days_cover_gap_and_daily_schedule_covers_yesterday() {
+        assert_eq!(
+            analysis_window_for_days(date("2026-06-15"), &[1, 3]),
+            Some(window("2026-06-10", "2026-06-14"))
+        );
+        assert_eq!(
+            analysis_window_for_days(date("2026-06-13"), &[1, 2, 3, 4, 5, 6, 7]),
+            Some(window("2026-06-12", "2026-06-12"))
+        );
+        assert_eq!(
+            analysis_window_for_days(date("2026-06-15"), &[1]),
+            Some(window("2026-06-08", "2026-06-14"))
+        );
+        assert_eq!(analysis_window_for_days(date("2026-06-15"), &[]), None);
     }
 
     #[test]

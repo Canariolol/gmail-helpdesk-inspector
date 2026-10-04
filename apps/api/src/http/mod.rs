@@ -35,10 +35,11 @@ use crate::{
     analysis::{
         AiUsageAttempt, AiUsageAttemptOutcome, AnalysisConfig, AnalysisFunnel, AnalysisMetrics,
         AnalysisRun, AnalysisStatus, Classification, ClassificationSource, DroppedThreadInfo,
-        EmailMessage, EmailThread, ManualReview, ManualReviewOverride, ThreadDisposition,
-        TriggerType, apply_manual_review_override, calculate_metrics, classify_thread,
-        message_fingerprint, message_is_inside_analysis_window, refine_classification_with_folders,
-        refine_classification_with_policy_hints, rescue_classification_with_valid_signals,
+        EmailMessage, EmailThread, ManualReview, ManualReviewOverride, RequestScope,
+        ThreadDisposition, TriggerType, apply_manual_review_override, calculate_metrics,
+        classify_thread, message_fingerprint, message_is_inside_analysis_window,
+        refine_classification_with_folders, refine_classification_with_policy_hints,
+        rescue_classification_with_valid_signals,
     },
     auth::{
         GoogleTokenResponse, MICROSOFT_MAIL_SCOPE, UserSession, clear_oauth_cookie,
@@ -61,19 +62,22 @@ use crate::{
         mailbox_connection_is_active,
     },
     policies::{
-        AiPolicy, AnalysisPolicy, MailboxPurpose, OrgConfigBundle, OrgConfigResponse,
-        PolicyVersion, ScheduleReportPolicy, apply_ai_defaults_migration,
-        apply_ai_prompt_version_migration, apply_ai_threshold_migration, hash_owner_email,
-        normalize_domains, normalize_list, policy_version_from_draft, provision_default_config,
-        retention_expires_at, setup_state, validate_timezone,
+        AiPolicy, AnalysisPolicy, MailboxPurpose, MembershipStatus, OrgConfigBundle,
+        OrgConfigResponse, OrgRole, OrganizationStatus, PolicyVersion, ScheduleReportPolicy,
+        apply_ai_defaults_migration, apply_ai_prompt_version_migration,
+        apply_ai_threshold_migration, hash_owner_email, normalize_domains, normalize_list,
+        policy_version_from_draft, provision_default_config, retention_expires_at, setup_state,
+        validate_timezone,
     },
     provider_detect::{self, DetectedProvider},
     report::{ReportMailer, ResendMailer},
     scheduler::{
         model::{ScheduleConfig, ScheduleState},
-        window::{ALLOWED_ANALYSIS_TIMES, next_fire_time_label},
+        window::next_fire_time_for_days,
     },
-    storage::{AnalysisDataDeletionAudit, AnalysisDataDeletionStatus, StorageRepository},
+    storage::{
+        AnalysisDataDeletionAudit, AnalysisDataDeletionStatus, StorageRepository, UsageAmounts,
+    },
 };
 
 #[derive(Debug, Deserialize)]
@@ -88,6 +92,7 @@ pub struct AppState {
     pub storage: Arc<dyn StorageRepository>,
     pub http: Client,
     pub mailbox: Arc<MailboxProviders>,
+    analysis_slots: Arc<tokio::sync::Semaphore>,
     rate_limiter: RateLimiter,
 }
 
@@ -114,6 +119,7 @@ impl AppState {
                 microsoft.then(GraphClient::default),
             )),
             rate_limiter: RateLimiter::default(),
+            analysis_slots: Arc::new(tokio::sync::Semaphore::new(4)),
         }
     }
 }
@@ -142,6 +148,8 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/health/ready", get(readiness))
+        .route("/me/report", get(consolidated_report))
+        .route("/mailbox/connect/imap", post(imap_connect))
         .route("/auth/workos/login", get(auth_workos_login))
         .route("/auth/workos/callback", get(auth_workos_callback))
         .route("/auth/workos/webhook", post(workos_webhook))
@@ -172,6 +180,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/me/subscription/cancel", post(cancel_subscription))
         .route("/me/subscription/change-plan", post(change_plan))
+        .route("/me/subscription/reconcile", post(reconcile_subscription))
         .route("/billing/mercadopago/webhook", post(mercadopago_webhook))
         .route("/me/data-summary", get(get_data_summary))
         .route("/me/analysis-data", delete(delete_analysis_data))
@@ -213,6 +222,7 @@ pub fn router(state: AppState) -> Router {
             "/internal/scheduled-analysis",
             post(internal::scheduled_analysis),
         )
+        .route("/internal/maintenance", post(internal::maintenance))
         .with_state(state)
 }
 
@@ -229,6 +239,126 @@ async fn readiness(State(state): State<AppState>) -> Result<Json<serde_json::Val
         .await
         .map_err(|_| ApiError::service_unavailable("El servicio no está listo"))?;
     Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct ReportQuery {
+    date_from: String,
+    date_to: String,
+}
+
+#[derive(Serialize)]
+struct ConsolidatedReport {
+    threads: Vec<EmailThread>,
+    metrics: AnalysisMetrics,
+    timezone: String,
+    run_count: usize,
+}
+
+async fn consolidated_report(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ReportQuery>,
+) -> Result<Json<ConsolidatedReport>, ApiError> {
+    let session = require_session(&state, &headers).await?;
+    let bundle = require_active_entitlement(&state, &session).await?;
+    validate_date_range(&query.date_from, &query.date_to)?;
+    let timezone = bundle.draft.analysis_policy.timezone.clone();
+    let tz = timezone
+        .parse::<chrono_tz::Tz>()
+        .map_err(|_| ApiError::bad_request("zona horaria inválida"))?;
+    let mut runs = state
+        .storage
+        .list_analysis_runs(&session.google_account_email)
+        .await?;
+    runs.sort_by_key(|run| std::cmp::Reverse(run.created_at));
+    let mut threads: HashMap<_, EmailThread> = HashMap::new();
+    let mut run_count = 0;
+    for run in runs.into_iter().filter(|run| {
+        run.status == AnalysisStatus::Completed
+            && run.retention_deadline() > Utc::now()
+            && run.config.date_from <= query.date_to
+            && run.config.date_to >= query.date_from
+    }) {
+        if run.org_id.as_deref().is_some_and(|id| id != bundle.org.id) {
+            continue;
+        }
+        run_count += 1;
+        for thread in state.storage.list_threads(&run.id).await? {
+            let focus = if let Some(date) = thread.first_client_message_at {
+                Some(date)
+            } else {
+                state
+                    .storage
+                    .list_messages(&run.id, &thread.id)
+                    .await?
+                    .iter()
+                    .filter(|message| message_is_inside_analysis_window(message, &run.config))
+                    .map(|message| message.date)
+                    .min()
+                    .or(thread.first_message_at)
+            };
+            let date = focus
+                .unwrap_or(thread.created_at)
+                .with_timezone(&tz)
+                .format("%Y-%m-%d")
+                .to_string();
+            if date < query.date_from || date > query.date_to {
+                continue;
+            }
+            let provider = if run
+                .gmail_scope_snapshot
+                .iter()
+                .any(|scope| scope.starts_with("Mail.Read"))
+            {
+                "microsoft"
+            } else if run
+                .gmail_scope_snapshot
+                .iter()
+                .any(|scope| scope.starts_with("IMAP"))
+            {
+                "imap"
+            } else {
+                "google"
+            };
+            let mailbox = run
+                .policy_snapshot
+                .as_ref()
+                .map(|snapshot| {
+                    snapshot
+                        .mailbox
+                        .google_account_email
+                        .trim()
+                        .to_ascii_lowercase()
+                })
+                .unwrap_or_else(|| {
+                    run.mailbox_id
+                        .clone()
+                        .unwrap_or_else(|| run.user_email.clone())
+                });
+            let key = (
+                mailbox,
+                provider,
+                thread.thread_id.clone(),
+                thread.first_client_message_id.clone(),
+            );
+            if threads
+                .get(&key)
+                .is_none_or(|previous| thread.updated_at > previous.updated_at)
+            {
+                threads.insert(key, thread);
+            }
+        }
+    }
+    let mut threads = threads.into_values().collect::<Vec<_>>();
+    threads.sort_by_key(|thread| thread.first_client_message_at.or(thread.first_message_at));
+    let metrics = calculate_metrics(&threads, 0, 0);
+    Ok(Json(ConsolidatedReport {
+        threads,
+        metrics,
+        timezone,
+        run_count,
+    }))
 }
 
 /// Limita el `screen_hint` a los valores válidos de AuthKit; cualquier otra cosa se
@@ -532,6 +662,8 @@ fn workos_event_data_id(data: &serde_json::Value) -> Result<&str, ApiError> {
 
 #[derive(Debug, Deserialize, Default)]
 struct ConnectLoginQuery {
+    #[serde(default)]
+    target_mailbox: Option<String>,
     /// Correo que el usuario escribió en la opción "no estoy seguro". Preselecciona
     /// la casilla en el proveedor para que el flujo se sienta como el botón directo.
     #[serde(default)]
@@ -555,16 +687,13 @@ async fn gmail_connect_login(
     Query(query): Query<ConnectLoginQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     let session = require_session(&state, &headers).await?;
-    require_active_entitlement(&state, &session).await?;
+    let bundle = require_active_entitlement(&state, &session).await?;
+    require_org_role(&bundle, &[OrgRole::Owner, OrgRole::Admin])?;
     let login_hint = login_hint_for(&query, &session);
     let scope = "https://www.googleapis.com/auth/gmail.readonly";
-    let oauth_state = random_urlsafe(24);
-    let code_verifier = random_urlsafe(48);
-    let code_challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(code_verifier.as_bytes()));
-    let signed_oauth = sign_session_id(
-        &format!("{oauth_state}:{code_verifier}"),
-        &state.config.session_secret,
-    )?;
+    let oauth = MailboxOAuthState::new(&session, &bundle.org.id, MailboxProviderKind::Google, None);
+    let code_challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(oauth.code_verifier.as_bytes()));
+    let signed_oauth = oauth.signed(&state.config.session_secret)?;
     let url = url::Url::parse_with_params(
         "https://accounts.google.com/o/oauth2/v2/auth",
         &[
@@ -574,7 +703,7 @@ async fn gmail_connect_login(
             ("scope", scope),
             ("access_type", "offline"),
             ("prompt", "consent"),
-            ("state", oauth_state.as_str()),
+            ("state", oauth.state.as_str()),
             ("code_challenge", code_challenge.as_str()),
             ("code_challenge_method", "S256"),
             // Preselecciona la casilla para que el selector de cuentas no aparezca
@@ -608,8 +737,17 @@ async fn gmail_connect_callback(
     Query(query): Query<OAuthCallback>,
 ) -> Result<impl IntoResponse, ApiError> {
     let existing_session = require_session(&state, &headers).await?;
-    require_active_entitlement(&state, &existing_session).await?;
-    let code_verifier = verified_oauth_code_verifier(&state, &headers, query.state.as_deref())?;
+    let bundle = require_active_entitlement(&state, &existing_session).await?;
+    require_org_role(&bundle, &[OrgRole::Owner, OrgRole::Admin])?;
+    let oauth = verified_mailbox_oauth_state(
+        &state,
+        &headers,
+        query.state.as_deref(),
+        &existing_session,
+        &bundle.org.id,
+        MailboxProviderKind::Google,
+    )?;
+    let code_verifier = oauth.code_verifier;
 
     let token: GoogleTokenResponse = state
         .http
@@ -649,6 +787,10 @@ async fn gmail_connect_callback(
     let connection = MailboxConnection {
         owner_email: existing_session.google_account_email.clone(),
         provider: MailboxProviderKind::Google,
+        microsoft_target_email: None,
+        imap_config: None,
+        imap_password_encrypted: None,
+        needs_reauth_at: None,
         mailbox_email: profile.email_address.clone(),
         access_token_encrypted: encrypt_token(&token.access_token, &state.config.encryption_key)?,
         refresh_token_encrypted: token
@@ -667,6 +809,7 @@ async fn gmail_connect_callback(
     state.storage.upsert_gmail_connection(&connection).await?;
     let mut bundle =
         get_or_provision_org_config(&state, &existing_session.google_account_email).await?;
+    prepare_connected_policy(&state, &mut bundle, &connection, previous.as_ref()).await?;
     bundle.mailbox.google_account_email = profile.email_address.clone();
     bundle.mailbox.display_name = profile.email_address.clone();
     bundle.mailbox.authorized_by_user_email = existing_session.google_account_email.clone();
@@ -691,14 +834,14 @@ async fn gmail_connect_callback(
         let mailbox = state.mailbox.clone();
         let storage = state.storage.clone();
         let access_token = token.access_token.clone();
-        let owner = existing_session.google_account_email.clone();
+        let connection = connection.clone();
         tokio::spawn(async move {
-            let Ok(provider) = mailbox.get(MailboxProviderKind::Google) else {
+            let Ok(provider) = mailbox.for_connection(&connection) else {
                 return;
             };
             let metadata = provider.fetch_mailbox_metadata(&access_token, now).await;
             if storage
-                .upsert_mailbox_metadata(&owner, &metadata)
+                .save_current_mailbox_metadata(&connection, &metadata)
                 .await
                 .is_err()
             {
@@ -741,6 +884,95 @@ async fn mailbox_providers(State(state): State<AppState>) -> Json<serde_json::Va
     }))
 }
 
+#[derive(Deserialize)]
+struct ImapConnectRequest {
+    #[serde(flatten)]
+    config: crate::imap::ImapConfig,
+    mailbox_email: String,
+    password: String,
+}
+
+async fn imap_connect(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<ImapConnectRequest>,
+) -> Result<StatusCode, ApiError> {
+    let session = require_session(&state, &headers).await?;
+    let mut bundle = require_active_entitlement(&state, &session).await?;
+    require_org_role(&bundle, &[OrgRole::Owner, OrgRole::Admin])?;
+    enforce_rate_limit(&state, &session.google_account_email, "mailbox_connect", 6).await?;
+    let mailbox_email = request.mailbox_email.trim().to_ascii_lowercase();
+    validate_emails(std::slice::from_ref(&mailbox_email))?;
+    if request.password.is_empty() || request.password.len() > 4096 {
+        return Err(ApiError::bad_request(
+            "ingresa una contraseña válida para IMAP",
+        ));
+    }
+    let mut config = request.config;
+    config.host = config.host.trim().to_ascii_lowercase();
+    config.username = config.username.trim().to_string();
+    let provider = crate::imap::ImapClient::new(config.clone()).map_err(|_| {
+        ApiError::bad_request(
+            "IMAP requiere un servidor DNS público con TLS en el puerto 993 y un usuario válido",
+        )
+    })?;
+    provider
+        .validate_connection(&request.password)
+        .await
+        .map_err(|_| {
+            ApiError::bad_request(
+                "no se pudo validar IMAP; revisa servidor, credenciales y acceso a las carpetas",
+            )
+        })?;
+    let now = Utc::now();
+    let previous = state
+        .storage
+        .get_gmail_connection(&session.google_account_email)
+        .await?;
+    let connection = MailboxConnection {
+        owner_email: session.google_account_email.clone(),
+        provider: MailboxProviderKind::Imap,
+        microsoft_target_email: None,
+        imap_config: Some(config),
+        imap_password_encrypted: Some(encrypt_token(
+            &request.password,
+            &state.config.encryption_key,
+        )?),
+        needs_reauth_at: None,
+        mailbox_email: mailbox_email.clone(),
+        access_token_encrypted: String::new(),
+        refresh_token_encrypted: None,
+        connected_at: now,
+        updated_at: now,
+        revoked_at: None,
+    };
+    state.storage.upsert_gmail_connection(&connection).await?;
+    prepare_connected_policy(&state, &mut bundle, &connection, previous.as_ref()).await?;
+    bundle.mailbox.google_account_email = mailbox_email.clone();
+    bundle.mailbox.display_name = mailbox_email;
+    bundle.mailbox.connected_at = now;
+    bundle.mailbox.revoked_at = None;
+    bundle.mailbox.authorized_by_user_email = session.google_account_email.clone();
+    bundle.mailbox.gmail_scope_snapshot = vec![MailboxProviderKind::Imap.read_scope().to_string()];
+    bundle.policy_version = policy_version_from_draft(
+        &bundle.mailbox,
+        &bundle.draft,
+        bundle.policy_version.version + 1,
+        &session.google_account_email,
+        now,
+    );
+    state.storage.upsert_org_config(&bundle).await?;
+    sync_schedule_config_from_policy(&state, &bundle).await?;
+    let metadata = provider
+        .fetch_mailbox_metadata(&request.password, now)
+        .await;
+    state
+        .storage
+        .save_current_mailbox_metadata(&connection, &metadata)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[derive(Debug, Deserialize)]
 struct DetectProviderQuery {
     email: String,
@@ -781,31 +1013,8 @@ async fn detect_mailbox_provider(
             );
             provider_detect::Detection {
                 provider: DetectedProvider::Unknown,
-                mx_hosts: Vec::new(),
             }
         });
-
-    // Sin soporte todavía: guardamos el correo para poder avisarle cuando exista, y
-    // los MX para reconocer gateways que aún no clasificamos. Un fallo al guardar
-    // no debe romper la respuesta al usuario.
-    if detection.provider == DetectedProvider::Unsupported {
-        let entry = provider_detect::ProviderWaitlistEntry {
-            id: query.email.trim().to_ascii_lowercase(),
-            email: query.email.trim().to_ascii_lowercase(),
-            domain,
-            detected: detection.provider,
-            mx_hosts: detection.mx_hosts,
-            requested_by: session.google_account_email.clone(),
-            created_at: Utc::now(),
-        };
-        if let Err(error) = state.storage.upsert_provider_waitlist(&entry).await {
-            tracing::warn!(
-                operation = "provider_waitlist",
-                ?error,
-                "no se pudo registrar el correo en la lista de espera"
-            );
-        }
-    }
 
     Ok(Json(DetectProviderResponse {
         provider: detection.provider,
@@ -829,16 +1038,28 @@ async fn microsoft_connect_login(
     Query(query): Query<ConnectLoginQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     let session = require_session(&state, &headers).await?;
-    require_active_entitlement(&state, &session).await?;
+    let bundle = require_active_entitlement(&state, &session).await?;
+    require_org_role(&bundle, &[OrgRole::Owner, OrgRole::Admin])?;
+    let target = query
+        .target_mailbox
+        .as_deref()
+        .map(str::trim)
+        .filter(|target| !target.is_empty())
+        .map(str::to_ascii_lowercase);
+    if let Some(target) = &target {
+        validate_emails(std::slice::from_ref(target))?;
+    }
+    let scope = microsoft_mailbox_scope(target.as_deref());
     let login_hint = login_hint_for(&query, &session);
     let microsoft = microsoft_config(&state)?;
-    let oauth_state = random_urlsafe(24);
-    let code_verifier = random_urlsafe(48);
-    let code_challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(code_verifier.as_bytes()));
-    let signed_oauth = sign_session_id(
-        &format!("{oauth_state}:{code_verifier}"),
-        &state.config.session_secret,
-    )?;
+    let oauth = MailboxOAuthState::new(
+        &session,
+        &bundle.org.id,
+        MailboxProviderKind::Microsoft,
+        target.as_deref(),
+    );
+    let code_challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(oauth.code_verifier.as_bytes()));
+    let signed_oauth = oauth.signed(&state.config.session_secret)?;
     let domain_hint = login_hint
         .split_once('@')
         .map(|(_, domain)| domain.to_string())
@@ -852,9 +1073,9 @@ async fn microsoft_connect_login(
             ("client_id", microsoft.client_id.as_str()),
             ("redirect_uri", microsoft.redirect_url.as_str()),
             ("response_type", "code"),
-            ("scope", MICROSOFT_MAIL_SCOPE),
+            ("scope", scope),
             ("response_mode", "query"),
-            ("state", oauth_state.as_str()),
+            ("state", oauth.state.as_str()),
             ("code_challenge", code_challenge.as_str()),
             ("code_challenge_method", "S256"),
             ("login_hint", login_hint),
@@ -881,9 +1102,20 @@ async fn microsoft_connect_callback(
     Query(query): Query<OAuthCallback>,
 ) -> Result<impl IntoResponse, ApiError> {
     let existing_session = require_session(&state, &headers).await?;
-    require_active_entitlement(&state, &existing_session).await?;
+    let bundle = require_active_entitlement(&state, &existing_session).await?;
+    require_org_role(&bundle, &[OrgRole::Owner, OrgRole::Admin])?;
     let microsoft = microsoft_config(&state)?;
-    let code_verifier = verified_oauth_code_verifier(&state, &headers, query.state.as_deref())?;
+    let oauth = verified_mailbox_oauth_state(
+        &state,
+        &headers,
+        query.state.as_deref(),
+        &existing_session,
+        &bundle.org.id,
+        MailboxProviderKind::Microsoft,
+    )?;
+    let code_verifier = oauth.code_verifier;
+    let target = oauth.target_mailbox;
+    let scope = microsoft_mailbox_scope(target.as_deref());
 
     let token: GoogleTokenResponse = state
         .http
@@ -898,14 +1130,19 @@ async fn microsoft_connect_callback(
             ("redirect_uri", microsoft.redirect_url.as_str()),
             ("grant_type", "authorization_code"),
             ("code_verifier", code_verifier.as_str()),
-            ("scope", MICROSOFT_MAIL_SCOPE),
+            ("scope", scope),
         ])
         .send()
         .await?
         .json_or_google_error("Microsoft OAuth code exchange")
         .await?;
+    let refresh_token = required_microsoft_refresh_token(&token)?;
 
-    let graph = GraphClient::default();
+    let graph = match target.as_deref() {
+        Some(email) => GraphClient::for_mailbox(email)?,
+        None => GraphClient::default(),
+    };
+    graph.validate_mailbox_access(&token.access_token).await.map_err(|_|ApiError::bad_request("Microsoft no concedió lectura de la casilla elegida; revisa los permisos del buzón"))?;
     let profile = graph.get_profile(&token.access_token).await.map_err(|_| {
         ApiError::bad_request("no se pudo leer la identidad de la casilla en Microsoft")
     })?;
@@ -918,24 +1155,22 @@ async fn microsoft_connect_callback(
     let previous_same_mailbox = matching_previous_connection(
         &previous,
         MailboxProviderKind::Microsoft,
-        &profile.email_address,
+        target.as_deref().unwrap_or(&profile.email_address),
     );
     let connection = MailboxConnection {
         owner_email: existing_session.google_account_email.clone(),
         provider: MailboxProviderKind::Microsoft,
-        mailbox_email: profile.email_address.clone(),
+        microsoft_target_email: target.clone(),
+        imap_config: None,
+        imap_password_encrypted: None,
+        needs_reauth_at: None,
+        mailbox_email: target
+            .clone()
+            .unwrap_or_else(|| profile.email_address.clone()),
         access_token_encrypted: encrypt_token(&token.access_token, &state.config.encryption_key)?,
-        // Microsoft rota el refresh token: si esta respuesta no trae uno, el
-        // anterior sigue siendo el único válido.
-        refresh_token_encrypted: token
-            .refresh_token
-            .as_deref()
-            .map(|refresh| encrypt_token(refresh, &state.config.encryption_key))
-            .transpose()?
-            .or_else(|| {
-                previous_same_mailbox
-                    .and_then(|connection| connection.refresh_token_encrypted.clone())
-            }),
+        // Se guarda el refresh del usuario que acaba de consentir. Emitirlo no
+        // revoca el anterior, pero nunca se mezclan grants de distintos delegados.
+        refresh_token_encrypted: Some(encrypt_token(refresh_token, &state.config.encryption_key)?),
         connected_at: previous_same_mailbox.map_or(now, |connection| connection.connected_at),
         updated_at: now,
         revoked_at: None,
@@ -946,11 +1181,18 @@ async fn microsoft_connect_callback(
     // esto la organización quedaría declarando la casilla y el scope anteriores.
     let mut bundle =
         get_or_provision_org_config(&state, &existing_session.google_account_email).await?;
-    bundle.mailbox.google_account_email = profile.email_address.clone();
-    bundle.mailbox.display_name = profile.email_address.clone();
+    prepare_connected_policy(&state, &mut bundle, &connection, previous.as_ref()).await?;
+    bundle.mailbox.google_account_email = connection.mailbox_email.clone();
+    bundle.mailbox.display_name = connection.mailbox_email.clone();
     bundle.mailbox.authorized_by_user_email = existing_session.google_account_email.clone();
     bundle.mailbox.gmail_scope_snapshot =
         vec![MailboxProviderKind::Microsoft.read_scope().to_string()];
+    if connection.microsoft_target_email.is_some() {
+        bundle
+            .mailbox
+            .gmail_scope_snapshot
+            .push("Mail.Read.Shared".to_string());
+    }
     bundle.mailbox.connected_at = now;
     bundle.mailbox.revoked_at = None;
     bundle.policy_version = policy_version_from_draft(
@@ -967,14 +1209,14 @@ async fn microsoft_connect_callback(
         let mailbox = state.mailbox.clone();
         let storage = state.storage.clone();
         let access_token = token.access_token.clone();
-        let owner = existing_session.google_account_email.clone();
+        let connection = connection.clone();
         tokio::spawn(async move {
-            let Ok(provider) = mailbox.get(MailboxProviderKind::Microsoft) else {
+            let Ok(provider) = mailbox.for_connection(&connection) else {
                 return;
             };
             let metadata = provider.fetch_mailbox_metadata(&access_token, now).await;
             if storage
-                .upsert_mailbox_metadata(&owner, &metadata)
+                .save_current_mailbox_metadata(&connection, &metadata)
                 .await
                 .is_err()
             {
@@ -1003,27 +1245,194 @@ async fn microsoft_connect_callback(
     Ok((StatusCode::FOUND, headers))
 }
 
-/// Valida la cookie PKCE temporal y el `state` del proveedor, y devuelve el
-/// `code_verifier`. Compartido por los callbacks de Google y Microsoft para que
-/// una sola implementación cubra ambos.
-fn verified_oauth_code_verifier(
+/// PKCE vinculado al usuario, sesión, tenant y proveedor que iniciaron el flujo.
+/// Base64url mantiene la cookie libre de puntos del correo antes de firmarla.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MailboxOAuthState {
+    state: String,
+    code_verifier: String,
+    session_id: String,
+    owner_email: String,
+    org_id: String,
+    provider: MailboxProviderKind,
+    target_mailbox: Option<String>,
+    expires_at: i64,
+}
+
+impl MailboxOAuthState {
+    fn new(
+        session: &UserSession,
+        org_id: &str,
+        provider: MailboxProviderKind,
+        target: Option<&str>,
+    ) -> Self {
+        Self {
+            state: random_urlsafe(24),
+            code_verifier: random_urlsafe(48),
+            session_id: session.id.clone(),
+            owner_email: session.google_account_email.clone(),
+            org_id: org_id.to_string(),
+            provider,
+            target_mailbox: target.map(str::to_string),
+            expires_at: Utc::now().timestamp() + 600,
+        }
+    }
+
+    fn signed(&self, secret: &str) -> Result<String, ApiError> {
+        let encoded =
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(self).map_err(anyhow::Error::from)?);
+        Ok(sign_session_id(&encoded, secret)?)
+    }
+
+    fn verify(
+        signed_cookie: &str,
+        secret: &str,
+        provider_state: Option<&str>,
+        session: &UserSession,
+        org_id: &str,
+        provider: MailboxProviderKind,
+    ) -> Result<Self, ApiError> {
+        let invalid = || {
+            ApiError::bad_request(
+                "La conexión OAuth venció o es inválida; vuelve a conectar la casilla",
+            )
+        };
+        let encoded = verify_session_cookie(signed_cookie, secret).ok_or_else(invalid)?;
+        let payload = URL_SAFE_NO_PAD.decode(encoded).map_err(|_| invalid())?;
+        let oauth: Self = serde_json::from_slice(&payload).map_err(|_| invalid())?;
+        if oauth.state.is_empty()
+            || oauth.code_verifier.is_empty()
+            || provider_state != Some(oauth.state.as_str())
+        {
+            return Err(invalid());
+        }
+        if oauth.session_id != session.id
+            || oauth.owner_email != session.google_account_email
+            || oauth.org_id != org_id
+            || oauth.provider != provider
+        {
+            return Err(ApiError::bad_request(
+                "La sesión o la organización cambió durante OAuth; vuelve a conectar la casilla",
+            ));
+        }
+        let now = Utc::now().timestamp();
+        if oauth.expires_at <= now || oauth.expires_at > now + 600 {
+            return Err(invalid());
+        }
+        if let Some(target) = &oauth.target_mailbox {
+            validate_emails(std::slice::from_ref(target))?;
+            if provider != MailboxProviderKind::Microsoft {
+                return Err(invalid());
+            }
+        }
+        Ok(oauth)
+    }
+}
+
+fn verified_mailbox_oauth_state(
     state: &AppState,
     headers: &HeaderMap,
     provider_state: Option<&str>,
-) -> Result<String, ApiError> {
-    let verifier_payload = headers
+    session: &UserSession,
+    org_id: &str,
+    provider: MailboxProviderKind,
+) -> Result<MailboxOAuthState, ApiError> {
+    let cookie = headers
         .get(header::COOKIE)
-        .and_then(|v| v.to_str().ok())
+        .and_then(|value| value.to_str().ok())
         .and_then(|cookies| extract_named_cookie(cookies, "ghmi_oauth"))
-        .and_then(|cookie| verify_session_cookie(&cookie, &state.config.session_secret))
-        .ok_or_else(|| ApiError::bad_request("missing or invalid OAuth PKCE cookie"))?;
-    let (expected_state, code_verifier) = verifier_payload
-        .split_once(':')
-        .ok_or_else(|| ApiError::bad_request("invalid OAuth PKCE cookie payload"))?;
-    if provider_state != Some(expected_state) {
-        return Err(ApiError::bad_request("OAuth state mismatch"));
+        .ok_or_else(|| {
+            ApiError::bad_request("Falta la cookie OAuth; vuelve a conectar la casilla")
+        })?;
+    MailboxOAuthState::verify(
+        &cookie,
+        &state.config.session_secret,
+        provider_state,
+        session,
+        org_id,
+        provider,
+    )
+}
+
+fn microsoft_mailbox_scope(target: Option<&str>) -> &'static str {
+    if target.is_some() {
+        "offline_access User.Read Mail.Read Mail.Read.Shared"
+    } else {
+        MICROSOFT_MAIL_SCOPE
     }
-    Ok(code_verifier.to_string())
+}
+
+fn required_microsoft_refresh_token(token: &GoogleTokenResponse) -> Result<&str, ApiError> {
+    token.refresh_token.as_deref().filter(|refresh| !refresh.trim().is_empty())
+        .ok_or_else(|| ApiError::bad_request("Microsoft no concedió acceso offline; vuelve a conectar la casilla y acepta los permisos solicitados"))
+}
+
+async fn prepare_connected_policy(
+    state: &AppState,
+    bundle: &mut OrgConfigBundle,
+    connection: &MailboxConnection,
+    previous: Option<&MailboxConnection>,
+) -> Result<(), ApiError> {
+    let changed = previous.is_some_and(|previous| {
+        previous.provider != connection.provider
+            || !previous
+                .mailbox_email
+                .eq_ignore_ascii_case(&connection.mailbox_email)
+    });
+    if changed {
+        bundle.mailbox.id = Uuid::new_v4().to_string();
+        bundle.draft.mailbox_id = bundle.mailbox.id.clone();
+        bundle.draft.analysis_policy.include_labels.clear();
+        bundle.draft.analysis_policy.exclude_labels.clear();
+        for preset in state
+            .storage
+            .list_filter_presets(&connection.owner_email)
+            .await?
+        {
+            state
+                .storage
+                .delete_filter_preset(&connection.owner_email, &preset.id)
+                .await?;
+        }
+        state
+            .storage
+            .upsert_mailbox_metadata(
+                &connection.owner_email,
+                &crate::mailbox::MailboxMetadata {
+                    profile: None,
+                    labels: vec![],
+                    send_as: vec![],
+                    filters_count: 0,
+                    folders_truncated: false,
+                    synced_at: Utc::now(),
+                },
+            )
+            .await?;
+    }
+    bundle
+        .draft
+        .analysis_policy
+        .internal_domains
+        .retain(|domain| !crate::policies::is_public_mail_domain(domain));
+    if changed && let Some(previous) = previous {
+        bundle
+            .draft
+            .analysis_policy
+            .responder_emails
+            .retain(|email| !email.eq_ignore_ascii_case(&previous.mailbox_email));
+    }
+    if bundle.draft.analysis_policy.responder_emails.is_empty()
+        && (bundle.draft.analysis_policy.internal_domains.is_empty()
+            || bundle.draft.analysis_policy.request_scope != RequestScope::External)
+    {
+        bundle
+            .draft
+            .analysis_policy
+            .responder_emails
+            .push(connection.mailbox_email.clone());
+    }
+    Ok(())
 }
 
 /// Un token sólo puede reutilizarse al reconectar el mismo proveedor. Al
@@ -1056,6 +1465,8 @@ async fn gmail_disconnect(
     headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
     let session = require_session(&state, &headers).await?;
+    let bundle = get_or_provision_org_config(&state, &session.google_account_email).await?;
+    require_org_role(&bundle, &[OrgRole::Owner, OrgRole::Admin])?;
     let connection = state
         .storage
         .get_gmail_connection(&session.google_account_email)
@@ -1195,6 +1606,7 @@ struct AccountStatusResponse {
     workos_user_id: Option<String>,
     org_id: String,
     gmail_connected: bool,
+    mailbox_needs_reauth: bool,
     gmail_account_email: Option<String>,
     /// Proveedor de la casilla conectada ("google" | "microsoft"). `None`
     /// cuando no hay conexión activa.
@@ -1219,12 +1631,15 @@ async fn get_account_status(
         workos_user_id: session.workos_user_id.clone(),
         org_id: bundle.org.id,
         gmail_connected: mailbox_connection_is_active(connection.as_ref()),
+        mailbox_needs_reauth: connection.as_ref().is_some_and(|connection| {
+            connection.revoked_at.is_none() && connection.needs_reauth_at.is_some()
+        }),
         mailbox_provider: connection
             .as_ref()
-            .filter(|connection| mailbox_connection_is_active(Some(connection)))
+            .filter(|connection| connection.revoked_at.is_none())
             .map(|connection| connection.provider.as_str().to_string()),
         gmail_account_email: connection
-            .filter(|connection| mailbox_connection_is_active(Some(connection)))
+            .filter(|connection| connection.revoked_at.is_none())
             .map(|connection| connection.mailbox_email),
         entitlement,
     }))
@@ -1255,6 +1670,41 @@ struct CheckoutSessionResponse {
     session: CheckoutSession,
 }
 
+async fn claim_billing_operation(state: &AppState, org_id: &str) -> Result<String, ApiError> {
+    let token = Uuid::new_v4().to_string();
+    let now = Utc::now();
+    if !state
+        .storage
+        .claim_billing_operation(org_id, &token, now, now - chrono::Duration::minutes(5))
+        .await?
+    {
+        return Err(ApiError::service_unavailable(
+            "Hay otra operación de pago en curso; inténtalo nuevamente",
+        ));
+    }
+    Ok(token)
+}
+
+async fn finish_billing_operation<T>(
+    state: &AppState,
+    org_id: &str,
+    token: &str,
+    result: Result<T, ApiError>,
+) -> Result<T, ApiError> {
+    if state
+        .storage
+        .release_billing_operation(org_id, token)
+        .await
+        .is_err()
+    {
+        tracing::error!(
+            operation = "billing_lock_release",
+            "No se pudo liberar la operación de pago"
+        );
+    }
+    result
+}
+
 async fn create_checkout_subscription(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1262,100 +1712,159 @@ async fn create_checkout_subscription(
 ) -> Result<Json<CheckoutSessionResponse>, ApiError> {
     let session = require_session(&state, &headers).await?;
     let bundle = get_or_provision_org_config(&state, &session.google_account_email).await?;
-    let plan_id = BillingPlanId::parse(&request.plan_id)
-        .ok_or_else(|| ApiError::bad_request("plan_id inválido"))?;
-    let billing_interval = match request.billing_interval.as_deref() {
-        None => BillingInterval::Monthly,
-        Some(value) => BillingInterval::parse(value)
-            .ok_or_else(|| ApiError::bad_request("billing_interval inválido"))?,
-    };
-    let card_token_id = request
-        .card_token_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| ApiError::bad_request("debes completar los datos de tu tarjeta"))?;
-    let existing_subscription = state
-        .storage
-        .get_subscription_for_org(&bundle.org.id)
-        .await?;
-    if checkout_blocked_by_active_subscription(existing_subscription.as_ref(), Utc::now()) {
-        return Err(ApiError::conflict(
-            "ya tienes una suscripción activa; cambia de plan desde tu cuenta",
-        ));
-    }
-    let plan = plan_by_id(&plan_id);
-    let amount_clp = match billing_interval {
-        BillingInterval::Monthly => plan.clp_monthly,
-        BillingInterval::Annual => plan
-            .clp_annual
-            .ok_or_else(|| ApiError::bad_request("este plan no ofrece facturación anual"))?,
-    };
-    let now = Utc::now();
-    let mut checkout = CheckoutSession {
-        id: Uuid::new_v4().to_string(),
-        org_id: bundle.org.id.clone(),
-        account_email: session.google_account_email.clone(),
-        plan_id: plan_id.clone(),
-        status: CheckoutSessionStatus::Pending,
-        provider: "mercadopago".to_string(),
-        provider_subscription_id: None,
-        billing_interval: billing_interval.clone(),
-        currency_id: "CLP".to_string(),
-        amount_clp,
-        usd_reference_monthly: plan.usd_reference_monthly,
-        trial_days: plan.trial_days,
-        created_at: now,
-        updated_at: now,
-    };
-
-    let access_token = state
-        .config
-        .billing
-        .mercadopago_access_token
-        .as_deref()
-        .ok_or_else(|| ApiError::service_unavailable("Mercado Pago no está configurado"))?;
-    let payer_email = request
-        .payer_email
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(&checkout.account_email);
-    let mp =
-        create_mercadopago_preapproval(&state, access_token, &checkout, card_token_id, payer_email)
+    require_org_role(
+        &bundle,
+        &[
+            crate::policies::OrgRole::Owner,
+            crate::policies::OrgRole::Admin,
+        ],
+    )?;
+    let token = claim_billing_operation(&state, &bundle.org.id).await?;
+    let result = async {
+        let plan_id = BillingPlanId::parse(&request.plan_id)
+            .ok_or_else(|| ApiError::bad_request("plan_id inválido"))?;
+        let billing_interval = match request.billing_interval.as_deref() {
+            None => BillingInterval::Monthly,
+            Some(value) => BillingInterval::parse(value)
+                .ok_or_else(|| ApiError::bad_request("billing_interval inválido"))?,
+        };
+        let plan = plan_by_id(&plan_id);
+        let amount_clp = plan
+            .amount_for(&billing_interval)
+            .ok_or_else(|| ApiError::bad_request("este plan no se compra con tarjeta"))?;
+        let card_token_id = request
+            .card_token_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| ApiError::bad_request("debes completar los datos de tu tarjeta"))?;
+        let checkout_id =
+            checkout_idempotency_key(&bundle.org.id, card_token_id, &plan_id, &billing_interval);
+        let mut previous_checkout = state.storage.get_checkout_session(&checkout_id).await?;
+        if previous_checkout.is_none() {
+            previous_checkout = state.storage.find_incomplete_checkout_for_org(&bundle.org.id).await?;
+            if previous_checkout.as_ref().is_some_and(|checkout| checkout.plan_id != plan_id || checkout.billing_interval != billing_interval) {
+                return Err(ApiError::conflict("hay una compra pendiente; termínala antes de elegir otro plan"));
+            }
+        }
+        if let Some(checkout) = previous_checkout.as_ref()
+            && checkout.status == CheckoutSessionStatus::Activated
+        {
+            return Ok(Json(CheckoutSessionResponse {
+                session: checkout.clone(),
+            }));
+        }
+        let existing = state
+            .storage
+            .get_subscription_for_org(&bundle.org.id)
             .await?;
-    checkout.provider_subscription_id = Some(mp.id.clone());
-    checkout.updated_at = Utc::now();
-
-    if !matches!(
-        map_mercadopago_status(mp.status.as_deref()),
-        SubscriptionStatus::Active
-    ) {
-        checkout.status = CheckoutSessionStatus::Failed;
+        let resuming = previous_checkout.as_ref().is_some_and(|checkout| {
+            checkout.provider_subscription_id.is_some()
+                && existing.as_ref().is_some_and(|subscription| {
+                    subscription.provider_subscription_id == checkout.provider_subscription_id
+                })
+        });
+        if !resuming && checkout_blocked_by_active_subscription(existing.as_ref(), Utc::now()) {
+            return Err(ApiError::conflict(
+                "ya hay una suscripción; revísala o cancélala desde tu cuenta antes de comprar otra",
+            ));
+        }
+        let now = Utc::now();
+        let mut checkout = previous_checkout.unwrap_or(CheckoutSession {
+            id: checkout_id,
+            org_id: bundle.org.id.clone(),
+            account_email: session.google_account_email.clone(),
+            plan_id: plan_id.clone(),
+            status: CheckoutSessionStatus::Pending,
+            provider: "mercadopago".to_string(),
+            provider_subscription_id: None,
+            billing_interval: billing_interval.clone(),
+            currency_id: "CLP".to_string(),
+            amount_clp,
+            usd_reference_monthly: plan.usd_reference_monthly,
+            trial_days: if existing.is_none() {
+                plan.trial_days
+            } else {
+                0
+            },
+            created_at: now,
+            updated_at: now,
+        });
+        let access_token = state
+            .config
+            .billing
+            .mercadopago_access_token
+            .as_deref()
+            .ok_or_else(|| ApiError::service_unavailable("Mercado Pago no está configurado"))?;
         state.storage.upsert_checkout_session(&checkout).await?;
-        return Err(ApiError::bad_request(
-            "Mercado Pago no pudo autorizar la tarjeta; revisa los datos e inténtalo otra vez",
-        ));
+        let payer_email = request
+            .payer_email
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(&checkout.account_email);
+        let provider = match checkout.provider_subscription_id.as_deref() {
+            Some(id) => get_mercadopago_preapproval(&state, access_token, id).await?,
+            None => {
+                create_mercadopago_preapproval(
+                    &state,
+                    access_token,
+                    &checkout,
+                    card_token_id,
+                    payer_email,
+                )
+                .await?
+            }
+        };
+        if provider.status.as_deref() != Some("authorized") {
+            checkout.status = CheckoutSessionStatus::Failed;
+            checkout.provider_subscription_id = Some(provider.id);
+            state.storage.upsert_checkout_session(&checkout).await?;
+            return Err(ApiError::bad_request(
+                "Mercado Pago no pudo autorizar la tarjeta; revisa los datos e inténtalo otra vez",
+            ));
+        }
+        checkout.provider_subscription_id = Some(provider.id.clone());
+        checkout.status = CheckoutSessionStatus::ProviderCreated;
+        state.storage.upsert_checkout_session(&checkout).await?;
+        let subscription = existing
+            .filter(|subscription| subscription.provider_subscription_id.as_deref() == Some(provider.id.as_str()))
+            .unwrap_or_else(|| {
+                let started = provider.date_created.unwrap_or(checkout.created_at);
+                let mut subscription = active_subscription_for_trial(
+                    checkout.org_id.clone(), checkout.plan_id.clone(), Some(provider.id.clone()),
+                    checkout.billing_interval.clone(), started,
+                );
+                subscription.trial_ends_at = (checkout.trial_days > 0)
+                    .then(|| started + chrono::Duration::days(i64::from(checkout.trial_days)));
+                subscription
+            });
+        state.storage.upsert_subscription(&subscription).await?;
+        reconcile_mercadopago_subscription_locked(&state, access_token, &provider, None).await?;
+        checkout.status = CheckoutSessionStatus::Activated;
+        checkout.updated_at = Utc::now();
+        state.storage.upsert_checkout_session(&checkout).await?;
+        Ok(Json(CheckoutSessionResponse { session: checkout }))
     }
+    .await;
+    finish_billing_operation(&state, &bundle.org.id, &token, result).await
+}
 
-    // La tarjeta ya quedó autorizada en el checkout embebido. El webhook mantiene
-    // el estado sincronizado, pero no hace falta redirigir ni bloquear a la persona.
-    checkout.status = CheckoutSessionStatus::Activated;
-    let now = Utc::now();
-    let mut subscription = active_subscription_for_trial(
-        checkout.org_id.clone(),
-        checkout.plan_id.clone(),
-        Some(mp.id),
-        checkout.billing_interval.clone(),
-        now,
+fn checkout_idempotency_key(
+    org_id: &str,
+    card_token: &str,
+    plan: &BillingPlanId,
+    interval: &BillingInterval,
+) -> String {
+    let digest = Sha256::digest(
+        format!(
+            "{org_id}\0{card_token}\0{}\0{}",
+            plan.as_str(),
+            interval.as_str()
+        )
+        .as_bytes(),
     );
-    if !matches!(subscription.status, SubscriptionStatus::Trialing) {
-        subscription.status = SubscriptionStatus::Active;
-    }
-    state.storage.upsert_subscription(&subscription).await?;
-
-    state.storage.upsert_checkout_session(&checkout).await?;
-    Ok(Json(CheckoutSessionResponse { session: checkout }))
+    format!("checkout-{}", URL_SAFE_NO_PAD.encode(digest))
 }
 
 fn checkout_blocked_by_active_subscription(
@@ -1363,7 +1872,16 @@ fn checkout_blocked_by_active_subscription(
     now: chrono::DateTime<Utc>,
 ) -> bool {
     subscription.is_some_and(|subscription| {
-        subscription_allows_access(Some(subscription), now) && !subscription.cancel_at_period_end
+        subscription_allows_access(Some(subscription), now)
+            || !subscription.cancel_at_period_end
+                && subscription.status != SubscriptionStatus::Cancelled
+                && (subscription.provider_subscription_id.is_some()
+                    || matches!(
+                        subscription.status,
+                        SubscriptionStatus::Pending
+                            | SubscriptionStatus::Active
+                            | SubscriptionStatus::Trialing
+                    ))
     })
 }
 
@@ -1373,36 +1891,49 @@ async fn cancel_subscription(
 ) -> Result<Json<EntitlementSnapshot>, ApiError> {
     let session = require_session(&state, &headers).await?;
     let bundle = get_or_provision_org_config(&state, &session.google_account_email).await?;
-    let mut subscription = state
-        .storage
-        .get_subscription_for_org(&bundle.org.id)
-        .await?
-        .ok_or_else(|| ApiError::conflict("no hay una suscripción para cancelar"))?;
-
-    // Corta cobros futuros en Mercado Pago; el acceso se mantiene hasta el fin del período.
-    if let Some(provider_id) = subscription.provider_subscription_id.clone() {
-        let access_token = state
-            .config
-            .billing
-            .mercadopago_access_token
-            .as_deref()
-            .ok_or_else(|| ApiError::service_unavailable("Mercado Pago no está configurado"))?;
-        update_mercadopago_preapproval(
-            &state,
-            access_token,
-            &provider_id,
-            json!({ "status": "cancelled" }),
-        )
-        .await?;
+    require_org_role(
+        &bundle,
+        &[
+            crate::policies::OrgRole::Owner,
+            crate::policies::OrgRole::Admin,
+        ],
+    )?;
+    let token = claim_billing_operation(&state, &bundle.org.id).await?;
+    let result = async {
+        let mut subscription = state
+            .storage
+            .get_subscription_for_org(&bundle.org.id)
+            .await?
+            .ok_or_else(|| ApiError::conflict("no hay una suscripción para cancelar"))?;
+        if !subscription.cancel_at_period_end {
+            if let Some(provider_id) = subscription.provider_subscription_id.as_deref() {
+                let access_token = state
+                    .config
+                    .billing
+                    .mercadopago_access_token
+                    .as_deref()
+                    .ok_or_else(|| {
+                        ApiError::service_unavailable("Mercado Pago no está configurado")
+                    })?;
+                update_mercadopago_preapproval(
+                    &state,
+                    access_token,
+                    provider_id,
+                    json!({ "status": "cancelled" }),
+                )
+                .await?;
+            }
+            subscription.cancel_at_period_end = true;
+            subscription.status = SubscriptionStatus::Cancelled;
+            subscription.updated_at = Utc::now();
+            state.storage.upsert_subscription(&subscription).await?;
+        }
+        Ok(Json(
+            entitlement_snapshot(&state, &bundle.org.id, &session.google_account_email).await?,
+        ))
     }
-
-    subscription.cancel_at_period_end = true;
-    subscription.updated_at = Utc::now();
-    state.storage.upsert_subscription(&subscription).await?;
-
-    let entitlement =
-        entitlement_snapshot(&state, &bundle.org.id, &session.google_account_email).await?;
-    Ok(Json(entitlement))
+    .await;
+    finish_billing_operation(&state, &bundle.org.id, &token, result).await
 }
 
 #[derive(Debug, Deserialize)]
@@ -1417,76 +1948,107 @@ async fn change_plan(
 ) -> Result<Json<EntitlementSnapshot>, ApiError> {
     let session = require_session(&state, &headers).await?;
     let bundle = get_or_provision_org_config(&state, &session.google_account_email).await?;
-    let plan_id = BillingPlanId::parse(&request.plan_id)
-        .ok_or_else(|| ApiError::bad_request("plan_id inválido"))?;
-    let plan = plan_by_id(&plan_id);
-
-    let mut subscription = state
-        .storage
-        .get_subscription_for_org(&bundle.org.id)
-        .await?
-        .ok_or_else(|| ApiError::payment_required("no tienes una suscripción activa"))?;
-
-    if !subscription_allows_access(Some(&subscription), Utc::now()) {
-        return Err(ApiError::conflict(
-            "reactiva tu suscripción antes de cambiar de plan",
-        ));
+    require_org_role(
+        &bundle,
+        &[
+            crate::policies::OrgRole::Owner,
+            crate::policies::OrgRole::Admin,
+        ],
+    )?;
+    let token = claim_billing_operation(&state, &bundle.org.id).await?;
+    let result = async {
+        let plan_id = BillingPlanId::parse(&request.plan_id)
+            .ok_or_else(|| ApiError::bad_request("plan_id inválido"))?;
+        let plan = plan_by_id(&plan_id);
+        let mut subscription = state
+            .storage
+            .get_subscription_for_org(&bundle.org.id)
+            .await?
+            .ok_or_else(|| ApiError::payment_required("no tienes una suscripción activa"))?;
+        if !subscription_allows_access(Some(&subscription), Utc::now())
+            || subscription.cancel_at_period_end
+        {
+            return Err(ApiError::conflict(
+                "reactiva tu suscripción antes de cambiar de plan",
+            ));
+        }
+        let amount = plan
+            .amount_for(&subscription.billing_interval)
+            .ok_or_else(|| ApiError::bad_request("este plan no se compra con tarjeta"))?;
+        let provider_id = subscription
+            .provider_subscription_id
+            .as_deref()
+            .ok_or_else(|| {
+                ApiError::conflict("la suscripción aún no está confirmada por Mercado Pago")
+            })?;
+        let access_token = state
+            .config
+            .billing
+            .mercadopago_access_token
+            .as_deref()
+            .ok_or_else(|| ApiError::service_unavailable("Mercado Pago no está configurado"))?;
+        update_mercadopago_preapproval(
+            &state,
+            access_token,
+            provider_id,
+            json!({
+                "auto_recurring": { "transaction_amount": amount, "currency_id": "CLP" },
+                "reason": format!("{} - Helpdesk Inspector", plan.name)
+            }),
+        )
+        .await?;
+        subscription.plan_id = plan_id;
+        subscription.updated_at = Utc::now();
+        state.storage.upsert_subscription(&subscription).await?;
+        Ok(Json(
+            entitlement_snapshot(&state, &bundle.org.id, &session.google_account_email).await?,
+        ))
     }
-
-    let provider_id = subscription
-        .provider_subscription_id
-        .clone()
-        .ok_or_else(|| {
-            ApiError::conflict("la suscripción aún no está confirmada por Mercado Pago")
-        })?;
-    let access_token = state
-        .config
-        .billing
-        .mercadopago_access_token
-        .as_deref()
-        .ok_or_else(|| ApiError::service_unavailable("Mercado Pago no está configurado"))?;
-
-    update_mercadopago_preapproval(
-        &state,
-        access_token,
-        &provider_id,
-        json!({
-            "auto_recurring": {
-                "transaction_amount": plan.clp_monthly,
-                "currency_id": "CLP"
-            },
-            "reason": format!("{} - Helpdesk Inspector", plan.name)
-        }),
-    )
-    .await?;
-
-    subscription.plan_id = plan_id;
-    subscription.cancel_at_period_end = false;
-    subscription.updated_at = Utc::now();
-    state.storage.upsert_subscription(&subscription).await?;
-
-    let entitlement =
-        entitlement_snapshot(&state, &bundle.org.id, &session.google_account_email).await?;
-    Ok(Json(entitlement))
+    .await;
+    finish_billing_operation(&state, &bundle.org.id, &token, result).await
 }
 
 #[derive(Debug, Deserialize)]
 struct MercadoPagoWebhook {
     #[serde(default)]
-    id: Option<String>,
-    #[serde(default)]
     #[serde(rename = "type")]
     event_type: Option<String>,
-    #[serde(default)]
-    #[serde(rename = "action")]
-    _action: Option<String>,
     #[serde(default)]
     data: Option<MercadoPagoWebhookData>,
 }
 
 #[derive(Debug, Deserialize)]
 struct MercadoPagoWebhookData {
-    id: String,
+    id: serde_json::Value,
+}
+
+fn mercadopago_webhook_resource_id(
+    query: &HashMap<String, String>,
+    payload: &MercadoPagoWebhook,
+) -> Result<String, ApiError> {
+    let signed = query
+        .get("data.id")
+        .or_else(|| query.get("data_id"))
+        .map(|id| id.trim())
+        .filter(|id| !id.is_empty())
+        .ok_or_else(ApiError::unauthorized)?;
+    let body_id = payload
+        .data
+        .as_ref()
+        .and_then(|data| match &data.id {
+            serde_json::Value::String(id) => Some(id.clone()),
+            serde_json::Value::Number(id) => Some(id.to_string()),
+            _ => None,
+        })
+        .ok_or_else(|| ApiError::bad_request("evento Mercado Pago sin identificador de recurso"))?;
+    if !body_id.eq_ignore_ascii_case(signed)
+        || !signed
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(ApiError::unauthorized());
+    }
+    Ok(signed.to_string())
 }
 
 async fn mercadopago_webhook(
@@ -1495,52 +2057,109 @@ async fn mercadopago_webhook(
     Query(query): Query<HashMap<String, String>>,
     Json(payload): Json<MercadoPagoWebhook>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let signed_data_id = query.get("data.id").or_else(|| query.get("data_id"));
-    verify_mercadopago_webhook(&state, &headers, signed_data_id.map(String::as_str))?;
-    let provider_id = payload
-        .data
-        .map(|data| data.id)
-        .or(payload.id)
-        .ok_or_else(|| ApiError::bad_request("missing Mercado Pago data id"))?;
-    let event_type = payload.event_type.unwrap_or_default();
-    if !event_type.is_empty()
-        && event_type != "subscription_preapproval"
-        && event_type != "preapproval"
-    {
-        return Ok(Json(json!({ "ok": true, "ignored": true })));
-    }
-    let checkout = state
-        .storage
-        .find_checkout_session_by_provider_id(&provider_id)
-        .await?
-        .ok_or(ApiError::not_found("checkout session not found"))?;
+    let resource_id = mercadopago_webhook_resource_id(&query, &payload)?;
+    verify_mercadopago_webhook(&state, &headers, Some(&resource_id))?;
+    let event_type = payload
+        .event_type
+        .as_deref()
+        .or_else(|| query.get("type").map(String::as_str))
+        .unwrap_or_default();
     let access_token = state
         .config
         .billing
         .mercadopago_access_token
         .as_deref()
         .ok_or_else(|| ApiError::service_unavailable("Mercado Pago no está configurado"))?;
+    let payment_id = (event_type == "payment").then(|| resource_id.clone());
+    let provider_id = match event_type {
+        "subscription_preapproval" | "preapproval" => resource_id,
+        "subscription_authorized_payment" => {
+            get_mercadopago_invoice(&state, access_token, &resource_id)
+                .await?
+                .preapproval_id
+        }
+        "payment" => {
+            let invoices =
+                search_mercadopago_invoices(&state, access_token, "payment_id", &resource_id)
+                    .await?;
+            let Some(invoice) = invoices.into_iter().find(|invoice| {
+                invoice
+                    .payment
+                    .as_ref()
+                    .is_some_and(|payment| payment.id.to_string() == resource_id)
+            }) else {
+                return Ok(Json(json!({ "ok": true, "ignored": true })));
+            };
+            invoice.preapproval_id
+        }
+        _ => return Ok(Json(json!({ "ok": true, "ignored": true }))),
+    };
     let provider = get_mercadopago_preapproval(&state, access_token, &provider_id).await?;
-    let status = map_mercadopago_status(provider.status.as_deref());
-    let now = Utc::now();
-    let mut subscription = state
-        .storage
-        .find_subscription_by_provider_id(&provider_id)
-        .await?
-        .unwrap_or_else(|| {
-            active_subscription_for_trial(
-                checkout.org_id.clone(),
-                checkout.plan_id.clone(),
-                Some(provider_id.clone()),
-                checkout.billing_interval.clone(),
-                now,
-            )
-        });
-    subscription.status = status;
-    subscription.updated_at = now;
-    subscription.provider_subscription_id = Some(provider_id);
-    state.storage.upsert_subscription(&subscription).await?;
-    Ok(Json(json!({ "ok": true })))
+    let Some(checkout) = find_mercadopago_checkout(&state, &provider).await? else {
+        return Ok(Json(json!({ "ok": true, "ignored": true })));
+    };
+    let token = claim_billing_operation(&state, &checkout.org_id).await?;
+    let result = async {
+        // El webhook solo identifica qué reconciliar. El estado actual se lee
+        // después de tomar el lock, sin aplicar snapshots antiguos del evento.
+        let provider = get_mercadopago_preapproval(&state, access_token, &provider_id).await?;
+        let payment = match payment_id.as_deref() {
+            Some(id) => Some(get_mercadopago_payment(&state, access_token, id).await?),
+            None => None,
+        };
+        reconcile_mercadopago_subscription_locked(
+            &state,
+            access_token,
+            &provider,
+            payment.as_ref(),
+        )
+        .await?;
+        Ok(Json(json!({ "ok": true })))
+    }
+    .await;
+    finish_billing_operation(&state, &checkout.org_id, &token, result).await
+}
+
+async fn reconcile_subscription(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<EntitlementSnapshot>, ApiError> {
+    let session = require_session(&state, &headers).await?;
+    let bundle = get_or_provision_org_config(&state, &session.google_account_email).await?;
+    require_org_role(
+        &bundle,
+        &[
+            crate::policies::OrgRole::Owner,
+            crate::policies::OrgRole::Admin,
+        ],
+    )?;
+    let token = claim_billing_operation(&state, &bundle.org.id).await?;
+    let result = async {
+        let subscription = state
+            .storage
+            .get_subscription_for_org(&bundle.org.id)
+            .await?
+            .ok_or_else(|| ApiError::conflict("no hay una suscripción para reconciliar"))?;
+        let provider_id = subscription
+            .provider_subscription_id
+            .as_deref()
+            .ok_or_else(|| {
+                ApiError::conflict("la suscripción no tiene identificador de Mercado Pago")
+            })?;
+        let access_token = state
+            .config
+            .billing
+            .mercadopago_access_token
+            .as_deref()
+            .ok_or_else(|| ApiError::service_unavailable("Mercado Pago no está configurado"))?;
+        let provider = get_mercadopago_preapproval(&state, access_token, provider_id).await?;
+        reconcile_mercadopago_subscription_locked(&state, access_token, &provider, None).await?;
+        Ok(Json(
+            entitlement_snapshot(&state, &bundle.org.id, &session.google_account_email).await?,
+        ))
+    }
+    .await;
+    finish_billing_operation(&state, &bundle.org.id, &token, result).await
 }
 
 #[derive(Debug, Serialize)]
@@ -1650,6 +2269,8 @@ async fn delete_analysis_data(
             "escribe BORRAR MIS ANALISIS para confirmar",
         ));
     }
+    let bundle = get_or_provision_org_config(&state, &session.google_account_email).await?;
+    require_org_role(&bundle, &[OrgRole::Owner, OrgRole::Admin])?;
     let mut audit = AnalysisDataDeletionAudit {
         id: worker_request_id().unwrap_or_else(|| Uuid::new_v4().to_string()),
         owner_hash: hash_owner_email(&session.google_account_email),
@@ -1873,7 +2494,12 @@ async fn get_operations_status(
             preset: "weekdays_custom_hour_local".to_string(),
             recipients_count,
             next_run_estimate: if enabled {
-                next_fire_time_label(Utc::now(), &timezone, &analysis_time)
+                next_fire_time_for_days(
+                    Utc::now(),
+                    &timezone,
+                    &analysis_time,
+                    &bundle.draft.schedule_report_policy.days_of_week,
+                )
             } else {
                 None
             },
@@ -2065,6 +2691,8 @@ async fn create_filter_preset(
     Json(request): Json<FilterPresetRequest>,
 ) -> Result<Json<FilterPreset>, ApiError> {
     let session = require_session(&state, &headers).await?;
+    let bundle = get_or_provision_org_config(&state, &session.google_account_email).await?;
+    require_org_role(&bundle, &[OrgRole::Owner, OrgRole::Admin, OrgRole::Analyst])?;
     let name = request.name.trim().to_string();
     if name.is_empty() {
         return Err(ApiError::bad_request("el preset necesita un nombre"));
@@ -2097,6 +2725,8 @@ async fn update_filter_preset_handler(
     Json(request): Json<FilterPresetRequest>,
 ) -> Result<Json<FilterPreset>, ApiError> {
     let session = require_session(&state, &headers).await?;
+    let bundle = get_or_provision_org_config(&state, &session.google_account_email).await?;
+    require_org_role(&bundle, &[OrgRole::Owner, OrgRole::Admin, OrgRole::Analyst])?;
     let mut preset = state
         .storage
         .list_filter_presets(&session.google_account_email)
@@ -2129,6 +2759,8 @@ async fn delete_filter_preset_handler(
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let session = require_session(&state, &headers).await?;
+    let bundle = get_or_provision_org_config(&state, &session.google_account_email).await?;
+    require_org_role(&bundle, &[OrgRole::Owner, OrgRole::Admin, OrgRole::Analyst])?;
     state
         .storage
         .delete_filter_preset(&session.google_account_email, &id)
@@ -2180,6 +2812,7 @@ struct MailboxUpdateRequest {
 
 #[derive(Debug, Deserialize)]
 struct AnalysisPolicyUpdateRequest {
+    request_scope: Option<RequestScope>,
     timezone: Option<String>,
     internal_domains: Option<Vec<String>>,
     responder_emails: Option<Vec<String>>,
@@ -2212,6 +2845,7 @@ struct AiPolicyUpdateRequest {
 
 #[derive(Debug, Deserialize)]
 struct ScheduleReportPolicyUpdateRequest {
+    days_of_week: Option<Vec<u8>>,
     scheduler_enabled: Option<bool>,
     timezone: Option<String>,
     analysis_time: Option<String>,
@@ -2238,6 +2872,7 @@ async fn update_org_config(
 ) -> Result<Json<UpdateOrgConfigResponse>, ApiError> {
     let session = require_session(&state, &headers).await?;
     let mut bundle = get_or_provision_org_config(&state, &session.google_account_email).await?;
+    require_org_role(&bundle, &[OrgRole::Owner, OrgRole::Admin])?;
     let unrestricted = state
         .config
         .is_privileged_account(&session.google_account_email);
@@ -2297,6 +2932,7 @@ async fn sync_schedule_config_from_policy(
             ignored_keywords: analysis.ignored_keywords.clone(),
             timezone: schedule.timezone.clone(),
             analysis_time: schedule.analysis_time.clone(),
+            days_of_week: schedule.days_of_week.clone(),
             gmail_max_threads: Some(analysis.max_threads_per_run),
             updated_at: Utc::now(),
         })
@@ -2366,15 +3002,28 @@ fn apply_analysis_policy_update(
     current: &mut AnalysisPolicy,
     update: AnalysisPolicyUpdateRequest,
 ) -> Result<(), ApiError> {
+    if let Some(scope) = update.request_scope {
+        current.request_scope = scope;
+    }
     if let Some(timezone) = update.timezone {
         validate_policy_timezone(&timezone)?;
         current.timezone = timezone;
     }
     if let Some(values) = update.internal_domains {
         current.internal_domains = normalize_domains(values);
+        if current
+            .internal_domains
+            .iter()
+            .any(|domain| crate::policies::is_public_mail_domain(domain))
+        {
+            return Err(ApiError::bad_request(
+                "los dominios de correo público no identifican al equipo; configura responsables por dirección",
+            ));
+        }
     }
     if let Some(values) = update.responder_emails {
         current.responder_emails = normalize_list(values);
+        validate_emails(&current.responder_emails)?;
     }
     if let Some(values) = update.mailbox_aliases {
         current.mailbox_aliases = normalize_list(values);
@@ -2464,21 +3113,27 @@ fn apply_schedule_report_policy_update(
     current: &mut ScheduleReportPolicy,
     update: ScheduleReportPolicyUpdateRequest,
 ) -> Result<(), ApiError> {
+    if let Some(mut days) = update.days_of_week {
+        if days.is_empty() || days.iter().any(|day| !(1..=7).contains(day)) {
+            return Err(ApiError::bad_request(
+                "days_of_week debe contener días ISO entre 1 y 7",
+            ));
+        }
+        days.sort_unstable();
+        days.dedup();
+        current.days_of_week = days;
+    }
     if let Some(timezone) = update.timezone {
         validate_policy_timezone(&timezone)?;
         current.timezone = timezone;
     }
     if let Some(value) = update.analysis_time {
         let value = validate_time(&value)?;
-        if !ALLOWED_ANALYSIS_TIMES.contains(&value.as_str()) {
-            return Err(ApiError::bad_request(
-                "analysis_time debe ser 08:00, 14:00, 18:00 o 22:00",
-            ));
-        }
         current.analysis_time = value;
     }
     if let Some(values) = update.report_recipients {
         current.report_recipients = normalize_list(values);
+        validate_emails(&current.report_recipients)?;
     }
     if let Some(content) = update.report_content {
         current.report_content = content;
@@ -2518,6 +3173,47 @@ fn validate_policy_timezone(timezone: &str) -> Result<(), ApiError> {
     }
 }
 
+fn validate_emails(values: &[String]) -> Result<(), ApiError> {
+    if values.iter().any(|email| {
+        email.len() > 254
+            || email.chars().any(char::is_whitespace)
+            || email.split_once('@').is_none_or(|(local, domain)| {
+                local.is_empty() || !domain.contains('.') || domain.contains('@')
+            })
+    }) {
+        return Err(ApiError::bad_request("dirección de correo inválida"));
+    }
+    Ok(())
+}
+
+fn validate_date_range(from: &str, to: &str) -> Result<(), ApiError> {
+    let parse = |value: &str| {
+        chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
+            .map_err(|_| ApiError::bad_request("fecha inválida; usa YYYY-MM-DD"))
+    };
+    let from = parse(from)?;
+    let to = parse(to)?;
+    if from > to || (to - from).num_days() > 365 {
+        return Err(ApiError::bad_request(
+            "elige un período ordenado de hasta 366 días",
+        ));
+    }
+    Ok(())
+}
+
+fn require_org_role(bundle: &OrgConfigBundle, roles: &[OrgRole]) -> Result<(), ApiError> {
+    if bundle.org.status == OrganizationStatus::Disabled
+        || bundle.membership.status != MembershipStatus::Active
+        || bundle.membership.org_id != bundle.org.id
+        || !roles.contains(&bundle.membership.role)
+    {
+        return Err(ApiError::forbidden(
+            "no tienes permiso para realizar esta acción en la organización",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_time(value: &str) -> Result<String, ApiError> {
     chrono::NaiveTime::parse_from_str(value, "%H:%M")
         .map(|_| value.to_string())
@@ -2539,13 +3235,37 @@ async fn get_or_provision_org_config(
     user_email: &str,
 ) -> Result<OrgConfigBundle, ApiError> {
     if let Some(mut bundle) = state.storage.get_org_config_for_user(user_email).await? {
+        if !bundle
+            .membership
+            .user_email
+            .eq_ignore_ascii_case(user_email)
+        {
+            return Err(ApiError::forbidden("membresía inválida"));
+        }
+        require_org_role(
+            &bundle,
+            &[
+                OrgRole::Owner,
+                OrgRole::Admin,
+                OrgRole::Analyst,
+                OrgRole::Viewer,
+            ],
+        )?;
         let now = Utc::now();
         // Migraciones perezosas e idempotentes: preservan decisiones explícitas
         // y crean una versión de política que el próximo análisis sí puede usar.
         let defaults_changed = apply_ai_defaults_migration(&mut bundle.draft.ai_policy, now);
         let threshold_changed = apply_ai_threshold_migration(&mut bundle.draft.ai_policy);
         let prompt_changed = apply_ai_prompt_version_migration(&mut bundle.draft.ai_policy);
-        if defaults_changed || threshold_changed || prompt_changed {
+        let previous_domains = bundle.draft.analysis_policy.internal_domains.len();
+        bundle
+            .draft
+            .analysis_policy
+            .internal_domains
+            .retain(|domain| !crate::policies::is_public_mail_domain(domain));
+        let domains_changed =
+            previous_domains != bundle.draft.analysis_policy.internal_domains.len();
+        if defaults_changed || threshold_changed || prompt_changed || domains_changed {
             bundle.draft.updated_at = now;
             bundle.policy_version = policy_version_from_draft(
                 &bundle.mailbox,
@@ -2616,68 +3336,22 @@ async fn create_analysis_run(
     )
     .await?;
     let now = Utc::now();
-    let uses_legacy_config = request.policy_version_id.is_none()
-        && (!request.internal_domains.is_empty()
-            || !request.ignored_senders.is_empty()
-            || !request.ignored_domains.is_empty()
-            || !request.ignored_keywords.is_empty()
-            || request.timezone.is_some());
-    let run = if uses_legacy_config {
-        build_legacy_run(session.google_account_email, request, now)
-    } else {
-        build_policy_run(&state, &session.google_account_email, request, now).await?
-    };
-    state.storage.create_analysis_run(&run).await?;
+    require_org_role(&bundle, &[OrgRole::Owner, OrgRole::Admin, OrgRole::Analyst])?;
+    let run = build_policy_run(&state, &session.google_account_email, request, now).await?;
+    reserve_run_creation(&state, &run).await?;
+    if let Err(error) = state.storage.create_analysis_run(&run).await {
+        state
+            .storage
+            .settle_analysis_usage(&run.id, UsageAmounts::default())
+            .await?;
+        return Err(error.into());
+    }
     tracing::info!(
         operation = "analysis_run_created",
         run_id = %run.id,
         "analysis run created"
     );
-    increment_runs_usage(&state, run.org_id.as_deref(), &run.user_email).await?;
     Ok(Json(run))
-}
-
-fn build_legacy_run(
-    user_email: String,
-    request: CreateAnalysisRunRequest,
-    now: chrono::DateTime<Utc>,
-) -> AnalysisRun {
-    AnalysisRun {
-        id: Uuid::new_v4().to_string(),
-        user_email,
-        org_id: None,
-        mailbox_id: None,
-        trigger_type: Some(TriggerType::Manual),
-        policy_version_id: None,
-        policy_hash: None,
-        policy_snapshot: None,
-        gmail_scope_snapshot: vec![],
-        retention_expires_at: None,
-        data_minimization_mode: Some("metadata_snippets_excerpts_only".to_string()),
-        config: AnalysisConfig {
-            date_from: request.date_from,
-            date_to: request.date_to,
-            time_from: request.time_from.unwrap_or_else(|| "00:00".to_string()),
-            time_to: request.time_to.unwrap_or_else(|| "23:59".to_string()),
-            timezone: request
-                .timezone
-                .unwrap_or_else(|| "America/Santiago".to_string()),
-            internal_domains: request.internal_domains,
-            ignored_senders: request.ignored_senders,
-            ignored_domains: request.ignored_domains,
-            ignored_keywords: request.ignored_keywords,
-            include_labels: request.include_labels,
-            exclude_labels: request.exclude_labels,
-        },
-        status: AnalysisStatus::Pending,
-        progress_message: "Listo para analizar".to_string(),
-        processed_threads: 0,
-        total_candidate_threads: 0,
-        metrics: AnalysisMetrics::default(),
-        created_at: now,
-        completed_at: None,
-        error_message: None,
-    }
 }
 
 async fn build_policy_run(
@@ -2686,8 +3360,24 @@ async fn build_policy_run(
     request: CreateAnalysisRunRequest,
     now: chrono::DateTime<Utc>,
 ) -> Result<AnalysisRun, ApiError> {
+    validate_date_range(&request.date_from, &request.date_to)?;
     let bundle = get_or_provision_org_config(state, user_email).await?;
+    if request.timezone.is_some()
+        || !request.internal_domains.is_empty()
+        || !request.ignored_senders.is_empty()
+        || !request.ignored_domains.is_empty()
+        || !request.ignored_keywords.is_empty()
+    {
+        return Err(ApiError::bad_request(
+            "configura zona horaria, responsables y exclusiones en la política de organización",
+        ));
+    }
     let policy_version = if let Some(policy_version_id) = request.policy_version_id.as_deref() {
+        if policy_version_id != bundle.policy_version.id {
+            return Err(ApiError::conflict(
+                "la política cambió; actualiza la configuración antes de analizar",
+            ));
+        }
         state
             .storage
             .get_policy_version(&bundle.org.id, policy_version_id)
@@ -2704,6 +3394,23 @@ async fn build_policy_run(
     }
     let snapshot = policy_version.snapshot.clone();
     let analysis = &snapshot.analysis_policy;
+    let time_from = validate_time(
+        request
+            .time_from
+            .as_deref()
+            .unwrap_or(&analysis.default_time_from),
+    )?;
+    let time_to = validate_time(
+        request
+            .time_to
+            .as_deref()
+            .unwrap_or(&analysis.default_time_to),
+    )?;
+    if time_from > time_to {
+        return Err(ApiError::bad_request(
+            "la hora inicial no puede ser posterior a la final",
+        ));
+    }
     // La selección de etiquetas del request (por-run) tiene prioridad; si viene
     // vacía, se usa la persistida en la política.
     let include_labels = if request.include_labels.is_empty() {
@@ -2731,14 +3438,15 @@ async fn build_policy_run(
         config: AnalysisConfig {
             date_from: request.date_from,
             date_to: request.date_to,
-            time_from: request
-                .time_from
-                .unwrap_or_else(|| analysis.default_time_from.clone()),
-            time_to: request
-                .time_to
-                .unwrap_or_else(|| analysis.default_time_to.clone()),
+            time_from,
+            time_to,
             timezone: analysis.timezone.clone(),
             internal_domains: analysis.internal_domains.clone(),
+            responder_emails: crate::policies::responders_for_mailbox(
+                analysis,
+                &snapshot.mailbox.google_account_email,
+            ),
+            request_scope: analysis.request_scope,
             ignored_senders: analysis.ignored_senders.clone(),
             ignored_domains: analysis.ignored_domains.clone(),
             ignored_keywords: analysis.ignored_keywords.clone(),
@@ -2766,7 +3474,10 @@ async fn list_analysis_runs(
     let runs = state
         .storage
         .list_analysis_runs(&session.google_account_email)
-        .await?;
+        .await?
+        .into_iter()
+        .filter(|run| run.retention_deadline() > Utc::now())
+        .collect();
     paginated_or_legacy_response(runs, &query)
 }
 
@@ -2786,7 +3497,8 @@ async fn start_analysis_run(
     Path(id): Path<String>,
 ) -> Result<Json<AnalysisRun>, ApiError> {
     let session = require_session(&state, &headers).await?;
-    require_active_entitlement(&state, &session).await?;
+    let bundle = require_active_entitlement(&state, &session).await?;
+    require_org_role(&bundle, &[OrgRole::Owner, OrgRole::Admin, OrgRole::Analyst])?;
     let connection = state
         .storage
         .get_gmail_connection(&session.google_account_email)
@@ -2797,6 +3509,15 @@ async fn start_analysis_run(
     if run.status != AnalysisStatus::Pending {
         return Err(ApiError::conflict(
             "el análisis solo puede iniciarse cuando está pendiente",
+        ));
+    }
+    if run
+        .mailbox_id
+        .as_deref()
+        .is_none_or(|mailbox_id| mailbox_id != bundle.mailbox.id)
+    {
+        return Err(ApiError::conflict(
+            "la casilla cambió; crea un análisis con la configuración actual",
         ));
     }
     enforce_rate_limit(
@@ -3055,10 +3776,66 @@ async fn apply_manual_review_request(
     thread: EmailThread,
     request: ManualReviewRequest,
 ) -> Result<Json<AnalysisRun>, ApiError> {
+    let bundle = require_active_entitlement(state, session).await?;
+    require_org_role(&bundle, &[OrgRole::Owner, OrgRole::Admin, OrgRole::Analyst])?;
+    let run = require_owned_run(state, &thread.analysis_run_id, session).await?;
     let messages = state
         .storage
         .list_messages(&thread.analysis_run_id, &thread.id)
         .await?;
+    let find = |id: &Option<String>| -> Result<Option<&EmailMessage>, ApiError> {
+        id.as_ref()
+            .map(|id| {
+                messages
+                    .iter()
+                    .find(|message| &message.id == id)
+                    .ok_or_else(|| {
+                        ApiError::bad_request("el mensaje elegido no pertenece a la conversación")
+                    })
+            })
+            .transpose()
+    };
+    let client = find(&request.first_client_message_id)?;
+    let reply = find(&request.first_internal_reply_message_id)?;
+    let last = find(&request.last_internal_message_id)?;
+    if client.is_some_and(|m| !crate::analysis::message_is_requester(m, &run.config))
+        || reply.is_some_and(|m| !m.is_internal || m.is_automated)
+        || last.is_some_and(|m| !m.is_internal || m.is_automated)
+    {
+        return Err(ApiError::bad_request(
+            "selecciona una solicitud humana y respuestas del equipo",
+        ));
+    }
+    if client.is_some_and(|m| !message_is_inside_analysis_window(m, &run.config))
+        || matches!(
+            request.new_classification,
+            crate::analysis::Classification::ValidClientRequest
+        ) && client.is_none()
+    {
+        return Err(ApiError::bad_request(
+            "selecciona la solicitud válida dentro del período analizado",
+        ));
+    }
+    if client.is_some_and(|c| {
+        reply.into_iter().chain(last).any(|r| {
+            !crate::analysis::reply_reaches_requester(r, c)
+                && !crate::analysis::reply_recipient_unknown(r, c)
+        })
+    }) {
+        return Err(ApiError::bad_request(
+            "la respuesta elegida debe estar dirigida al solicitante",
+        ));
+    }
+    if request.is_answered && (client.is_none() || reply.is_none())
+        || !request.is_answered && reply.is_some()
+        || client.zip(reply).is_some_and(|(c, r)| r.date < c.date)
+        || client.zip(last).is_some_and(|(c, l)| l.date < c.date)
+        || reply.zip(last).is_some_and(|(r, l)| l.date < r.date)
+    {
+        return Err(ApiError::bad_request(
+            "los hitos de respuesta deben ser coherentes y estar ordenados",
+        ));
+    }
     let first_client_message_at = request
         .first_client_message_id
         .as_ref()
@@ -3116,6 +3893,10 @@ async fn apply_manual_review_request(
             thread_id: thread.thread_id.clone(),
             source_run_id: thread.analysis_run_id.clone(),
             message_fingerprint: message_fingerprint(&messages),
+            review_context: Some(crate::analysis::manual_review_context(
+                &run.config,
+                run.policy_snapshot.as_ref(),
+            )),
             reviewer_label: session.google_account_email.clone(),
             classification: review.new_classification.clone(),
             is_answered: review.is_answered,
@@ -3173,6 +3954,69 @@ pub(crate) async fn execute_analysis(
     run_id: String,
     access_token: String,
 ) -> anyhow::Result<()> {
+    let mut spent = UsageAmounts {
+        runs: 1,
+        ..Default::default()
+    };
+    let queued_at = std::time::Instant::now();
+    let _permit =
+        match tokio::time::timeout(Duration::from_secs(5 * 60), state.analysis_slots.acquire())
+            .await
+        {
+            Ok(permit) => permit?,
+            Err(_) => {
+                state.storage.settle_analysis_usage(&run_id, spent).await?;
+                anyhow::bail!("analysis_capacity_timeout");
+            }
+        };
+    let access_token = if queued_at.elapsed() > Duration::from_secs(120) {
+        let run = state
+            .storage
+            .get_analysis_run(&run_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("analysis_cancelled_or_deleted"))?;
+        let connection = state
+            .storage
+            .get_gmail_connection(&run.user_email)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("mailbox_connection_missing"))?;
+        fresh_mailbox_access_token(&state, &connection)
+            .await
+            .map_err(|_| anyhow::anyhow!("mailbox_authentication_unavailable"))?
+    } else {
+        access_token
+    };
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(45 * 60),
+        execute_analysis_inner(state.clone(), run_id.clone(), access_token, &mut spent),
+    )
+    .await
+    .unwrap_or_else(|_| Err(anyhow::anyhow!("analysis_timeout")));
+    if result.as_ref().is_err_and(|error| {
+        error
+            .downcast_ref::<crate::imap::ImapAuthenticationRejected>()
+            .is_some()
+    }) && let Some(run) = state.storage.get_analysis_run(&run_id).await?
+        && let Some(connection) = state.storage.get_gmail_connection(&run.user_email).await?
+    {
+        let mut updated = connection.clone();
+        updated.needs_reauth_at = Some(Utc::now());
+        updated.updated_at = Utc::now();
+        state
+            .storage
+            .refresh_gmail_connection(&connection, &updated)
+            .await?;
+    }
+    state.storage.settle_analysis_usage(&run_id, spent).await?;
+    result
+}
+
+async fn execute_analysis_inner(
+    state: AppState,
+    run_id: String,
+    access_token: String,
+    spent: &mut UsageAmounts,
+) -> anyhow::Result<()> {
     let mut run = state
         .storage
         .get_analysis_run(&run_id)
@@ -3180,6 +4024,24 @@ pub(crate) async fn execute_analysis(
         .context(AnalysisFailureStage("run_lookup"))?
         .ok_or_else(|| anyhow::anyhow!("analysis run not found"))
         .context(AnalysisFailureStage("run_lookup"))?;
+    if run.status != AnalysisStatus::Running {
+        anyhow::bail!("analysis_cancelled_or_deleted");
+    }
+    let current_bundle = state
+        .storage
+        .get_org_config_for_user(&run.user_email)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("analysis_missing_organization"))?;
+    require_org_role(
+        &current_bundle,
+        &[OrgRole::Owner, OrgRole::Admin, OrgRole::Analyst],
+    )
+    .map_err(|_| anyhow::anyhow!("organization_permission_denied"))?;
+    if run.org_id.as_deref() != Some(current_bundle.org.id.as_str())
+        || run.mailbox_id.as_deref() != Some(current_bundle.mailbox.id.as_str())
+    {
+        anyhow::bail!("mailbox_connection_changed");
+    }
     // Plan vigente para este run (pagado o Mira Free por defecto). El tope del plan
     // El plan aplica tres cupos distintos: recuperados de la casilla (mensual,
     // holgado), hilos que entran al informe (por análisis) y hilos enviados a la
@@ -3187,16 +4049,6 @@ pub(crate) async fn execute_analysis(
     let plan = plan_for_run(&state, run.org_id.as_deref(), &run.user_email)
         .await
         .context(AnalysisFailureStage("plan_lookup"))?;
-    let (used_retrieved, used_ai) = match run.org_id.as_deref() {
-        Some(org_id) => state
-            .storage
-            .get_usage_ledger(org_id, &current_period_key())
-            .await
-            .context(AnalysisFailureStage("usage_lookup"))?
-            .map(|usage| (usage.retrieved_threads, usage.ai_analyzed_threads))
-            .unwrap_or((0, 0)),
-        None => (0, 0),
-    };
     let policy_max = run
         .policy_snapshot
         .as_ref()
@@ -3214,29 +4066,47 @@ pub(crate) async fn execute_analysis(
     let has_finite_run_cap = enforce && reported_cap != UNLIMITED_REPORTED_PER_RUN;
     // La recuperación se acota por lo que queda del cupo MENSUAL de recuperados, y
     // con holgura sobre el tope del informe para que pueda llenarse pese al embudo.
-    let retrieval_budget = if enforce {
-        plan.limits
-            .retrieved_threads_per_month
-            .saturating_sub(used_retrieved)
+    let requested_retrieval = retrieval_max_for(has_finite_run_cap, reported_cap, policy_max);
+    let retrieval_max = if enforce {
+        state
+            .storage
+            .reserve_analysis_usage(
+                &run,
+                &current_period_key(),
+                UsageAmounts {
+                    runs: 1,
+                    retrieved: requested_retrieval,
+                    ai: 0,
+                },
+                &plan.limits,
+            )
+            .await?
+            .retrieved
     } else {
-        u32::MAX
+        requested_retrieval
     };
-    let retrieval_max = retrieval_max_for(has_finite_run_cap, reported_cap, policy_max)
-        .min(retrieval_budget)
-        .max(1);
+    if retrieval_max == 0 {
+        anyhow::bail!("usage_quota_exceeded");
+    }
 
     // El proveedor se resuelve una vez por run desde la conexión de la casilla,
     // no por hilo: dentro del run no puede cambiar.
-    let provider_kind = state
+    let connection = state
         .storage
         .get_gmail_connection(&run.user_email)
         .await
         .context(AnalysisFailureStage("mailbox_connection_lookup"))?
-        .map(|connection| connection.provider)
-        .unwrap_or_default();
+        .ok_or_else(|| anyhow::anyhow!("mailbox_connection_missing"))?;
+    if !mailbox_connection_is_active(Some(&connection))
+        || !connection
+            .mailbox_email
+            .eq_ignore_ascii_case(&current_bundle.mailbox.google_account_email)
+    {
+        anyhow::bail!("mailbox_connection_changed");
+    }
     let provider = state
         .mailbox
-        .get(provider_kind)
+        .for_connection(&connection)
         .context(AnalysisFailureStage("mailbox_provider_unavailable"))?;
 
     let page = provider
@@ -3245,6 +4115,7 @@ pub(crate) async fn execute_analysis(
         .context(AnalysisFailureStage("mailbox_list_threads"))?;
     let more_beyond_retrieved = page.next_page_token.is_some();
     let thread_ids = page.ids;
+    spent.retrieved = thread_ids.len() as u32;
     run.total_candidate_threads = thread_ids.len() as u64;
     run.progress_message = format!("{} hilos encontrados en la casilla", thread_ids.len());
     state
@@ -3273,6 +4144,7 @@ pub(crate) async fn execute_analysis(
     let mut prepared_threads = Vec::new();
     {
         let state_ref = &state;
+        let provider_ref = provider.as_ref();
         let access_ref = access_token.as_str();
         let config_ref = &config;
         let policy_ref = policy_snapshot.as_ref();
@@ -3283,7 +4155,7 @@ pub(crate) async fn execute_analysis(
         let mut task_stream = stream::iter(thread_ids.into_iter().map(|thread_id| async move {
             prepare_one_thread(
                 state_ref,
-                provider,
+                provider_ref,
                 access_ref,
                 run_id_ref,
                 config_ref,
@@ -3304,6 +4176,9 @@ pub(crate) async fn execute_analysis(
             processed += 1;
             match result {
                 Ok(outcome) => {
+                    if outcome.truncated {
+                        funnel.truncated_threads += 1;
+                    }
                     match outcome.disposition {
                         ThreadDisposition::Stored => {
                             stored += 1;
@@ -3327,7 +4202,18 @@ pub(crate) async fn execute_analysis(
                         funnel.dropped_samples.push(dropped);
                     }
                 }
-                Err(_) => {
+                Err(error) => {
+                    if error
+                        .downcast_ref::<crate::imap::ImapAuthenticationRejected>()
+                        .is_some()
+                        || matches!(
+                            error.to_string().as_str(),
+                            "analysis_cancelled_or_deleted" | "mailbox_connection_changed"
+                        )
+                    {
+                        return Err(error);
+                    }
+                    funnel.failed_threads += 1;
                     tracing::warn!(
                         operation = "thread_processing",
                         "el procesamiento de un hilo falló; se omite"
@@ -3351,10 +4237,15 @@ pub(crate) async fn execute_analysis(
         run.processed_threads = processed;
     }
 
-    let ai_enabled = policy_snapshot
-        .as_ref()
-        .map(|snapshot| snapshot.ai_policy.enabled)
-        .unwrap_or(true);
+    let ai_enabled = policy_snapshot.as_ref().is_some_and(|snapshot| {
+        snapshot.ai_policy.enabled && snapshot.ai_policy.consent_granted_at.is_some()
+    }) && state
+        .storage
+        .get_org_config_for_user(&run.user_email)
+        .await?
+        .is_some_and(|bundle| {
+            bundle.draft.ai_policy.enabled && bundle.draft.ai_policy.consent_granted_at.is_some()
+        });
     let (auto_apply_threshold, manual_review_threshold) = policy_snapshot
         .as_ref()
         .map(|snapshot| {
@@ -3373,9 +4264,20 @@ pub(crate) async fn execute_analysis(
     // elegante: el análisis igual corre y clasifica con heurística, solo deja de
     // auditar. Bloquear el run completo sería peor producto que degradar.
     let ai_budget = if enforce {
-        plan.limits
-            .ai_analyzed_threads_per_month
-            .saturating_sub(used_ai) as usize
+        state
+            .storage
+            .reserve_analysis_usage(
+                &run,
+                &current_period_key(),
+                UsageAmounts {
+                    runs: 1,
+                    retrieved: spent.retrieved,
+                    ai: batch_indexes.len() as u32,
+                },
+                &plan.limits,
+            )
+            .await?
+            .ai as usize
     } else {
         usize::MAX
     };
@@ -3388,6 +4290,33 @@ pub(crate) async fn execute_analysis(
     // Segunda fase: una única auditoría completa por lotes. Los errores se reintentan
     // una vez dividiendo el lote; no existe una segunda llamada por hilo.
     for index_chunk in batch_indexes.chunks(AI_BATCH_SIZE) {
+        if state
+            .storage
+            .get_analysis_run(&run_id)
+            .await?
+            .is_none_or(|run| run.status != AnalysisStatus::Running)
+        {
+            anyhow::bail!("analysis_cancelled_or_deleted");
+        }
+        let current_bundle = state
+            .storage
+            .get_org_config_for_user(&run.user_email)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("analysis_missing_organization"))?;
+        require_org_role(
+            &current_bundle,
+            &[OrgRole::Owner, OrgRole::Admin, OrgRole::Analyst],
+        )
+        .map_err(|_| anyhow::anyhow!("organization_permission_denied"))?;
+        let consent_current = current_bundle.draft.ai_policy.enabled
+            && current_bundle.draft.ai_policy.consent_granted_at.is_some();
+        if !consent_current {
+            for index in index_chunk {
+                mark_ai_audit_unavailable(&mut prepared_threads[*index].thread);
+            }
+            continue;
+        }
+        spent.ai = spent.ai.saturating_add(index_chunk.len() as u32);
         for index in index_chunk {
             ai_unique_thread_ids.insert(prepared_threads[*index].thread.thread_id.clone());
         }
@@ -3416,6 +4345,9 @@ pub(crate) async fn execute_analysis(
                     auto_apply_threshold,
                     manual_review_threshold,
                 );
+                if prepared.truncated {
+                    defer_incomplete_conversation(&mut prepared.thread);
+                }
             } else {
                 mark_ai_audit_unavailable(&mut prepared.thread);
             }
@@ -3424,6 +4356,19 @@ pub(crate) async fn execute_analysis(
 
     // Los hilos que no necesitaban IA y los resultados ya resueltos se persisten al
     // final; los cuerpos se descartan como antes.
+    let current_bundle = state
+        .storage
+        .get_org_config_for_user(&run.user_email)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("analysis_missing_organization"))?;
+    require_org_role(
+        &current_bundle,
+        &[OrgRole::Owner, OrgRole::Admin, OrgRole::Analyst],
+    )
+    .map_err(|_| anyhow::anyhow!("organization_permission_denied"))?;
+    if run.mailbox_id.as_deref() != Some(current_bundle.mailbox.id.as_str()) {
+        anyhow::bail!("mailbox_connection_changed");
+    }
     for prepared in &prepared_threads {
         let sanitized = messages_for_persistence(&prepared.messages);
         state
@@ -3448,19 +4393,19 @@ pub(crate) async fn execute_analysis(
     // se adjunta aparte, después de recomputar las métricas de los almacenados.
     run.metrics.funnel = funnel;
     run.status = AnalysisStatus::Completed;
-    run.progress_message = "Análisis completado".to_string();
+    run.progress_message =
+        if run.metrics.funnel.failed_threads > 0 || run.metrics.funnel.truncated_threads > 0 {
+            "Análisis completado con cobertura incompleta".to_string()
+        } else {
+            "Análisis completado".to_string()
+        };
     run.completed_at = Some(Utc::now());
     state.storage.update_analysis_run(&run).await?;
     // Se cobran las dos magnitudes con cupo mensual: los hilos RECUPERADOS de la
     // casilla y los enviados a la IA. Los reportados se topan por análisis, no al mes.
-    add_analysis_usage(
-        &state,
-        run.org_id.as_deref(),
-        &run.user_email,
-        run.total_candidate_threads as u32,
-        ai_unique_thread_ids.len() as u32,
-    )
-    .await?;
+    if let Some(org_id) = run.org_id.as_deref() {
+        check_quota_alerts(&state, org_id, &current_period_key(), &run.user_email).await;
+    }
     Ok(())
 }
 
@@ -3474,7 +4419,7 @@ async fn plan_for_run(
         return Ok(plan_by_id(&BillingPlanId::Pro));
     }
     let Some(org_id) = org_id else {
-        return Ok(plan_by_id(&BillingPlanId::Pro));
+        anyhow::bail!("analysis_missing_organization");
     };
     let subscription = state.storage.get_subscription_for_org(org_id).await?;
     if subscription_allows_access(subscription.as_ref(), Utc::now()) {
@@ -3523,6 +4468,7 @@ const DEFAULT_AI_BODY_CHARS: usize = 280;
 
 #[derive(Default)]
 struct ThreadOutcome {
+    truncated: bool,
     /// Dónde terminó el hilo: almacenado o descartado (y por qué). Alimenta el
     /// embudo de diagnóstico para que los descartes dejen de ser invisibles.
     disposition: ThreadDisposition,
@@ -3533,6 +4479,7 @@ struct ThreadOutcome {
 }
 
 struct PreparedThread {
+    truncated: bool,
     thread: EmailThread,
     messages: Vec<EmailMessage>,
     label_ids: Vec<String>,
@@ -3578,10 +4525,33 @@ async fn prepare_one_thread(
     processing: ThreadProcessingContext<'_>,
     thread_id: String,
 ) -> anyhow::Result<ThreadOutcome> {
+    if state
+        .storage
+        .get_analysis_run(run_id)
+        .await?
+        .is_none_or(|run| run.status != AnalysisStatus::Running)
+    {
+        anyhow::bail!("analysis_cancelled_or_deleted");
+    }
+    let current = state
+        .storage
+        .get_gmail_connection(processing.owner_email)
+        .await?;
+    if !mailbox_connection_is_active(current.as_ref())
+        || processing.policy_snapshot.is_some_and(|snapshot| {
+            current.as_ref().is_none_or(|current| {
+                !current
+                    .mailbox_email
+                    .eq_ignore_ascii_case(&snapshot.mailbox.google_account_email)
+            })
+        })
+    {
+        anyhow::bail!("mailbox_connection_changed");
+    }
     let data = provider
         .fetch_thread(access_token, &thread_id, config)
         .await?;
-    if !data.is_primary_inbox {
+    if !data.is_primary_inbox && config.include_labels.is_empty() {
         return Ok(ThreadOutcome {
             disposition: ThreadDisposition::DroppedNotPrimaryInbox,
             dropped: Some(dropped_thread_info(
@@ -3598,10 +4568,10 @@ async fn prepare_one_thread(
     // activity is internal (the desk acting on an older request) is out of scope for this
     // window and is skipped. classify_thread then anchors its metrics on the in-window
     // client message and routes re-opened-after-answered threads to review.
-    let has_external_in_window = data
-        .messages
-        .iter()
-        .any(|message| message.is_external && message_is_inside_analysis_window(message, config));
+    let has_external_in_window = data.messages.iter().any(|message| {
+        crate::analysis::message_is_requester_candidate(message, config)
+            && message_is_inside_analysis_window(message, config)
+    });
     if !has_external_in_window {
         return Ok(ThreadOutcome {
             disposition: ThreadDisposition::DroppedNoExternalInWindow,
@@ -3627,6 +4597,13 @@ async fn prepare_one_thread(
     }
 
     let mut thread = classify_thread(run_id, &data.id, &data.messages, config);
+    if data.truncated {
+        thread.manual_review_required = true;
+        thread.reasons.push(
+            "La conversación supera el límite de recuperación; la cobertura es incompleta."
+                .to_string(),
+        );
+    }
     // Señal extra: refina el veredicto heurístico con las pestañas/categorías de Gmail.
     refine_classification_with_folders(&mut thread, &data.folder_ids);
     // Señal extra: enruta a revisión los hilos cuyo asunto/remitente coincide con una
@@ -3643,12 +4620,12 @@ async fn prepare_one_thread(
             request_sender,
             &snapshot.analysis_policy.non_responsibility_rules,
         );
-        // Señal extra: rescata a válido los hilos cuyo asunto/cuerpo menciona una
-        // palabra de "señal de ticket" del tenant; la IA confirma o degrada después.
+        // Las palabras de ticket sólo señalan candidatos, pendientes de confirmación.
         rescue_classification_with_valid_signals(
             &mut thread,
             &data.messages,
             &snapshot.analysis_policy.valid_signal_keywords,
+            config,
         );
     }
     if let Some(review) = state
@@ -3656,12 +4633,17 @@ async fn prepare_one_thread(
         .get_manual_review_override(processing.owner_email, &thread.thread_id)
         .await?
         && review.message_fingerprint == message_fingerprint(&data.messages)
+        && review.review_context.as_deref()
+            == Some(
+                crate::analysis::manual_review_context(config, processing.policy_snapshot).as_str(),
+            )
     {
         apply_manual_review_override(&mut thread, &data.messages, &review);
         let sanitized = messages_for_persistence(&data.messages);
         state.storage.upsert_thread(&thread, &sanitized).await?;
         return Ok(ThreadOutcome {
             disposition: ThreadDisposition::Stored,
+            truncated: data.truncated,
             ..Default::default()
         });
     }
@@ -3670,9 +4652,18 @@ async fn prepare_one_thread(
             thread.classification,
             Classification::ValidClientRequest | Classification::Ambiguous
         );
+    if should_batch
+        && !processing
+            .policy_snapshot
+            .is_some_and(|snapshot| snapshot.ai_policy.enabled)
+    {
+        mark_semantic_review_pending(&mut thread);
+    }
     Ok(ThreadOutcome {
+        truncated: data.truncated,
         disposition: ThreadDisposition::Stored,
         prepared: Some(PreparedThread {
+            truncated: data.truncated,
             thread,
             messages: data.messages,
             label_ids: data.folder_ids,
@@ -3689,6 +4680,7 @@ struct AiWorkerPolicyContext<'a> {
     workspace_domain: &'a str,
     internal_domains: &'a [String],
     responder_emails: &'a [String],
+    request_scope: crate::analysis::RequestScope,
     mailbox_aliases: &'a [String],
     valid_request_criteria: &'a [String],
     non_responsibility_rules: &'a [String],
@@ -3711,6 +4703,7 @@ fn ai_worker_policy_context(
         workspace_domain: &snapshot.mailbox.workspace_domain,
         internal_domains: &snapshot.analysis_policy.internal_domains,
         responder_emails: &snapshot.analysis_policy.responder_emails,
+        request_scope: snapshot.analysis_policy.request_scope,
         mailbox_aliases: &snapshot.analysis_policy.mailbox_aliases,
         valid_request_criteria: &snapshot.analysis_policy.valid_request_criteria,
         non_responsibility_rules: &snapshot.analysis_policy.non_responsibility_rules,
@@ -3735,6 +4728,8 @@ fn ai_worker_policy_context(
 struct BatchMessageSummary {
     message_id: String,
     from_email: String,
+    to_emails: Vec<String>,
+    cc_emails: Vec<String>,
     date: chrono::DateTime<Utc>,
     is_internal: bool,
     is_automated: bool,
@@ -3839,13 +4834,11 @@ fn batch_messages_for_thread(
         .iter()
         .filter(|message| message.is_external && !message.is_automated)
         .min_by_key(|message| message.date);
-    let first_reply = first_client.and_then(|client| {
+    let first_reply = focus.or(first_client).and_then(|client| {
         prepared
             .messages
             .iter()
-            .filter(|message| {
-                message.is_internal && !message.is_automated && message.date > client.date
-            })
+            .filter(|message| crate::analysis::reply_reaches_requester(message, client))
             .min_by_key(|message| message.date)
     });
     let mut selected = Vec::with_capacity(max_messages);
@@ -3876,6 +4869,8 @@ fn batch_messages_for_thread(
             BatchMessageSummary {
                 message_id: message.id.clone(),
                 from_email: message.from_email.clone(),
+                to_emails: message.to_emails.clone(),
+                cc_emails: message.cc_emails.clone(),
                 date: message.date,
                 is_internal: message.is_internal,
                 is_automated: message.is_automated,
@@ -4191,6 +5186,30 @@ fn batch_message_ids_known(decision: &BatchAuditDecision, messages: &[EmailMessa
         && known(&decision.last_internal_message_id)
 }
 
+fn defer_incomplete_conversation(thread: &mut EmailThread) {
+    if thread.ai_suggestion.is_none() {
+        thread.ai_suggestion = Some(crate::analysis::AiSuggestion {
+            classification: thread.classification.clone(),
+            is_answered: thread.is_answered,
+            confidence: thread.classification_confidence,
+            first_client_message_id: thread.first_client_message_id.clone(),
+            first_internal_reply_message_id: thread.first_internal_reply_message_id.clone(),
+            last_internal_message_id: thread.last_internal_message_id.clone(),
+            issues: vec!["La conversación recuperada está incompleta".into()],
+        });
+    }
+    thread.classification = Classification::Ambiguous;
+    thread.is_valid_client_request = false;
+    thread.manual_review_required = true;
+    thread.is_answered = false;
+    thread.first_internal_reply_message_id = None;
+    thread.last_internal_message_id = None;
+    thread.first_internal_reply_at = None;
+    thread.last_internal_message_at = None;
+    thread.response_time_minutes = None;
+    thread.resolution_time_minutes = None;
+}
+
 fn apply_batch_decision(
     thread: &mut EmailThread,
     messages: &[EmailMessage],
@@ -4201,11 +5220,58 @@ fn apply_batch_decision(
     let ids_known = batch_message_ids_known(decision, messages);
     let classification_is_valid = decision.classification == Classification::ValidClientRequest;
     let decision_is_consistent = decision.is_valid_client_request == classification_is_valid;
-    thread.classification = decision.classification.clone();
+    let focus = thread
+        .first_client_message_id
+        .as_ref()
+        .and_then(|id| messages.iter().find(|m| &m.id == id));
+    let response_is_uncertain = focus.is_some_and(|request| {
+        messages
+            .iter()
+            .any(|m| crate::analysis::reply_recipient_unknown(m, request))
+    });
+    let valid_trace_is_consistent = !classification_is_valid
+        || (focus.is_some_and(|request| !request.is_internal && !request.is_automated)
+            && decision.first_client_message_id == thread.first_client_message_id
+            && decision.is_answered == thread.is_answered
+            && [
+                &decision.first_internal_reply_message_id,
+                &decision.last_internal_message_id,
+            ]
+            .into_iter()
+            .all(|id| {
+                id.as_ref().is_none_or(|id| {
+                    focus.is_some_and(|request| {
+                        messages.iter().any(|m| {
+                            &m.id == id && crate::analysis::reply_reaches_requester(m, request)
+                        })
+                    })
+                })
+            }));
+    let review_required = decision.manual_review_required
+        || decision.classification == Classification::Ambiguous
+        || decision.confidence < auto_apply_threshold
+        || !ids_known
+        || !decision_is_consistent
+        || !valid_trace_is_consistent
+        || response_is_uncertain;
+    thread.ai_suggestion = review_required.then(|| crate::analysis::AiSuggestion {
+        classification: decision.classification.clone(),
+        is_answered: decision.is_answered,
+        confidence: decision.confidence,
+        first_client_message_id: decision.first_client_message_id.clone(),
+        first_internal_reply_message_id: decision.first_internal_reply_message_id.clone(),
+        last_internal_message_id: decision.last_internal_message_id.clone(),
+        issues: decision.issues.clone(),
+    });
+    thread.classification = if review_required {
+        Classification::Ambiguous
+    } else {
+        decision.classification.clone()
+    };
     thread.classification_source = ClassificationSource::Ai;
     thread.classification_confidence = decision.confidence;
-    thread.is_valid_client_request = classification_is_valid;
-    if !classification_is_valid {
+    thread.is_valid_client_request = !review_required && classification_is_valid;
+    if !review_required && !classification_is_valid {
         // Un cierre antiguo puede ser "ignorado y contestado": no afecta las
         // métricas válidas, pero conserva el estado que ve la persona revisora.
         thread.is_answered = decision.is_answered;
@@ -4214,16 +5280,15 @@ fn apply_batch_decision(
     // ventana: estos hitos ya fueron calculados contra el primer cliente recibido
     // dentro del período.
     apply_trace_dates(thread, messages);
-    thread.manual_review_required = decision.manual_review_required
-        || decision.classification == Classification::Ambiguous
-        || decision.confidence < auto_apply_threshold
-        || !ids_known
-        || !decision_is_consistent;
+    thread.manual_review_required = review_required;
     thread.reasons.push(if !ids_known {
         "Mira clasificó el hilo, pero entregó referencias de mensajes inválidas; revisa la trazabilidad."
             .to_string()
     } else if !decision_is_consistent {
-        "Mira entregó una clasificación inconsistente; se conservó la categoría y requiere revisión."
+        "Mira entregó una clasificación inconsistente; se dejó como propuesta para revisión."
+            .to_string()
+    } else if !valid_trace_is_consistent || response_is_uncertain {
+        "La propuesta no confirma los hitos de respuesta dirigida al solicitante; requiere revisión."
             .to_string()
     } else if decision.classification == Classification::Ambiguous {
         "Mira encontró más de una clasificación plausible; revisa este hilo.".to_string()
@@ -4235,6 +5300,17 @@ fn apply_batch_decision(
         "Mira aplicó la auditoría por alta confianza.".to_string()
     });
     thread.reasons.extend(decision.issues.iter().cloned());
+}
+
+fn mark_semantic_review_pending(thread: &mut EmailThread) {
+    thread.classification = Classification::Ambiguous;
+    thread.is_valid_client_request = false;
+    thread.classification_confidence = 0.0;
+    thread.manual_review_required = true;
+    thread.reasons.push(
+        "La IA está desactivada: los filtros detectaron un candidato, pero la validez según los criterios del tenant debe confirmarse manualmente."
+            .to_string(),
+    );
 }
 
 fn mark_ai_audit_unavailable(thread: &mut EmailThread) {
@@ -4349,10 +5425,25 @@ async fn enforce_rate_limit(
     }
 }
 
-async fn fresh_mailbox_access_token(
+pub(crate) async fn fresh_mailbox_access_token(
     state: &AppState,
     connection: &MailboxConnection,
 ) -> Result<String, ApiError> {
+    if !mailbox_connection_is_active(Some(connection)) {
+        return Err(ApiError::forbidden(
+            "vuelve a conectar la casilla antes de analizar",
+        ));
+    }
+    if connection.provider == MailboxProviderKind::Imap {
+        return decrypt_token(
+            connection
+                .imap_password_encrypted
+                .as_deref()
+                .ok_or_else(|| ApiError::forbidden("vuelve a conectar la casilla IMAP"))?,
+            &state.config.encryption_key,
+        )
+        .map_err(Into::into);
+    }
     let encrypted_refresh = connection
         .refresh_token_encrypted
         .as_deref()
@@ -4360,7 +5451,7 @@ async fn fresh_mailbox_access_token(
             ApiError::forbidden("la conexión con la casilla expiró; vuelve a conectarla")
         })?;
     let refresh_token = decrypt_token(encrypted_refresh, &state.config.encryption_key)?;
-    let token = refresh_access_token_for(
+    let token = match refresh_access_token_for(
         &state.http,
         connection.provider,
         &state.config.google,
@@ -4368,7 +5459,20 @@ async fn fresh_mailbox_access_token(
         &refresh_token,
     )
     .await
-    .map_err(mailbox_refresh_error)?;
+    {
+        Ok(token) => token,
+        Err(RefreshError::InvalidGrant) => {
+            let mut updated = connection.clone();
+            updated.needs_reauth_at = Some(Utc::now());
+            updated.updated_at = Utc::now();
+            state
+                .storage
+                .refresh_gmail_connection(connection, &updated)
+                .await?;
+            return Err(mailbox_refresh_error(RefreshError::InvalidGrant));
+        }
+        Err(error) => return Err(mailbox_refresh_error(error)),
+    };
 
     let mut updated = connection.clone();
     updated.access_token_encrypted =
@@ -4491,6 +5595,15 @@ async fn require_active_entitlement(
     session: &UserSession,
 ) -> Result<OrgConfigBundle, ApiError> {
     let bundle = get_or_provision_org_config(state, &session.google_account_email).await?;
+    require_org_role(
+        &bundle,
+        &[
+            OrgRole::Owner,
+            OrgRole::Admin,
+            OrgRole::Analyst,
+            OrgRole::Viewer,
+        ],
+    )?;
     let entitlement =
         entitlement_snapshot(state, &bundle.org.id, &session.google_account_email).await?;
     if entitlement.allowed {
@@ -4554,6 +5667,44 @@ async fn enforce_usage_allows_run(
     Ok(())
 }
 
+pub(crate) async fn reserve_run_creation(
+    state: &AppState,
+    run: &AnalysisRun,
+) -> Result<(), ApiError> {
+    if !state.config.billing.enforcement_enabled
+        || state.config.is_privileged_account(&run.user_email)
+    {
+        return Ok(());
+    }
+    let org_id = run
+        .org_id
+        .as_deref()
+        .ok_or_else(|| ApiError::bad_request("el análisis debe pertenecer a una organización"))?;
+    let plan = effective_plan_for_org(state, org_id).await?;
+    state
+        .storage
+        .reserve_analysis_usage(
+            run,
+            &current_period_key(),
+            UsageAmounts {
+                runs: 1,
+                ..Default::default()
+            },
+            &plan.limits,
+        )
+        .await
+        .map_err(|error| {
+            if error.to_string() == "usage_quota_exceeded" {
+                ApiError::payment_required("alcanzaste el límite mensual de análisis de tu plan")
+            } else {
+                error.into()
+            }
+        })?;
+    check_quota_alerts(state, org_id, &current_period_key(), &run.user_email).await;
+    Ok(())
+}
+
+#[cfg(test)]
 async fn increment_runs_usage(
     state: &AppState,
     org_id: Option<&str>,
@@ -4569,34 +5720,6 @@ async fn increment_runs_usage(
     state
         .storage
         .add_usage(org_id, &period_key, 1, 0, 0)
-        .await?;
-    check_quota_alerts(state, org_id, &period_key, account_email).await;
-    Ok(())
-}
-
-async fn add_analysis_usage(
-    state: &AppState,
-    org_id: Option<&str>,
-    account_email: &str,
-    retrieved_threads: u32,
-    ai_analyzed_threads: u32,
-) -> anyhow::Result<()> {
-    if state.config.is_privileged_account(account_email) {
-        return Ok(());
-    }
-    let Some(org_id) = org_id else {
-        return Ok(());
-    };
-    let period_key = current_period_key();
-    state
-        .storage
-        .add_usage(
-            org_id,
-            &period_key,
-            0,
-            retrieved_threads,
-            ai_analyzed_threads,
-        )
         .await?;
     check_quota_alerts(state, org_id, &period_key, account_email).await;
     Ok(())
@@ -4728,6 +5851,249 @@ struct MercadoPagoPreapprovalResponse {
     id: String,
     #[serde(default)]
     status: Option<String>,
+    #[serde(default)]
+    date_created: Option<chrono::DateTime<Utc>>,
+    #[serde(default)]
+    external_reference: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MercadoPagoInvoice {
+    preapproval_id: String,
+    debit_date: chrono::DateTime<Utc>,
+    #[serde(default)]
+    payment: Option<MercadoPagoPayment>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MercadoPagoPayment {
+    id: serde_json::Number,
+    status: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct MercadoPagoInvoiceSearch {
+    results: Vec<MercadoPagoInvoice>,
+    paging: MercadoPagoPaging,
+}
+
+#[derive(Debug, Deserialize)]
+struct MercadoPagoPaging {
+    total: usize,
+}
+
+async fn get_mercadopago_invoice(
+    state: &AppState,
+    access_token: &str,
+    id: &str,
+) -> Result<MercadoPagoInvoice, ApiError> {
+    let response = state
+        .http
+        .get(format!(
+            "https://api.mercadopago.com/authorized_payments/{id}"
+        ))
+        .bearer_auth(access_token)
+        .send()
+        .await?;
+    mercadopago_json(response, "get_invoice").await
+}
+
+async fn get_mercadopago_payment(
+    state: &AppState,
+    access_token: &str,
+    id: &str,
+) -> Result<MercadoPagoPayment, ApiError> {
+    let response = state
+        .http
+        .get(format!("https://api.mercadopago.com/v1/payments/{id}"))
+        .bearer_auth(access_token)
+        .send()
+        .await?;
+    let payment: MercadoPagoPayment = mercadopago_json(response, "get_payment").await?;
+    if payment.id.to_string() != id {
+        return Err(ApiError::external_service_unavailable());
+    }
+    Ok(payment)
+}
+
+async fn search_mercadopago_invoices(
+    state: &AppState,
+    access_token: &str,
+    filter: &str,
+    id: &str,
+) -> Result<Vec<MercadoPagoInvoice>, ApiError> {
+    let mut invoices = Vec::new();
+    for _ in 0..6 {
+        let response = state
+            .http
+            .get("https://api.mercadopago.com/authorized_payments/search")
+            .query(&[
+                (filter, id),
+                ("limit", "100"),
+                ("offset", &invoices.len().to_string()),
+            ])
+            .bearer_auth(access_token)
+            .send()
+            .await?;
+        let page: MercadoPagoInvoiceSearch = mercadopago_json(response, "search_invoices").await?;
+        // ponytail: seis páginas cubren 50 años de cobros mensuales y caben en
+        // el lease; rechazar histories mayores en vez de reconciliar incompleto.
+        if page.paging.total > 600 || page.results.is_empty() && invoices.len() < page.paging.total
+        {
+            return Err(ApiError::external_service_unavailable());
+        }
+        invoices.extend(page.results);
+        if invoices.len() >= page.paging.total {
+            return Ok(invoices);
+        }
+    }
+    Err(ApiError::external_service_unavailable())
+}
+
+async fn find_mercadopago_checkout(
+    state: &AppState,
+    provider: &MercadoPagoPreapprovalResponse,
+) -> Result<Option<CheckoutSession>, ApiError> {
+    if let Some(checkout) = state
+        .storage
+        .find_checkout_session_by_provider_id(&provider.id)
+        .await?
+    {
+        return Ok(Some(checkout));
+    }
+    let Some(reference) = provider.external_reference.as_deref() else {
+        return Ok(None);
+    };
+    Ok(state
+        .storage
+        .get_checkout_session(reference)
+        .await?
+        .filter(|checkout| {
+            checkout.provider == "mercadopago"
+                && checkout
+                    .provider_subscription_id
+                    .as_deref()
+                    .is_none_or(|id| id == provider.id)
+        }))
+}
+
+async fn reconcile_mercadopago_subscription_locked(
+    state: &AppState,
+    access_token: &str,
+    provider: &MercadoPagoPreapprovalResponse,
+    payment: Option<&MercadoPagoPayment>,
+) -> Result<(), ApiError> {
+    let mut checkout = find_mercadopago_checkout(state, provider)
+        .await?
+        .ok_or_else(|| ApiError::not_found("checkout session not found"))?;
+    let current = state
+        .storage
+        .get_subscription_for_org(&checkout.org_id)
+        .await?;
+    // Una notificación tardía de la suscripción anterior no reemplaza la nueva.
+    if current.as_ref().is_some_and(|subscription| {
+        subscription
+            .provider_subscription_id
+            .as_deref()
+            .is_some_and(|id| id != provider.id)
+    }) {
+        return Ok(());
+    }
+    let mut subscription = current.unwrap_or_else(|| {
+        let started = provider.date_created.unwrap_or(checkout.created_at);
+        let mut subscription = active_subscription_for_trial(
+            checkout.org_id.clone(),
+            checkout.plan_id.clone(),
+            Some(provider.id.clone()),
+            checkout.billing_interval.clone(),
+            started,
+        );
+        subscription.trial_ends_at = (checkout.trial_days > 0
+            && provider.status.as_deref() == Some("authorized"))
+        .then(|| started + chrono::Duration::days(i64::from(checkout.trial_days)));
+        subscription
+    });
+    let mut invoices =
+        search_mercadopago_invoices(state, access_token, "preapproval_id", &provider.id).await?;
+    if invoices
+        .iter()
+        .any(|invoice| invoice.preapproval_id != provider.id)
+    {
+        return Err(ApiError::external_service_unavailable());
+    }
+    if let Some(payment) = payment {
+        for invoice in &mut invoices {
+            if let Some(existing) = invoice.payment.as_mut()
+                && existing.id == payment.id
+            {
+                existing.status.clone_from(&payment.status);
+            }
+        }
+    }
+    apply_mercadopago_reconciliation(&mut subscription, provider, &invoices, Utc::now());
+    state.storage.upsert_subscription(&subscription).await?;
+    if provider.status.as_deref() == Some("authorized")
+        && checkout.status != CheckoutSessionStatus::Activated
+    {
+        checkout.provider_subscription_id = Some(provider.id.clone());
+        checkout.status = CheckoutSessionStatus::Activated;
+        checkout.updated_at = Utc::now();
+        state.storage.upsert_checkout_session(&checkout).await?;
+    }
+    Ok(())
+}
+
+fn apply_mercadopago_reconciliation(
+    subscription: &mut Subscription,
+    provider: &MercadoPagoPreapprovalResponse,
+    invoices: &[MercadoPagoInvoice],
+    now: chrono::DateTime<Utc>,
+) {
+    // debit_date pertenece al ciclo facturado. La autorización de la tarjeta y
+    // next_payment_date no prueban que se pagó ningún período.
+    let eligible = invoices.iter().filter(|invoice| invoice.debit_date <= now);
+    let paid = eligible
+        .clone()
+        .filter(|invoice| {
+            invoice
+                .payment
+                .as_ref()
+                .is_some_and(|payment| payment.status == "approved")
+        })
+        .max_by_key(|invoice| invoice.debit_date);
+    subscription.current_period_start = paid.map(|invoice| invoice.debit_date);
+    subscription.current_period_end =
+        paid.map(|invoice| subscription.billing_interval.period_end(invoice.debit_date));
+    let failed = eligible
+        .max_by_key(|invoice| invoice.debit_date)
+        .is_some_and(|invoice| {
+            invoice.payment.as_ref().is_some_and(|payment| {
+                matches!(
+                    payment.status.as_str(),
+                    "rejected" | "cancelled" | "refunded" | "charged_back"
+                )
+            })
+        });
+    subscription.status = match provider.status.as_deref() {
+        Some("cancelled" | "canceled") => {
+            subscription.cancel_at_period_end = true;
+            SubscriptionStatus::Cancelled
+        }
+        Some("paused") => SubscriptionStatus::PastDue,
+        Some("authorized") if subscription.cancel_at_period_end => SubscriptionStatus::Cancelled,
+        Some("authorized") if failed => SubscriptionStatus::PastDue,
+        Some("authorized") if subscription.current_period_end.is_some_and(|end| end > now) => {
+            SubscriptionStatus::Active
+        }
+        Some("authorized") if subscription.trial_ends_at.is_some_and(|end| end > now) => {
+            SubscriptionStatus::Trialing
+        }
+        Some("authorized") if paid.is_some() || subscription.trial_ends_at.is_some() => {
+            SubscriptionStatus::PastDue
+        }
+        _ => SubscriptionStatus::Pending,
+    };
+    subscription.updated_at = now;
 }
 
 async fn create_mercadopago_preapproval(
@@ -4752,6 +6118,12 @@ async fn create_mercadopago_preapproval(
         .json(&body)
         .send()
         .await?;
+    if matches!(response.status().as_u16(), 400 | 422) {
+        let mut failed = checkout.clone();
+        failed.status = CheckoutSessionStatus::Failed;
+        failed.updated_at = Utc::now();
+        state.storage.upsert_checkout_session(&failed).await?;
+    }
     mercadopago_json(response, "create_preapproval").await
 }
 
@@ -4770,13 +6142,13 @@ fn mercadopago_preapproval_body(
     let mut auto_recurring = json!({
         "frequency": frequency,
         "frequency_type": "months",
-        "start_date": Utc::now().to_rfc3339(),
+        "start_date": checkout.created_at.to_rfc3339(),
         "transaction_amount": checkout.amount_clp,
         "currency_id": "CLP"
     });
-    if plan.trial_days > 0 {
+    if checkout.trial_days > 0 {
         auto_recurring["free_trial"] = json!({
-            "frequency": plan.trial_days,
+            "frequency": checkout.trial_days,
             "frequency_type": "days"
         });
     }
@@ -4823,7 +6195,12 @@ async fn get_mercadopago_preapproval(
         .bearer_auth(access_token)
         .send()
         .await?;
-    mercadopago_json(response, "get_preapproval").await
+    let provider: MercadoPagoPreapprovalResponse =
+        mercadopago_json(response, "get_preapproval").await?;
+    if provider.id != provider_id {
+        return Err(ApiError::external_service_unavailable());
+    }
+    Ok(provider)
 }
 
 async fn mercadopago_json<T: DeserializeOwned>(
@@ -4878,15 +6255,6 @@ fn mercadopago_api_error(status: StatusCode) -> ApiError {
     }
 }
 
-fn map_mercadopago_status(status: Option<&str>) -> SubscriptionStatus {
-    match status.unwrap_or_default() {
-        "authorized" => SubscriptionStatus::Active,
-        "paused" => SubscriptionStatus::PastDue,
-        "canceled" | "cancelled" => SubscriptionStatus::Cancelled,
-        _ => SubscriptionStatus::Pending,
-    }
-}
-
 fn verify_mercadopago_webhook(
     state: &AppState,
     headers: &HeaderMap,
@@ -4919,7 +6287,17 @@ fn validate_mercadopago_signature(
 ) -> Result<(), ApiError> {
     let (timestamp, received_hash) =
         parse_webhook_signature(x_signature).ok_or_else(ApiError::unauthorized)?;
-    validate_webhook_timestamp(timestamp, SystemTime::now())?;
+    let signed = timestamp
+        .parse::<u128>()
+        .map_err(|_| ApiError::unauthorized())?;
+    // Mercado Pago publica ejemplos tanto en segundos como en milisegundos.
+    // La firma siempre usa el timestamp original; solo normalizamos su edad.
+    let milliseconds = if signed < 1_000_000_000_000 {
+        signed * 1000
+    } else {
+        signed
+    };
+    validate_webhook_timestamp(&milliseconds.to_string(), SystemTime::now())?;
     let mut parts = Vec::new();
     if let Some(data_id) = signed_data_id
         .map(str::trim)
@@ -5039,6 +6417,9 @@ async fn require_owned_run(
         .get_analysis_run(run_id)
         .await?
         .ok_or(ApiError::not_found("analysis run not found"))?;
+    if run.retention_deadline() <= Utc::now() {
+        return Err(ApiError::not_found("analysis run not found"));
+    }
     if let Some(org_id) = &run.org_id {
         if !state
             .storage
@@ -5534,6 +6915,10 @@ mod tests {
     #[test]
     fn credentials_are_reused_only_for_the_same_provider_and_mailbox() {
         let mut previous = Some(MailboxConnection {
+            microsoft_target_email: None,
+            imap_config: None,
+            imap_password_encrypted: None,
+            needs_reauth_at: None,
             owner_email: "owner@example.com".to_string(),
             provider: MailboxProviderKind::Google,
             mailbox_email: "mailbox@example.com".to_string(),
@@ -5589,12 +6974,23 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+        let state = AppState::new(test_app_config(), Arc::new(fixture.storage.clone()));
+        let bundle = get_or_provision_org_config(&state, "alice@example.com")
+            .await
+            .unwrap();
+        pending.org_id = Some(bundle.org.id.clone());
+        pending.mailbox_id = Some(bundle.mailbox.id.clone());
+        pending.policy_snapshot = Some(bundle.policy_version.snapshot.clone());
         pending.status = AnalysisStatus::Pending;
         pending.completed_at = None;
         fixture.storage.update_analysis_run(&pending).await.unwrap();
         fixture
             .storage
             .upsert_gmail_connection(&MailboxConnection {
+                microsoft_target_email: None,
+                imap_config: None,
+                imap_password_encrypted: None,
+                needs_reauth_at: None,
                 owner_email: "alice@example.com".to_string(),
                 provider: MailboxProviderKind::Google,
                 mailbox_email: "alice@example.com".to_string(),
@@ -5672,7 +7068,7 @@ mod tests {
 
     #[test]
     fn persistence_discards_full_email_bodies() {
-        let mut message = message("message-1", "cliente@example.com");
+        let mut message = message("message-1", "cliente@customer.test");
         message.body_text = Some("contenido completo que no debe persistirse".to_string());
 
         let persisted = messages_for_persistence(&[message.clone()]);
@@ -5687,26 +7083,29 @@ mod tests {
     fn batch_audit_selects_unique_milestones_and_compact_content() {
         let mut thread = thread("thread-1", "run-1");
         thread.first_client_message_id = Some("msg-d".to_string());
-        let mut first = message("msg-a", "cliente@example.com");
+        let mut first = message("msg-a", "cliente@customer.test");
         first.body_text = Some("abcdefgh".to_string());
         let mut first_reply = message("msg-b", "agente@example.com");
         first_reply.is_internal = true;
         first_reply.is_external = false;
+        first_reply.to_emails = vec![first.from_email.clone()];
         first_reply.date = first.date + chrono::Duration::seconds(1);
         let mut automated = message("msg-c", "robot@example.com");
         automated.is_automated = true;
         automated.date = first.date + chrono::Duration::seconds(2);
-        let mut last_client = message("msg-d", "cliente@example.com");
+        let mut last_client = message("msg-d", "cliente@customer.test");
         last_client.date = first.date + chrono::Duration::seconds(3);
         let mut last_reply = message("msg-e", "agente@example.com");
         last_reply.is_internal = true;
         last_reply.is_external = false;
+        last_reply.to_emails = vec![last_client.from_email.clone()];
         last_reply.date = first.date + chrono::Duration::seconds(4);
         let prepared = PreparedThread {
             thread,
             messages: vec![first, first_reply, automated, last_client, last_reply],
             label_ids: vec![],
             should_batch: true,
+            truncated: false,
         };
 
         let selected = batch_messages_for_thread(&prepared, 3, 5);
@@ -5717,10 +7116,11 @@ mod tests {
                 .iter()
                 .map(|message| message.message_id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["msg-a", "msg-b", "msg-d"]
+            vec!["msg-a", "msg-d", "msg-e"]
         );
         assert_eq!(selected[0].content, "abcde\n[truncado]");
         assert_eq!(selected[1].content, "Neces\n[truncado]");
+        assert_eq!(selected[2].to_emails, vec!["cliente@customer.test"]);
 
         let full_context = batch_messages_for_thread(&prepared, 5, 5);
         assert_eq!(full_context.len(), 5);
@@ -5741,6 +7141,105 @@ mod tests {
                 .iter()
                 .any(|reason| reason.contains("no pudo auditar"))
         );
+    }
+
+    #[test]
+    fn truncated_high_confidence_result_keeps_proposal_out_of_confirmed_metrics() {
+        let mut candidate = thread("truncated", "run-truncated");
+        candidate.classification = Classification::ValidClientRequest;
+        candidate.classification_source = ClassificationSource::Ai;
+        candidate.classification_confidence = 0.99;
+        candidate.manual_review_required = false;
+        candidate.is_answered = true;
+        candidate.first_internal_reply_message_id = Some("reply".into());
+        candidate.response_time_minutes = Some(12);
+        assert_eq!(calculate_metrics(&[candidate.clone()], 0, 0).answered, 1);
+        defer_incomplete_conversation(&mut candidate);
+        let metrics = calculate_metrics(&[candidate.clone()], 0, 0);
+        assert_eq!(metrics.valid_requests, 0);
+        assert_eq!(metrics.answered, 0);
+        assert_eq!(metrics.avg_first_response_minutes, None);
+        assert_eq!(metrics.pending_review, 1);
+        let proposal = candidate.ai_suggestion.unwrap();
+        assert_eq!(proposal.classification, Classification::ValidClientRequest);
+        assert!(proposal.is_answered);
+        assert_eq!(
+            proposal.first_internal_reply_message_id.as_deref(),
+            Some("reply")
+        );
+        assert_eq!(candidate.first_internal_reply_message_id, None);
+    }
+
+    #[test]
+    fn ai_disabled_candidates_require_semantic_review_and_do_not_count_as_valid() {
+        let mut candidate = thread("candidate", "run");
+        candidate.classification = Classification::ValidClientRequest;
+        candidate.is_valid_client_request = true;
+        candidate.manual_review_required = false;
+        mark_semantic_review_pending(&mut candidate);
+        let metrics = calculate_metrics(&[candidate], 0, 0);
+        assert_eq!(metrics.valid_requests, 0);
+        assert_eq!(metrics.pending_review, 1);
+        assert_eq!(metrics.ignored, 0);
+    }
+
+    #[test]
+    fn ai_cannot_confirm_an_answer_to_a_team_only_exchange() {
+        let mut candidate = thread("team-only", "run");
+        let request = message("msg-a", "cliente@customer.test");
+        let mut team_reply = message("msg-b", "agente@example.com");
+        team_reply.is_internal = true;
+        team_reply.is_external = false;
+        team_reply.to_emails = vec!["supervisor@example.com".to_string()];
+        team_reply.date = request.date + chrono::Duration::minutes(5);
+        let decision = BatchAuditDecision {
+            thread_id: candidate.thread_id.clone(),
+            classification: Classification::ValidClientRequest,
+            is_valid_client_request: true,
+            is_answered: true,
+            first_client_message_id: Some(request.id.clone()),
+            first_internal_reply_message_id: Some(team_reply.id.clone()),
+            last_internal_message_id: Some(team_reply.id.clone()),
+            confidence: 0.99,
+            manual_review_required: false,
+            issues: vec![],
+        };
+        apply_batch_decision(
+            &mut candidate,
+            &[request, team_reply],
+            &decision,
+            0.92,
+            0.72,
+        );
+        assert!(candidate.manual_review_required);
+        assert!(!candidate.is_answered);
+        assert!(!candidate.is_valid_client_request);
+        assert!(candidate.ai_suggestion.as_ref().unwrap().is_answered);
+        assert_eq!(calculate_metrics(&[candidate], 0, 0).answered, 0);
+    }
+
+    #[test]
+    fn ai_cannot_confirm_an_automated_message_as_a_human_request() {
+        let mut candidate = thread("automated", "run");
+        let mut automated = message("msg-a", "system@customer.test");
+        automated.is_automated = true;
+        let decision = BatchAuditDecision {
+            thread_id: candidate.thread_id.clone(),
+            classification: Classification::ValidClientRequest,
+            is_valid_client_request: true,
+            is_answered: false,
+            first_client_message_id: Some(automated.id.clone()),
+            first_internal_reply_message_id: None,
+            last_internal_message_id: None,
+            confidence: 0.99,
+            manual_review_required: false,
+            issues: vec![],
+        };
+        apply_batch_decision(&mut candidate, &[automated], &decision, 0.92, 0.72);
+        assert_eq!(candidate.classification, Classification::Ambiguous);
+        assert!(!candidate.is_valid_client_request);
+        assert!(candidate.manual_review_required);
+        assert_eq!(calculate_metrics(&[candidate], 0, 0).valid_requests, 0);
     }
 
     struct TestApp {
@@ -5791,14 +7290,14 @@ mod tests {
         storage
             .upsert_thread(
                 &thread("thread-alice", "run-alice"),
-                &[message("msg-a", "cliente@example.com")],
+                &[message("msg-a", "cliente@customer.test")],
             )
             .await
             .unwrap();
         storage
             .upsert_thread(
                 &thread("thread-bob", "run-bob"),
-                &[message("msg-b", "cliente@example.com")],
+                &[message("msg-b", "cliente@customer.test")],
             )
             .await
             .unwrap();
@@ -5921,6 +7420,8 @@ mod tests {
             retention_expires_at: None,
             data_minimization_mode: None,
             config: AnalysisConfig {
+                responder_emails: vec![],
+                request_scope: crate::analysis::RequestScope::External,
                 date_from: "2026-06-01".to_string(),
                 date_to: "2026-06-02".to_string(),
                 time_from: "00:00".to_string(),
@@ -5945,8 +7446,11 @@ mod tests {
     }
 
     fn thread(id: &str, run_id: &str) -> EmailThread {
-        let now = Utc::now();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-06-01T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
         EmailThread {
+            ai_suggestion: None,
             id: id.to_string(),
             analysis_run_id: run_id.to_string(),
             thread_id: format!("gmail-{id}"),
@@ -5992,10 +7496,11 @@ mod tests {
         candidate.is_answered = true;
         candidate.first_internal_reply_message_id = Some("msg-b".to_string());
         candidate.last_internal_message_id = Some("msg-b".to_string());
-        let mut first = message("msg-a", "cliente@example.com");
+        let mut first = message("msg-a", "cliente@customer.test");
         let mut reply = message("msg-b", "agente@example.com");
         reply.is_internal = true;
         reply.is_external = false;
+        reply.to_emails = vec![first.from_email.clone()];
         reply.date = first.date + chrono::Duration::seconds(1);
         first.date -= chrono::Duration::seconds(1);
         let messages = vec![first, reply];
@@ -6021,16 +7526,26 @@ mod tests {
         decision.is_valid_client_request = false;
         decision.manual_review_required = true;
         apply_batch_decision(&mut candidate, &messages, &decision, 0.92, 0.72);
-        assert_eq!(candidate.classification, Classification::Misc);
+        assert_eq!(candidate.classification, Classification::Ambiguous);
+        assert_eq!(
+            candidate.ai_suggestion.as_ref().unwrap().classification,
+            Classification::Misc
+        );
         assert!(candidate.manual_review_required);
         assert_eq!(candidate.classification_source, ClassificationSource::Ai);
 
         let mut low_confidence = thread("low", "run");
-        let original = low_confidence.classification.clone();
         decision.confidence = 0.5;
         apply_batch_decision(&mut low_confidence, &messages, &decision, 0.92, 0.72);
-        assert_ne!(low_confidence.classification, original);
-        assert_eq!(low_confidence.classification, Classification::Misc);
+        assert_eq!(low_confidence.classification, Classification::Ambiguous);
+        assert_eq!(
+            low_confidence
+                .ai_suggestion
+                .as_ref()
+                .unwrap()
+                .classification,
+            Classification::Misc
+        );
         assert!(!low_confidence.is_valid_client_request);
         assert_eq!(
             low_confidence.classification_source,
@@ -6038,12 +7553,16 @@ mod tests {
         );
         assert_eq!(low_confidence.classification_confidence, 0.5);
         assert!(low_confidence.manual_review_required);
+        let provisional = calculate_metrics(&[low_confidence], 0, 0);
+        assert_eq!(provisional.ignored, 0);
+        assert_eq!(provisional.valid_requests, 0);
+        assert_eq!(provisional.pending_review, 1);
 
         let mut invalid_ids = thread("invalid", "run");
         decision.confidence = 0.95;
         decision.first_client_message_id = Some("invented".to_string());
         apply_batch_decision(&mut invalid_ids, &messages, &decision, 0.92, 0.72);
-        assert_eq!(invalid_ids.classification, Classification::Misc);
+        assert_eq!(invalid_ids.classification, Classification::Ambiguous);
         assert!(!invalid_ids.is_valid_client_request);
         assert_eq!(invalid_ids.classification_source, ClassificationSource::Ai);
         assert!(invalid_ids.manual_review_required);
@@ -6051,7 +7570,8 @@ mod tests {
             invalid_ids.first_client_message_id.as_deref(),
             Some("msg-a")
         );
-        assert!(invalid_ids.is_answered);
+        assert!(!invalid_ids.is_answered);
+        assert!(invalid_ids.ai_suggestion.as_ref().unwrap().is_answered);
     }
 
     #[tokio::test]
@@ -6105,7 +7625,9 @@ mod tests {
             from_name: None,
             to_emails: vec!["help@example.com".to_string()],
             cc_emails: vec![],
-            date: Utc::now(),
+            date: chrono::DateTime::parse_from_rfc3339("2026-06-01T12:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
             subject: "Ayuda".to_string(),
             snippet: "Necesito ayuda".to_string(),
             headers: json!({}),
@@ -6143,6 +7665,216 @@ mod tests {
             .unwrap()
     }
 
+    async fn complete_analysis_setup(app: &Router, cookie: &str) {
+        let response = app.clone().oneshot(request(
+            Method::PUT, "/me/org/config", Some(cookie),
+            Some(json!({"analysis_policy":{"valid_request_criteria":["Solicitudes de soporte"]}})),
+        )).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    async fn report_fixture() -> TestApp {
+        let test = seeded_app().await;
+        let mut bundle = provision_default_config("alice@example.com", Utc::now());
+        bundle.org.id = "alice-org".to_string();
+        bundle.membership.org_id = bundle.org.id.clone();
+        bundle.mailbox.org_id = bundle.org.id.clone();
+        bundle.draft.org_id = bundle.org.id.clone();
+        bundle.draft.analysis_policy.timezone = "America/Santiago".to_string();
+        bundle.policy_version = policy_version_from_draft(
+            &bundle.mailbox,
+            &bundle.draft,
+            1,
+            "alice@example.com",
+            Utc::now(),
+        );
+        test.storage.upsert_org_config(&bundle).await.unwrap();
+        test
+    }
+
+    async fn store_report_snapshot(
+        test: &TestApp,
+        run_id: &str,
+        created_at: chrono::DateTime<Utc>,
+        received_at: chrono::DateTime<Utc>,
+        updated_at: chrono::DateTime<Utc>,
+    ) {
+        let mut snapshot = run(run_id, "alice@example.com");
+        snapshot.org_id = Some("alice-org".to_string());
+        snapshot.mailbox_id = Some("mailbox-alice".to_string());
+        snapshot.config.date_from = "2026-07-01".to_string();
+        snapshot.config.date_to = "2026-07-07".to_string();
+        snapshot.created_at = created_at;
+        snapshot.completed_at = Some(created_at);
+        snapshot.retention_expires_at = Some(Utc::now() + chrono::Duration::days(90));
+        test.storage.create_analysis_run(&snapshot).await.unwrap();
+        let mut item = thread(&format!("record-{run_id}"), run_id);
+        item.thread_id = "provider-thread-shared".to_string();
+        item.first_client_message_id = Some(format!("request-{}", received_at.timestamp()));
+        item.first_client_message_at = Some(received_at);
+        item.first_message_at = Some(received_at);
+        item.manual_review_required = false;
+        item.updated_at = updated_at;
+        test.storage.upsert_thread(&item, &[]).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn consolidated_report_deduplicates_overlapping_runs_before_counting() {
+        let test = report_fixture().await;
+        let received = "2026-07-03T15:00:00Z".parse().unwrap();
+        let first = "2026-07-08T10:00:00Z".parse().unwrap();
+        let latest = "2026-07-09T10:00:00Z".parse().unwrap();
+        store_report_snapshot(&test, "report-old", first, received, first).await;
+        store_report_snapshot(&test, "report-new", latest, received, latest).await;
+        for (id, scopes) in [
+            (
+                "report-old",
+                vec!["User.Read", "Mail.Read", "offline_access"],
+            ),
+            (
+                "report-new",
+                vec![
+                    "Mail.Read.Shared",
+                    "offline_access",
+                    "User.Read",
+                    "Mail.Read",
+                ],
+            ),
+        ] {
+            let mut snapshot = test.storage.get_analysis_run(id).await.unwrap().unwrap();
+            snapshot.gmail_scope_snapshot = scopes.into_iter().map(str::to_string).collect();
+            test.storage.update_analysis_run(&snapshot).await.unwrap();
+        }
+        let response = test
+            .app
+            .oneshot(request(
+                Method::GET,
+                "/me/report?date_from=2026-07-03&date_to=2026-07-03",
+                Some(&test.alice_cookie),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = response_json(response).await;
+        assert_eq!(body["run_count"], 2);
+        assert_eq!(body["metrics"]["total_threads"], 1);
+        assert_eq!(body["metrics"]["valid_requests"], 1);
+        assert_eq!(body["threads"][0]["analysis_run_id"], "report-new");
+    }
+
+    #[tokio::test]
+    async fn consolidated_report_keeps_distinct_mailboxes_after_replacing_a_connection() {
+        let test = report_fixture().await;
+        let received = "2026-07-03T15:00:00Z".parse().unwrap();
+        let first = "2026-07-08T10:00:00Z".parse().unwrap();
+        let latest = "2026-07-09T10:00:00Z".parse().unwrap();
+        store_report_snapshot(&test, "report-old", first, received, first).await;
+        store_report_snapshot(&test, "report-new", latest, received, latest).await;
+        for (id, mailbox) in [
+            ("report-old", "support-a@company.test"),
+            ("report-new", "support-b@company.test"),
+        ] {
+            let mut snapshot = test.storage.get_analysis_run(id).await.unwrap().unwrap();
+            let mut policy = provision_default_config("alice@example.com", Utc::now())
+                .policy_version
+                .snapshot;
+            policy.mailbox.google_account_email = mailbox.to_string();
+            snapshot.policy_snapshot = Some(policy);
+            snapshot.gmail_scope_snapshot = vec!["Mail.Read".to_string()];
+            test.storage.update_analysis_run(&snapshot).await.unwrap();
+        }
+        let response = test
+            .app
+            .oneshot(request(
+                Method::GET,
+                "/me/report?date_from=2026-07-03&date_to=2026-07-03",
+                Some(&test.alice_cookie),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = response_json(response).await;
+        assert_eq!(body["metrics"]["total_threads"], 2);
+        assert_eq!(body["metrics"]["valid_requests"], 2);
+    }
+
+    #[tokio::test]
+    async fn consolidated_report_filters_received_dates_at_the_tenant_midnight_boundary() {
+        let test = report_fixture().await;
+        let created = "2026-07-08T10:00:00Z".parse().unwrap();
+        store_report_snapshot(
+            &test,
+            "report-last-second",
+            created,
+            "2026-07-04T03:59:59Z".parse().unwrap(),
+            created,
+        )
+        .await;
+        store_report_snapshot(
+            &test,
+            "report-next-day",
+            created,
+            "2026-07-04T04:00:00Z".parse().unwrap(),
+            created,
+        )
+        .await;
+        let response = test
+            .app
+            .oneshot(request(
+                Method::GET,
+                "/me/report?date_from=2026-07-03&date_to=2026-07-03",
+                Some(&test.alice_cookie),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = response_json(response).await;
+        assert_eq!(body["timezone"], "America/Santiago");
+        assert_eq!(body["metrics"]["total_threads"], 1);
+        assert_eq!(body["threads"][0]["analysis_run_id"], "report-last-second");
+    }
+
+    #[tokio::test]
+    async fn consolidated_report_uses_a_later_manual_correction_on_an_older_run() {
+        let test = report_fixture().await;
+        let received = "2026-07-03T15:00:00Z".parse().unwrap();
+        let first = "2026-07-08T10:00:00Z".parse().unwrap();
+        let latest = "2026-07-09T10:00:00Z".parse().unwrap();
+        store_report_snapshot(&test, "report-old", first, received, first).await;
+        store_report_snapshot(&test, "report-new", latest, received, latest).await;
+        let mut corrected = test
+            .storage
+            .get_thread("report-old", "record-report-old")
+            .await
+            .unwrap()
+            .unwrap();
+        corrected.classification = Classification::Misc;
+        corrected.classification_source = ClassificationSource::Manual;
+        corrected.is_valid_client_request = false;
+        corrected.manual_override_applied = true;
+        corrected.updated_at = "2026-07-10T10:00:00Z".parse().unwrap();
+        test.storage.upsert_thread(&corrected, &[]).await.unwrap();
+        let response = test
+            .app
+            .oneshot(request(
+                Method::GET,
+                "/me/report?date_from=2026-07-03&date_to=2026-07-03",
+                Some(&test.alice_cookie),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = response_json(response).await;
+        assert_eq!(body["metrics"]["valid_requests"], 0);
+        assert_eq!(body["metrics"]["ignored"], 1);
+        assert_eq!(body["metrics"]["manual_overrides"], 1);
+        assert_eq!(body["threads"][0]["analysis_run_id"], "report-old");
+    }
+
     #[tokio::test]
     async fn org_config_provisions_default_policy() {
         let test = seeded_app().await;
@@ -6163,9 +7895,8 @@ mod tests {
             body.draft.analysis_policy.internal_domains,
             vec!["example.com"]
         );
-        // Modelo opt-out: la IA nace activa con el consentimiento sellado al provisionar.
-        assert!(body.draft.ai_policy.enabled);
-        assert!(body.draft.ai_policy.consent_granted_at.is_some());
+        assert!(!body.draft.ai_policy.enabled);
+        assert!(body.draft.ai_policy.consent_granted_at.is_none());
         assert_eq!(body.draft.retention_policy.retention_days, 30);
         assert_eq!(body.setup_state.missing, vec!["valid_request_criteria"]);
     }
@@ -6191,7 +7922,7 @@ mod tests {
         let body: serde_json::Value = response_json(response).await;
         assert_eq!(
             body["error"]["details"]["missing"],
-            json!(["internal_domains", "valid_request_criteria"])
+            json!(["responder_emails", "valid_request_criteria"])
         );
 
         let response = test
@@ -6786,6 +8517,338 @@ mod tests {
         );
     }
 
+    fn billing_invoice(date: &str, status: &str, id: u64) -> MercadoPagoInvoice {
+        serde_json::from_value(json!({
+            "preapproval_id": "provider-1", "debit_date": date,
+            "payment": { "id": id, "status": status }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn billing_reconciliation_handles_cancellation_failure_renewal_and_replay() {
+        let now = "2026-09-10T00:00:00Z".parse().unwrap();
+        let mut sub = subscription("org-1", "owner@example.com");
+        sub.trial_ends_at = None;
+        let mut provider: MercadoPagoPreapprovalResponse = serde_json::from_value(json!({
+            "id": "provider-1", "status": "authorized", "date_created": "2026-09-01T00:00:00Z"
+        }))
+        .unwrap();
+        let mut invoices = vec![billing_invoice("2026-09-01T00:00:00Z", "approved", 100)];
+        apply_mercadopago_reconciliation(&mut sub, &provider, &invoices, now);
+        let paid_end = Some("2026-10-01T00:00:00Z".parse().unwrap());
+        assert_eq!(sub.current_period_end, paid_end);
+        assert!(subscription_allows_access(Some(&sub), now));
+        provider.status = Some("cancelled".to_string());
+        apply_mercadopago_reconciliation(&mut sub, &provider, &invoices, now);
+        assert_eq!(sub.status, SubscriptionStatus::Cancelled);
+        assert!(subscription_allows_access(Some(&sub), now));
+        assert_eq!(sub.current_period_end, paid_end);
+        provider.status = Some("authorized".to_string());
+        apply_mercadopago_reconciliation(&mut sub, &provider, &invoices, now);
+        assert_eq!(
+            sub.status,
+            SubscriptionStatus::Cancelled,
+            "una autorización tardía no deshace la cancelación local"
+        );
+        sub.cancel_at_period_end = false;
+        let renewal_date = "2026-10-02T00:00:00Z".parse().unwrap();
+        invoices.push(billing_invoice("2026-10-01T00:00:00Z", "rejected", 101));
+        apply_mercadopago_reconciliation(&mut sub, &provider, &invoices, renewal_date);
+        assert_eq!(sub.status, SubscriptionStatus::PastDue);
+        assert_eq!(sub.current_period_end, paid_end);
+        assert!(!subscription_allows_access(Some(&sub), renewal_date));
+        invoices[1].payment.as_mut().unwrap().status = "approved".to_string();
+        invoices.reverse();
+        apply_mercadopago_reconciliation(&mut sub, &provider, &invoices, renewal_date);
+        let renewed_end = Some("2026-11-01T00:00:00Z".parse().unwrap());
+        assert_eq!(sub.current_period_end, renewed_end);
+        assert_eq!(sub.status, SubscriptionStatus::Active);
+        apply_mercadopago_reconciliation(
+            &mut sub,
+            &provider,
+            &invoices,
+            renewal_date + chrono::Duration::days(1),
+        );
+        assert_eq!(
+            sub.current_period_end, renewed_end,
+            "replay no agrega otro período"
+        );
+        invoices[0].payment.as_mut().unwrap().status = "refunded".to_string();
+        apply_mercadopago_reconciliation(&mut sub, &provider, &invoices, renewal_date);
+        assert_eq!(sub.current_period_end, paid_end);
+        assert!(!subscription_allows_access(Some(&sub), renewal_date));
+    }
+
+    #[test]
+    fn billing_reconciliation_does_not_turn_authorization_into_payment_or_restart_trial() {
+        let now = "2026-10-01T00:00:00Z".parse().unwrap();
+        let started = "2026-08-01T00:00:00Z".parse().unwrap();
+        let mut sub = active_subscription_for_trial(
+            "org-1".to_string(),
+            BillingPlanId::Pro,
+            Some("provider-1".to_string()),
+            BillingInterval::Annual,
+            started,
+        );
+        let trial_end = sub.trial_ends_at;
+        let provider: MercadoPagoPreapprovalResponse =
+            serde_json::from_value(json!({"id":"provider-1", "status":"authorized"})).unwrap();
+        apply_mercadopago_reconciliation(&mut sub, &provider, &[], now);
+        assert!(sub.current_period_end.is_none());
+        assert_eq!(sub.trial_ends_at, trial_end);
+        assert!(!subscription_allows_access(Some(&sub), now));
+        let invoices = vec![billing_invoice("2026-09-01T00:00:00Z", "approved", 100)];
+        apply_mercadopago_reconciliation(&mut sub, &provider, &invoices, now);
+        assert_eq!(
+            sub.current_period_end,
+            Some("2027-09-01T00:00:00Z".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn billing_webhook_binds_signed_resource_and_accepts_numeric_notification_id() {
+        let payload: MercadoPagoWebhook = serde_json::from_value(json!({
+            "id":12345, "type":"payment", "data":{"id":"999"}
+        }))
+        .unwrap();
+        let mut query = HashMap::from([("data.id".to_string(), "999".to_string())]);
+        assert_eq!(
+            mercadopago_webhook_resource_id(&query, &payload).unwrap(),
+            "999"
+        );
+        query.insert("data.id".to_string(), "998".to_string());
+        assert!(mercadopago_webhook_resource_id(&query, &payload).is_err());
+        query.clear();
+        assert!(mercadopago_webhook_resource_id(&query, &payload).is_err());
+        let numeric: MercadoPagoWebhook =
+            serde_json::from_value(json!({"data":{"id":999}})).unwrap();
+        query.insert("data.id".to_string(), "999".to_string());
+        assert_eq!(
+            mercadopago_webhook_resource_id(&query, &numeric).unwrap(),
+            "999"
+        );
+    }
+
+    #[tokio::test]
+    async fn billing_interrupted_checkout_reuses_the_session_with_a_new_card_token() {
+        let mut config = test_app_config();
+        config.billing.mercadopago_access_token = None;
+        let fixture = seeded_app_with_config(config.clone()).await;
+        let state = AppState::new(config, Arc::new(fixture.storage.clone()));
+        let bundle = get_or_provision_org_config(&state, "alice@example.com")
+            .await
+            .unwrap();
+        let mut expired = subscription(&bundle.org.id, "alice@example.com");
+        expired.status = SubscriptionStatus::Cancelled;
+        expired.cancel_at_period_end = true;
+        expired.current_period_end = Some(Utc::now() - chrono::Duration::seconds(1));
+        fixture.storage.upsert_subscription(&expired).await.unwrap();
+        let checkout = CheckoutSession {
+            id: checkout_idempotency_key(
+                &bundle.org.id,
+                "original-card",
+                &BillingPlanId::Pro,
+                &BillingInterval::Annual,
+            ),
+            org_id: bundle.org.id.clone(),
+            account_email: "alice@example.com".to_string(),
+            plan_id: BillingPlanId::Pro,
+            status: CheckoutSessionStatus::ProviderCreated,
+            provider: "mercadopago".to_string(),
+            provider_subscription_id: Some("pending-provider".to_string()),
+            billing_interval: BillingInterval::Annual,
+            currency_id: "CLP".to_string(),
+            amount_clp: 299_900,
+            usd_reference_monthly: 29,
+            trial_days: 0,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        fixture
+            .storage
+            .upsert_checkout_session(&checkout)
+            .await
+            .unwrap();
+        let response = fixture
+            .app
+            .clone()
+            .oneshot(request(
+                Method::POST,
+                "/checkout/subscriptions",
+                Some(&fixture.alice_cookie),
+                Some(json!({"plan_id":"inicial","card_token_id":"new-card"})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let response = fixture
+            .app
+            .clone()
+            .oneshot(request(
+                Method::POST,
+                "/checkout/subscriptions",
+                Some(&fixture.alice_cookie),
+                Some(
+                    json!({"plan_id":"pro","billing_interval":"annual","card_token_id":"new-card"}),
+                ),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body: serde_json::Value = response_json(response).await;
+        assert_eq!(body["error"]["message"], "Mercado Pago no está configurado");
+        let different_key = checkout_idempotency_key(
+            &bundle.org.id,
+            "new-card",
+            &BillingPlanId::Pro,
+            &BillingInterval::Annual,
+        );
+        assert!(
+            fixture
+                .storage
+                .get_checkout_session(&different_key)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            fixture
+                .storage
+                .find_incomplete_checkout_for_org(&bundle.org.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            checkout.id
+        );
+    }
+
+    #[tokio::test]
+    async fn billing_mutations_require_an_org_owner_or_admin() {
+        let fixture = seeded_app().await;
+        let state = AppState::new(test_app_config(), Arc::new(fixture.storage.clone()));
+        let mut bundle = get_or_provision_org_config(&state, "alice@example.com")
+            .await
+            .unwrap();
+        for role in [OrgRole::Analyst, OrgRole::Viewer] {
+            bundle.membership.role = role;
+            fixture.storage.upsert_org_config(&bundle).await.unwrap();
+            for (path, body) in [
+                (
+                    "/checkout/subscriptions",
+                    Some(json!({"plan_id":"pro", "card_token_id":"card"})),
+                ),
+                ("/me/subscription/cancel", None),
+                (
+                    "/me/subscription/change-plan",
+                    Some(json!({"plan_id":"pro"})),
+                ),
+                ("/me/subscription/reconcile", None),
+            ] {
+                let response = fixture
+                    .app
+                    .clone()
+                    .oneshot(request(
+                        Method::POST,
+                        path,
+                        Some(&fixture.alice_cookie),
+                        body,
+                    ))
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn billing_cancel_replay_preserves_the_purchased_period() {
+        let fixture = seeded_app().await;
+        let mut paid = subscription("alice-org", "alice@example.com");
+        paid.provider_subscription_id = None;
+        let paid_end = paid.current_period_end;
+        fixture.storage.upsert_subscription(&paid).await.unwrap();
+        for _ in 0..2 {
+            let response = fixture
+                .app
+                .clone()
+                .oneshot(request(
+                    Method::POST,
+                    "/me/subscription/cancel",
+                    Some(&fixture.alice_cookie),
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let snapshot: EntitlementSnapshot = response_json(response).await;
+            assert!(snapshot.allowed);
+            let current = fixture
+                .storage
+                .get_subscription_for_org("alice-org")
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(current.cancel_at_period_end);
+            assert_eq!(current.current_period_end, paid_end);
+            assert_eq!(current.status, SubscriptionStatus::Cancelled);
+        }
+    }
+
+    #[tokio::test]
+    async fn billing_checkout_replay_returns_existing_activation_without_a_second_charge() {
+        let fixture = seeded_app().await;
+        let state = AppState::new(test_app_config(), Arc::new(fixture.storage.clone()));
+        let bundle = get_or_provision_org_config(&state, "alice@example.com")
+            .await
+            .unwrap();
+        let checkout = CheckoutSession {
+            id: checkout_idempotency_key(
+                &bundle.org.id,
+                "same-card",
+                &BillingPlanId::Pro,
+                &BillingInterval::Annual,
+            ),
+            org_id: bundle.org.id,
+            account_email: "alice@example.com".to_string(),
+            plan_id: BillingPlanId::Pro,
+            status: CheckoutSessionStatus::Activated,
+            provider: "mercadopago".to_string(),
+            provider_subscription_id: Some("provider-1".to_string()),
+            billing_interval: BillingInterval::Annual,
+            currency_id: "CLP".to_string(),
+            amount_clp: 299_900,
+            usd_reference_monthly: 29,
+            trial_days: 30,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        fixture
+            .storage
+            .upsert_checkout_session(&checkout)
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            let response = fixture
+                .app
+                .clone()
+                .oneshot(request(
+                    Method::POST,
+                    "/checkout/subscriptions",
+                    Some(&fixture.alice_cookie),
+                    Some(json!({
+                        "plan_id":"pro", "billing_interval":"annual", "card_token_id":"same-card"
+                    })),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let response: serde_json::Value = response_json(response).await;
+            assert_eq!(response["session"]["id"], checkout.id);
+        }
+    }
+
     #[test]
     fn mercadopago_errors_preserve_provider_boundary() {
         let bad_request = mercadopago_api_error(StatusCode::BAD_REQUEST);
@@ -6802,21 +8865,22 @@ mod tests {
         let secret = "mp-webhook-secret";
         let data_id = "PREAPPROVAL-123";
         let request_id = "2066ca19-c6f1-498a-be75-1923005edd06";
-        let ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis()
-            .to_string();
-        let manifest =
-            format!("id:preapproval-123;request-id:2066ca19-c6f1-498a-be75-1923005edd06;ts:{ts};");
-        type HmacSha256 = Hmac<Sha256>;
-        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
-        mac.update(manifest.as_bytes());
-        let signature = format!("ts={ts},v1={}", hex_lower(&mac.finalize().into_bytes()));
-
-        assert!(
-            validate_mercadopago_signature(&signature, request_id, Some(data_id), secret).is_ok()
-        );
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        for ts in [now.as_millis().to_string(), now.as_secs().to_string()] {
+            let manifest = format!("id:preapproval-123;request-id:{request_id};ts:{ts};");
+            type HmacSha256 = Hmac<Sha256>;
+            let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+            mac.update(manifest.as_bytes());
+            let signature = format!("ts={ts},v1={}", hex_lower(&mac.finalize().into_bytes()));
+            assert!(
+                validate_mercadopago_signature(&signature, request_id, Some(data_id), secret)
+                    .is_ok()
+            );
+            assert!(
+                validate_mercadopago_signature(&signature, request_id, Some("other"), secret)
+                    .is_err()
+            );
+        }
         assert!(validate_mercadopago_signature(secret, request_id, Some(data_id), secret).is_err());
     }
 
@@ -7006,7 +9070,7 @@ mod tests {
     }
 
     #[test]
-    fn checkout_blocks_active_subscription_but_allows_scheduled_cancel() {
+    fn checkout_blocks_repurchase_while_cancelled_access_remains() {
         let now = Utc::now();
         let mut active = subscription("org-1", "owner@example.com");
         active.status = SubscriptionStatus::Active;
@@ -7016,11 +9080,24 @@ mod tests {
         scheduled_cancel.cancel_at_period_end = true;
 
         assert!(checkout_blocked_by_active_subscription(Some(&active), now));
-        assert!(!checkout_blocked_by_active_subscription(
+        assert!(checkout_blocked_by_active_subscription(
             Some(&scheduled_cancel),
             now
         ));
         assert!(!checkout_blocked_by_active_subscription(None, now));
+        let mut failed_renewal = active.clone();
+        failed_renewal.status = SubscriptionStatus::PastDue;
+        failed_renewal.current_period_end = Some(now - chrono::Duration::seconds(1));
+        assert!(checkout_blocked_by_active_subscription(
+            Some(&failed_renewal),
+            now
+        ));
+        failed_renewal.cancel_at_period_end = true;
+        failed_renewal.status = SubscriptionStatus::Cancelled;
+        assert!(!checkout_blocked_by_active_subscription(
+            Some(&failed_renewal),
+            now
+        ));
     }
 
     #[tokio::test]
@@ -7035,6 +9112,7 @@ mod tests {
             .unwrap();
         let cookie = signed_cookie("trialless-session", &config.session_secret);
         let app = crate::build_app(config, Arc::new(storage));
+        complete_analysis_setup(&app, &cookie).await;
 
         let response = app
             .oneshot(request(
@@ -7043,8 +9121,7 @@ mod tests {
                 Some(&cookie),
                 Some(json!({
                     "date_from": "2026-06-01",
-                    "date_to": "2026-06-02",
-                    "internal_domains": ["example.com"]
+                    "date_to": "2026-06-02"
                 })),
             ))
             .await
@@ -7127,6 +9204,7 @@ mod tests {
     #[tokio::test]
     async fn paginated_analysis_runs_and_threads_return_wrapper() {
         let test = seeded_app().await;
+        complete_analysis_setup(&test.app, &test.alice_cookie).await;
         for day in ["2026-06-03", "2026-06-04", "2026-06-05"] {
             let response = test
                 .app
@@ -7137,8 +9215,7 @@ mod tests {
                     Some(&test.alice_cookie),
                     Some(json!({
                         "date_from": day,
-                        "date_to": day,
-                        "internal_domains": ["example.com"]
+                        "date_to": day
                     })),
                 ))
                 .await
@@ -7213,8 +9290,7 @@ mod tests {
         let body: serde_json::Value = response_json(response).await;
         assert_eq!(body["account"]["google_account_email"], "alice@example.com");
         assert_eq!(body["account"]["mailbox_connected"], true);
-        // Modelo opt-out: la org provisionada nace con IA activa por defecto.
-        assert_eq!(body["privacy"]["ai_enabled"], true);
+        assert_eq!(body["privacy"]["ai_enabled"], false);
         assert_eq!(body["privacy"]["retention_days"], 30);
         assert_eq!(body["stored_data"]["analysis_runs_count"], 1);
         assert_eq!(body["stored_data"]["threads_count"], 1);
@@ -7366,9 +9442,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn schedule_analysis_time_rejects_unavailable_hours() {
+    async fn schedule_analysis_time_rejects_invalid_hours() {
         let test = seeded_app().await;
-        for analysis_time in ["08:30", "11:00"] {
+        for analysis_time in ["24:30", "11:60"] {
             let response = test
                 .app
                 .clone()
@@ -7396,10 +9472,10 @@ mod tests {
         let mut config = test_app_config();
         config.rate_limit.analysis_create_per_hour = 1;
         let test = seeded_app_with_config(config).await;
+        complete_analysis_setup(&test.app, &test.alice_cookie).await;
         let payload = json!({
             "date_from": "2026-06-01",
-            "date_to": "2026-06-02",
-            "internal_domains": ["example.com"]
+            "date_to": "2026-06-02"
         });
 
         let response = test
@@ -7436,8 +9512,7 @@ mod tests {
         let test = seeded_app_with_config(config).await;
         let payload = json!({
             "date_from": "2026-06-01",
-            "date_to": "2026-06-02",
-            "internal_domains": ["example.com"]
+            "date_to": "2026-06-02"
         });
         // Tres veces sobre un límite de 1/hora: la cuenta privilegiada nunca 429.
         for _ in 0..3 {
@@ -7461,8 +9536,7 @@ mod tests {
         let mut config = test_app_config();
         config.internal_full_access_emails = vec!["alice@example.com".to_string()];
         let test = seeded_app_with_config(config).await;
-        // La org nace con IA activa; primero la desactivamos para forzar una transición
-        // off→on, que es la que dispara la compuerta de consentimiento.
+        // Las cuentas internas conservan su excepción explícita de consentimiento.
         let response = test
             .app
             .clone()
@@ -7516,8 +9590,20 @@ mod tests {
     #[tokio::test]
     async fn ai_opt_out_is_free_and_reenabling_requires_consent_and_bumps_version() {
         let test = seeded_app().await;
+        let response = test
+            .app
+            .clone()
+            .oneshot(request(
+                Method::PUT,
+                "/me/org/config",
+                Some(&test.alice_cookie),
+                Some(json!({"ai_policy":{"enabled":true,"consent_confirmed":true}})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
 
-        // Modelo opt-out: desactivar la IA proactivamente siempre se permite.
+        // Desactivar una IA previamente autorizada no exige otra confirmación.
         let response = test
             .app
             .clone()
@@ -7567,13 +9653,13 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body: serde_json::Value = response_json(response).await;
-        // v1 inicial → v2 (opt-out) → v3 (re-activación + setup).
-        assert_eq!(body["policy_version"]["version"], 3);
+        // v1 inicial → v2 (consentimiento) → v3 (opt-out) → v4 (reactivación).
+        assert_eq!(body["policy_version"]["version"], 4);
         assert_eq!(body["setup_state"]["ready_for_analysis"], true);
     }
 
     #[tokio::test]
-    async fn policy_run_uses_snapshot_and_keeps_legacy_compatibility() {
+    async fn policy_run_uses_snapshot_and_rejects_legacy_overrides() {
         let test = seeded_app().await;
         let response = test
             .app
@@ -7630,11 +9716,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let legacy: AnalysisRun = response_json(response).await;
-        assert!(legacy.org_id.is_none());
-        assert!(legacy.policy_snapshot.is_none());
-        assert_eq!(legacy.config.internal_domains, vec!["legacy.test"]);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     /// Sin credenciales de Azure AD, Microsoft no debe ofrecerse ni aceptar un
@@ -7650,7 +9732,7 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body: serde_json::Value = response_json(response).await;
-        assert_eq!(body["providers"], json!(["google"]));
+        assert_eq!(body["providers"], json!(["google", "imap"]));
 
         let response = test
             .app
@@ -7745,7 +9827,7 @@ mod tests {
             .expect("seeded thread");
         original.manual_review_required = false;
         test.storage
-            .upsert_thread(&original, &[message("msg-a", "cliente@example.com")])
+            .upsert_thread(&original, &[message("msg-a", "cliente@customer.test")])
             .await
             .unwrap();
 
@@ -7762,7 +9844,10 @@ mod tests {
             test.storage
                 .upsert_thread(
                     &thread,
-                    &[message(&format!("message-{index}"), "cliente@example.com")],
+                    &[message(
+                        &format!("message-{index}"),
+                        "cliente@customer.test",
+                    )],
                 )
                 .await
                 .unwrap();
@@ -7825,7 +9910,7 @@ mod tests {
         duplicate.is_valid_client_request = false;
         duplicate.manual_review_required = true;
         test.storage
-            .upsert_thread(&duplicate, &[message("msg-new", "cliente@example.com")])
+            .upsert_thread(&duplicate, &[message("msg-new", "cliente@customer.test")])
             .await
             .unwrap();
 
@@ -7962,5 +10047,276 @@ mod tests {
         assert_eq!(detail["thread"]["notes"], json!("confirmed ignored"));
         assert_eq!(detail["thread"]["is_valid_client_request"], json!(false));
         assert_eq!(detail["thread"]["classification"], json!("misc"));
+    }
+
+    #[test]
+    fn mailbox_oauth_state_rejects_session_org_provider_nonce_and_expiry_changes() {
+        let alice = session("alice-session", "alice@example.com");
+        let secret = "test-oauth-secret";
+        let mut oauth =
+            MailboxOAuthState::new(&alice, "alice-org", MailboxProviderKind::Google, None);
+        let signed = oauth.signed(secret).unwrap();
+        assert!(
+            MailboxOAuthState::verify(
+                &signed,
+                secret,
+                Some(&oauth.state),
+                &alice,
+                "alice-org",
+                MailboxProviderKind::Google
+            )
+            .is_ok()
+        );
+        let bob = session("bob-session", "bob@example.com");
+        let other_alice_session = session("alice-other-session", "alice@example.com");
+        let reassigned_owner = session("alice-session", "bob@example.com");
+        for changed in [&bob, &other_alice_session, &reassigned_owner] {
+            assert!(
+                MailboxOAuthState::verify(
+                    &signed,
+                    secret,
+                    Some(&oauth.state),
+                    changed,
+                    "alice-org",
+                    MailboxProviderKind::Google
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            MailboxOAuthState::verify(
+                &signed,
+                secret,
+                Some(&oauth.state),
+                &alice,
+                "bob-org",
+                MailboxProviderKind::Google
+            )
+            .is_err()
+        );
+        assert!(
+            MailboxOAuthState::verify(
+                &signed,
+                secret,
+                Some(&oauth.state),
+                &alice,
+                "alice-org",
+                MailboxProviderKind::Microsoft
+            )
+            .is_err()
+        );
+        assert!(
+            MailboxOAuthState::verify(
+                &signed,
+                secret,
+                Some("another-nonce"),
+                &alice,
+                "alice-org",
+                MailboxProviderKind::Google
+            )
+            .is_err()
+        );
+        assert!(
+            MailboxOAuthState::verify(
+                &signed,
+                secret,
+                None,
+                &alice,
+                "alice-org",
+                MailboxProviderKind::Google
+            )
+            .is_err()
+        );
+        assert!(
+            MailboxOAuthState::verify(
+                &signed,
+                "wrong-secret",
+                Some(&oauth.state),
+                &alice,
+                "alice-org",
+                MailboxProviderKind::Google
+            )
+            .is_err()
+        );
+        oauth.expires_at = Utc::now().timestamp() - 1;
+        assert!(
+            MailboxOAuthState::verify(
+                &oauth.signed(secret).unwrap(),
+                secret,
+                Some(&oauth.state),
+                &alice,
+                "alice-org",
+                MailboxProviderKind::Google
+            )
+            .is_err()
+        );
+        let legacy = sign_session_id("nonce:old-verifier", secret).unwrap();
+        assert!(
+            MailboxOAuthState::verify(
+                &legacy,
+                secret,
+                Some("nonce"),
+                &alice,
+                "alice-org",
+                MailboxProviderKind::Google
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn microsoft_mailbox_oauth_preserves_dotted_shared_target_and_conditional_scope() {
+        let alice = session("alice-session", "alice@example.com");
+        let oauth = MailboxOAuthState::new(
+            &alice,
+            "alice-org",
+            MailboxProviderKind::Microsoft,
+            Some("helpdesk@contoso.example.com"),
+        );
+        let signed = oauth.signed("secret").unwrap();
+        assert_eq!(signed.matches('.').count(), 1);
+        let verified = MailboxOAuthState::verify(
+            &signed,
+            "secret",
+            Some(&oauth.state),
+            &alice,
+            "alice-org",
+            MailboxProviderKind::Microsoft,
+        )
+        .unwrap();
+        assert_eq!(
+            verified.target_mailbox.as_deref(),
+            Some("helpdesk@contoso.example.com")
+        );
+        assert!(
+            microsoft_mailbox_scope(verified.target_mailbox.as_deref())
+                .contains("Mail.Read.Shared")
+        );
+        assert!(!microsoft_mailbox_scope(None).contains("Mail.Read.Shared"));
+    }
+
+    #[test]
+    fn microsoft_mailbox_oauth_requires_refresh_from_current_consent() {
+        for refresh_token in [None, Some(String::new()), Some("  ".to_string())] {
+            let token = GoogleTokenResponse {
+                access_token: "new-delegate-access".to_string(),
+                refresh_token,
+            };
+            assert!(required_microsoft_refresh_token(&token).is_err());
+        }
+        let token = GoogleTokenResponse {
+            access_token: "new-delegate-access".to_string(),
+            refresh_token: Some("new-delegate-refresh".to_string()),
+        };
+        assert_eq!(
+            required_microsoft_refresh_token(&token).unwrap(),
+            "new-delegate-refresh"
+        );
+    }
+
+    #[tokio::test]
+    async fn mailbox_oauth_callbacks_reject_another_session_before_token_exchange() {
+        let mut config = test_app_config();
+        config.microsoft = Some(MicrosoftConfig {
+            client_id: "test-client".to_string(),
+            client_secret: "test-secret".to_string(),
+            redirect_url: "https://mira.example.com/mailbox/connect/microsoft/callback".to_string(),
+            tenant: "common".to_string(),
+        });
+        let test = seeded_app_with_config(config.clone()).await;
+        for (login, callback, provider) in [
+            (
+                "/gmail/connect/login",
+                "/gmail/connect/callback",
+                MailboxProviderKind::Google,
+            ),
+            (
+                "/mailbox/connect/microsoft/login?target_mailbox=helpdesk%40contoso.example.com",
+                "/mailbox/connect/microsoft/callback",
+                MailboxProviderKind::Microsoft,
+            ),
+        ] {
+            let response = test
+                .app
+                .clone()
+                .oneshot(request(Method::GET, login, Some(&test.alice_cookie), None))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+            let location = url::Url::parse(
+                response
+                    .headers()
+                    .get(header::LOCATION)
+                    .unwrap()
+                    .to_str()
+                    .unwrap(),
+            )
+            .unwrap();
+            let parameters = location.query_pairs().collect::<HashMap<_, _>>();
+            let nonce = parameters.get("state").unwrap();
+            let oauth_cookie = extract_named_cookie(
+                response
+                    .headers()
+                    .get(header::SET_COOKIE)
+                    .unwrap()
+                    .to_str()
+                    .unwrap(),
+                "ghmi_oauth",
+            )
+            .unwrap();
+            let encoded = verify_session_cookie(&oauth_cookie, &config.session_secret).unwrap();
+            let payload: MailboxOAuthState =
+                serde_json::from_slice(&URL_SAFE_NO_PAD.decode(encoded).unwrap()).unwrap();
+            assert_eq!(payload.session_id, "alice-session");
+            assert_eq!(payload.owner_email, "alice@example.com");
+            assert_eq!(payload.org_id, "alice-org");
+            assert_eq!(payload.provider, provider);
+            assert_eq!(
+                parameters.get("code_challenge").unwrap().as_ref(),
+                URL_SAFE_NO_PAD.encode(Sha256::digest(payload.code_verifier.as_bytes()))
+            );
+            if provider == MailboxProviderKind::Microsoft {
+                assert_eq!(
+                    payload.target_mailbox.as_deref(),
+                    Some("helpdesk@contoso.example.com")
+                );
+                assert!(
+                    parameters
+                        .get("scope")
+                        .unwrap()
+                        .contains("Mail.Read.Shared")
+                );
+            }
+            let swapped_cookie = format!("{}; ghmi_oauth={oauth_cookie}", test.bob_cookie);
+            let response = test
+                .app
+                .clone()
+                .oneshot(request(
+                    Method::GET,
+                    &format!("{callback}?code=not-exchanged&state={nonce}"),
+                    Some(&swapped_cookie),
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body: serde_json::Value = response_json(response).await;
+            assert!(
+                body["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("sesión o la organización cambió")
+            );
+            let connection = test
+                .storage
+                .get_gmail_connection("bob@example.com")
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(connection.provider, MailboxProviderKind::Google);
+            assert_eq!(connection.mailbox_email, "bob@example.com");
+            assert_eq!(connection.access_token_encrypted, "access");
+            assert!(connection.microsoft_target_email.is_none());
+        }
     }
 }

@@ -6,6 +6,9 @@ use serde_json::Value;
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgPoolOptions};
 use uuid::Uuid;
 
+#[cfg(test)]
+mod tests;
+
 use crate::{
     analysis::{
         AiAuditResult, AiUsageAttempt, AnalysisRun, EmailMessage, EmailThread, ManualReview,
@@ -14,7 +17,7 @@ use crate::{
     auth::UserSession,
     billing::{
         Account, BillingInterval, BillingPlanId, CheckoutSession, CheckoutSessionStatus,
-        Subscription, SubscriptionStatus, UsageLedger,
+        PlanLimits, Subscription, SubscriptionStatus, UsageLedger,
     },
     mailbox::{FilterPreset, MailboxConnection, MailboxMetadata},
     policies::{OrgConfigBundle, PolicyVersion},
@@ -22,8 +25,9 @@ use crate::{
     storage::{
         AnalysisDataDeletionAudit, MailboxConnectionRefresh,
         ManualReviewInheritanceMigrationResult, ManualReviewMetricsMigrationResult,
-        ScheduleWindowClaim, StorageRepository, claimed_schedule_state, clear_gmail_connection,
-        existing_schedule_window_claim, gmail_connection_from_legacy,
+        ScheduleWindowClaim, StorageRepository, UsageAmounts, UsageReservation,
+        claimed_schedule_state, clear_gmail_connection, existing_schedule_window_claim,
+        gmail_connection_from_legacy, reserve_amounts,
     },
 };
 
@@ -68,7 +72,18 @@ impl PostgresStorage {
         fields: RecordFields<'_>,
         value: &T,
     ) -> anyhow::Result<()> {
-        self.put_into(&self.pool, kind, id, fields, value).await
+        if let Some(run_id) = fields.run_id {
+            let mut tx = self.pool.begin().await?;
+            let exists=sqlx::query_scalar::<_,String>("SELECT id FROM mira.records WHERE kind='analysis_run' AND id=$1 AND state <> 'failed' FOR SHARE").bind(run_id).fetch_optional(&mut *tx).await?;
+            if exists.is_none() {
+                anyhow::bail!("analysis_cancelled_or_deleted");
+            }
+            self.put_tx(&mut tx, kind, id, fields, value).await?;
+            tx.commit().await?;
+            Ok(())
+        } else {
+            self.put_into(&self.pool, kind, id, fields, value).await
+        }
     }
 
     async fn put_tx<T: Serialize>(
@@ -196,6 +211,149 @@ impl PostgresStorage {
 
 #[async_trait]
 impl StorageRepository for PostgresStorage {
+    async fn claim_billing_operation(
+        &self,
+        org_id: &str,
+        token: &str,
+        now: DateTime<Utc>,
+        stale_before: DateTime<Utc>,
+    ) -> anyhow::Result<bool> {
+        let result=sqlx::query("INSERT INTO mira.records(kind,id,org_id,data,updated_at) VALUES ('billing_operation_lock',$1,$1,jsonb_build_object('token',$2::text),$3) ON CONFLICT(kind,id) DO UPDATE SET data=EXCLUDED.data,updated_at=EXCLUDED.updated_at WHERE mira.records.updated_at <= $4")
+            .bind(org_id).bind(token).bind(now).bind(stale_before).execute(&self.pool).await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    async fn release_billing_operation(&self, org_id: &str, token: &str) -> anyhow::Result<()> {
+        sqlx::query("DELETE FROM mira.records WHERE kind='billing_operation_lock' AND id=$1 AND data->>'token'=$2").bind(org_id).bind(token).execute(&self.pool).await?;
+        Ok(())
+    }
+
+    async fn reserve_analysis_usage(
+        &self,
+        run: &AnalysisRun,
+        period_key: &str,
+        desired: UsageAmounts,
+        limits: &PlanLimits,
+    ) -> anyhow::Result<UsageAmounts> {
+        let org_id = run
+            .org_id
+            .as_deref()
+            .ok_or_else(|| anyhow!("analysis_missing_organization"))?;
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+            .bind(format!("usage:{org_id}"))
+            .execute(&mut *tx)
+            .await?;
+        let previous = sqlx::query_scalar::<_, Value>(
+            "SELECT data FROM mira.records WHERE kind='usage_reservation' AND id=$1",
+        )
+        .bind(&run.id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .map(serde_json::from_value::<UsageReservation>)
+        .transpose()?;
+        let period_key = previous
+            .as_ref()
+            .map(|p| p.period_key.as_str())
+            .unwrap_or(period_key);
+        sqlx::query("INSERT INTO billing.usage_ledger(org_id,period_key) VALUES($1,$2) ON CONFLICT DO NOTHING").bind(org_id).bind(period_key).execute(&mut *tx).await?;
+        let row=sqlx::query("SELECT org_id,period_key,runs_created,retrieved_threads,ai_analyzed_threads,updated_at FROM billing.usage_ledger WHERE org_id=$1 AND period_key=$2 FOR UPDATE").bind(org_id).bind(period_key).fetch_one(&mut *tx).await?;
+        let mut usage = usage_ledger_from_row(&row)?;
+        let granted = reserve_amounts(
+            &mut usage,
+            previous.as_ref().map(|p| p.amounts).unwrap_or_default(),
+            desired,
+            limits,
+        )?;
+        sqlx::query("UPDATE billing.usage_ledger SET runs_created=$3,retrieved_threads=$4,ai_analyzed_threads=$5,updated_at=now() WHERE org_id=$1 AND period_key=$2").bind(org_id).bind(period_key).bind(i64::from(usage.runs_created)).bind(i64::from(usage.retrieved_threads)).bind(i64::from(usage.ai_analyzed_threads)).execute(&mut *tx).await?;
+        self.put_tx(
+            &mut tx,
+            "usage_reservation",
+            &run.id,
+            RecordFields {
+                org_id: Some(org_id),
+                ..Default::default()
+            },
+            &UsageReservation {
+                org_id: org_id.to_string(),
+                period_key: period_key.to_string(),
+                amounts: granted,
+                updated_at: Utc::now(),
+            },
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(granted)
+    }
+
+    async fn settle_analysis_usage(
+        &self,
+        run_id: &str,
+        actual: UsageAmounts,
+    ) -> anyhow::Result<()> {
+        let Some(reservation) = self
+            .get::<UsageReservation>("usage_reservation", run_id)
+            .await?
+        else {
+            return Ok(());
+        };
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+            .bind(format!("usage:{}", reservation.org_id))
+            .execute(&mut *tx)
+            .await?;
+        let previous = sqlx::query_scalar::<_, Value>(
+            "SELECT data FROM mira.records WHERE kind='usage_reservation' AND id=$1 FOR UPDATE",
+        )
+        .bind(run_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .map(serde_json::from_value::<UsageReservation>)
+        .transpose()?;
+        if let Some(previous) = previous {
+            let actual = UsageAmounts {
+                runs: actual.runs.min(previous.amounts.runs),
+                retrieved: actual.retrieved.min(previous.amounts.retrieved),
+                ai: actual.ai.min(previous.amounts.ai),
+            };
+            sqlx::query("UPDATE billing.usage_ledger SET runs_created=GREATEST(0,runs_created+$3),retrieved_threads=GREATEST(0,retrieved_threads+$4),ai_analyzed_threads=GREATEST(0,ai_analyzed_threads+$5),updated_at=now() WHERE org_id=$1 AND period_key=$2").bind(&previous.org_id).bind(&previous.period_key).bind(i64::from(actual.runs)-i64::from(previous.amounts.runs)).bind(i64::from(actual.retrieved)-i64::from(previous.amounts.retrieved)).bind(i64::from(actual.ai)-i64::from(previous.amounts.ai)).execute(&mut *tx).await?;
+            self.put_tx(
+                &mut tx,
+                "usage_reservation",
+                run_id,
+                RecordFields {
+                    org_id: Some(&previous.org_id),
+                    ..Default::default()
+                },
+                &UsageReservation {
+                    amounts: actual,
+                    updated_at: Utc::now(),
+                    ..previous.clone()
+                },
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn purge_expired_analysis_data(&self, now: DateTime<Utc>) -> anyhow::Result<u64> {
+        let mut tx = self.pool.begin().await?;
+        let ids=sqlx::query_scalar::<_,String>("SELECT id FROM mira.records WHERE kind='analysis_run' AND COALESCE((data->>'retention_expires_at')::timestamptz,(data->>'created_at')::timestamptz + make_interval(days => COALESCE((data#>>'{policy_snapshot,retention_policy,retention_days}')::int,90))) <= $1 ORDER BY id FOR UPDATE").bind(now).fetch_all(&mut *tx).await?;
+        sqlx::query(
+            "DELETE FROM mira.records WHERE (kind='analysis_run' AND id=ANY($1)) OR run_id=ANY($1)",
+        )
+        .bind(&ids)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(ids.len() as u64)
+    }
+
+    async fn fail_stale_analysis_runs(&self, before: DateTime<Utc>) -> anyhow::Result<u64> {
+        let result=sqlx::query("UPDATE mira.records SET state='failed',updated_at=now(),data=data || jsonb_build_object('status','failed','error_message','analysis_interrupted','progress_message','El análisis se interrumpió; puedes iniciar uno nuevo') WHERE kind='analysis_run' AND state='running' AND updated_at < $1").bind(before).execute(&self.pool).await?;
+        Ok(result.rows_affected())
+    }
     async fn ping(&self) -> anyhow::Result<()> {
         sqlx::query("SELECT 1").execute(&self.pool).await?;
         Ok(())
@@ -436,6 +594,10 @@ impl StorageRepository for PostgresStorage {
         if let Some(mut connection) = self.get_gmail_connection(owner_email).await? {
             connection.access_token_encrypted.clear();
             connection.refresh_token_encrypted = None;
+            connection.imap_password_encrypted = None;
+            connection.imap_config = None;
+            connection.microsoft_target_email = None;
+            connection.needs_reauth_at = None;
             connection.revoked_at = Some(now);
             connection.updated_at = now;
             self.upsert_gmail_connection(&connection).await?;
@@ -495,6 +657,10 @@ impl StorageRepository for PostgresStorage {
     ) -> anyhow::Result<ScheduleWindowClaim> {
         let id = normalize_email(&state.user_email);
         let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+            .bind(format!("schedule:{id}"))
+            .execute(&mut *tx)
+            .await?;
         let current = sqlx::query_scalar::<_, Value>(
             "SELECT data FROM mira.records WHERE kind='schedule_state' AND id=$1 FOR UPDATE",
         )
@@ -620,9 +786,13 @@ impl StorageRepository for PostgresStorage {
                 &format!("{}:{}", org_id, normalize_email(user_email)),
             )
             .await?;
-        Ok(membership.is_some_and(|membership| {
-            membership.status == crate::policies::MembershipStatus::Active
-        }))
+        let organization: Option<crate::policies::Organization> =
+            self.get("organization", org_id).await?;
+        Ok(organization
+            .is_some_and(|org| org.status != crate::policies::OrganizationStatus::Disabled)
+            && membership.is_some_and(|membership| {
+                membership.status == crate::policies::MembershipStatus::Active
+            }))
     }
 
     async fn upsert_subscription(&self, subscription: &Subscription) -> anyhow::Result<()> {
@@ -752,6 +922,14 @@ impl StorageRepository for PostgresStorage {
         row.map(|row| checkout_session_from_row(&row)).transpose()
     }
 
+    async fn find_incomplete_checkout_for_org(
+        &self,
+        org_id: &str,
+    ) -> anyhow::Result<Option<CheckoutSession>> {
+        let row=sqlx::query("SELECT id, org_id, account_email, plan_id, billing_interval, status, provider, provider_subscription_id, currency_id, amount_clp, usd_reference_monthly, trial_days, created_at, updated_at FROM billing.checkout_sessions WHERE org_id=$1 AND status IN ('pending','provider_created') ORDER BY created_at DESC LIMIT 1").bind(org_id).fetch_optional(&self.pool).await?;
+        row.map(|row| checkout_session_from_row(&row)).transpose()
+    }
+
     async fn add_usage(
         &self,
         org_id: &str,
@@ -853,7 +1031,11 @@ impl StorageRepository for PostgresStorage {
     }
 
     async fn update_analysis_run(&self, run: &AnalysisRun) -> anyhow::Result<()> {
-        self.upsert_analysis_run(run).await
+        let result=sqlx::query("UPDATE mira.records SET data=$2,state=$3,updated_at=now() WHERE kind='analysis_run' AND id=$1 AND state <> 'failed'").bind(&run.id).bind(serde_json::to_value(run)?).bind(analysis_state_name(run)).execute(&self.pool).await?;
+        if result.rows_affected() != 1 {
+            anyhow::bail!("analysis_cancelled_or_deleted");
+        }
+        Ok(())
     }
 
     async fn get_analysis_run(&self, id: &str) -> anyhow::Result<Option<AnalysisRun>> {
@@ -893,12 +1075,20 @@ impl StorageRepository for PostgresStorage {
     }
 
     async fn delete_analysis_data(&self, owner_email: &str) -> anyhow::Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "SELECT id FROM mira.records WHERE kind='analysis_run' AND owner_email=$1 FOR UPDATE",
+        )
+        .bind(normalize_email(owner_email))
+        .fetch_all(&mut *tx)
+        .await?;
         sqlx::query(
             "WITH owned_runs AS (SELECT id FROM mira.records WHERE kind='analysis_run' AND owner_email=$1) \
              DELETE FROM mira.records WHERE kind='manual_review_override' AND owner_email=$1 \
              OR kind='analysis_run' AND owner_email=$1 \
              OR run_id IN (SELECT id FROM owned_runs)",
-        ).bind(normalize_email(owner_email)).execute(&self.pool).await?;
+        ).bind(normalize_email(owner_email)).execute(&mut *tx).await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -1066,6 +1256,8 @@ impl StorageRepository for PostgresStorage {
         thread.resolution_time_minutes = review.resolution_time_minutes;
         thread.notes = review.notes.clone();
         thread.manual_review_required = false;
+        thread.ai_suggestion = None;
+        thread.classification_confidence = 1.0;
         thread.manual_override_applied = true;
         thread.updated_at = Utc::now();
         let mut canonical = review.clone();
@@ -1168,6 +1360,45 @@ impl StorageRepository for PostgresStorage {
     ) -> anyhow::Result<Option<MailboxMetadata>> {
         self.get("mailbox_metadata", &normalize_email(owner_email))
             .await
+    }
+
+    async fn save_current_mailbox_metadata(
+        &self,
+        connection: &MailboxConnection,
+        metadata: &MailboxMetadata,
+    ) -> anyhow::Result<bool> {
+        let mut tx = self.pool.begin().await?;
+        let value = sqlx::query_scalar::<_, Value>(
+            "SELECT data FROM mira.records WHERE kind='gmail_connection' AND id=$1 FOR SHARE",
+        )
+        .bind(normalize_email(&connection.owner_email))
+        .fetch_optional(&mut *tx)
+        .await?;
+        let current = value
+            .map(serde_json::from_value::<MailboxConnection>)
+            .transpose()?;
+        if !current.is_some_and(|current| {
+            current.connected_at == connection.connected_at
+                && current.provider == connection.provider
+                && current.mailbox_email == connection.mailbox_email
+                && current.revoked_at.is_none()
+        }) {
+            return Ok(false);
+        }
+        self.put_tx(
+            &mut tx,
+            "mailbox_metadata",
+            &normalize_email(&connection.owner_email),
+            RecordFields {
+                owner_email: Some(&connection.owner_email),
+                sort_at: Some(metadata.synced_at),
+                ..Default::default()
+            },
+            metadata,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(true)
     }
 
     async fn list_filter_presets(&self, owner_email: &str) -> anyhow::Result<Vec<FilterPreset>> {

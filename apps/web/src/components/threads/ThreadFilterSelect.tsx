@@ -9,7 +9,7 @@ export function ThreadFilterSelect({ value, onChange }: Props) {
       <option value="all">Todos</option>
       <option value="valid_client_request">Solicitudes válidas</option>
       <option value="answered">Respondidas</option>
-      <option value="unanswered">Sin respuesta</option>
+      <option value="unanswered">Sin respuesta registrada</option>
       <option value="review">Revisión pendiente</option>
       <option value="ignored">Ignorados</option>
     </select>

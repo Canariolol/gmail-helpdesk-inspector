@@ -1,5 +1,97 @@
 # Runbook — Registrar Mira en Azure AD (Microsoft Entra ID)
 
+La revisión del 4 de octubre de 2026 encontró Microsoft habilitado en el
+despliegue documentado del 29 de septiembre. Este runbook también sirve para
+registrar aplicaciones nuevas o revisar esa configuración. La disponibilidad
+de `/mailbox/providers` confirma las credenciales configuradas; no sustituye
+una prueba de autorización y análisis contra cada tipo de casilla.
+
+Mira usa Graph para Outlook.com, Hotmail y Microsoft 365. La conexión propia
+pide `offline_access User.Read Mail.Read`. Para una casilla compartida o
+delegada, pide además `Mail.Read.Shared` y consulta
+`/users/{correo-de-la-casilla}/mailFolders` y `/messages`. El usuario que
+autoriza debe tener acceso a la casilla. Esta opción corresponde a Microsoft
+365 empresarial; las cuentas personales conectan su propia casilla.
+
+Antes de aceptar la conexión, el backend realiza una lectura mínima de Inbox
+para comprobar acceso. No pide permisos de escritura ni permisos de aplicación
+para leer toda la organización. Consulta [el modelo de permisos compartidos de
+Microsoft](https://learn.microsoft.com/en-us/graph/outlook-share-messages-folders).
+
+Para clientes de otras organizaciones, comprobar que el registro admite
+cuentas de cualquier directorio y cuentas Microsoft personales. Verificar
+también el publisher y preparar el consentimiento de administrador cuando la
+política del cliente lo exija. Un secreto válido no garantiza que ese tenant
+permita la conexión. [Microsoft explica las restricciones para publishers sin
+verificar](https://learn.microsoft.com/entra/identity-platform/publisher-verification-overview).
+
+Las fechas de análisis usan el timestamp del proveedor: `internalDate` en
+Gmail, `receivedDateTime` en Graph e `INTERNALDATE` en IMAP. La cabecera `Date`
+es sólo un respaldo en Gmail/IMAP si falta un timestamp válido del proveedor.
+No se inventa una fecha actual para mensajes con fechas inválidas.
+
+La recuperación convierte las fechas del tenant a UTC, sigue páginas de
+mensajes hasta el cupo de conversaciones, y recorre carpetas y subcarpetas.
+Cada respuesta JSON de Gmail/Graph tiene un límite de 16 MiB antes de
+deserializar, aplicado también a respuestas sin `Content-Length`. Sobrepasarlo
+produce un error de recuperación y cobertura incompleta. El parser JSON mantiene
+su límite de 128 niveles; el parser MIME IMAP limita la recursión a 100 niveles
+y la extracción de texto a 20. Estas condiciones se verifican con payloads
+anidados y una respuesta HTTP por chunks que supera el límite.
+
+Los límites son 50 páginas de búsqueda, 2.000 mensajes por conversación,
+1.000 carpetas y 20 niveles de profundidad. Al alcanzar un límite, informa
+truncación. Las lecturas reintentan hasta tres veces los errores temporales;
+respetan `Retry-After` hasta 10 segundos y devuelven un fallo recuperable cuando
+el proveedor exige una espera mayor.
+
+Microsoft devuelve refresh tokens nuevos, pero emitir uno no revoca
+automáticamente el anterior. Mira exige un refresh token nuevo al conectar,
+para no mezclar credenciales de dos usuarios delegados de una misma casilla.
+Guarda ese refresh y renueva sin restringir el scope, conservando el
+consentimiento original de casilla propia o compartida. [Comportamiento de refresh tokens](https://learn.microsoft.com/en-us/entra/identity-platform/refresh-tokens).
+
+Los callbacks Google y Microsoft verifican una cookie PKCE firmada, con payload
+JSON en base64url, ligada al usuario, sesión local, organización y proveedor
+que iniciaron la conexión. El estado vence en diez minutos. Cambiar sesión o
+organización obliga a reiniciar la conexión. Los payloads anteriores sin esta
+vinculación se rechazan; una conexión iniciada antes del cambio debe repetirse.
+
+Para cerrar la validación del entorno, ejecutar estas pruebas con cuentas
+autorizadas y datos de prueba. No se han ejecutado desde este cambio local.
+
+1. Conectar Outlook.com o Hotmail y ejecutar un análisis con una solicitud y
+   su respuesta conocidas. Confirmar que los permisos siguen siendo de lectura.
+2. Repetir en una casilla propia Microsoft 365 de otro tenant. Probar el caso
+   en que su administrador bloquea el consentimiento y comprobar el aviso.
+3. Conectar una casilla compartida con un usuario delegado y confirmar que el
+   informe contiene el correo compartido, no su casilla personal. Denegar acceso
+   a otra casilla y comprobar que el probe impide guardarla.
+4. Incluir una subcarpeta y suficientes mensajes para forzar paginación.
+   Confirmar la selección y el aviso si se supera un límite de recuperación.
+5. Incluir solicitudes al inicio y final del día en la zona del tenant y una
+   fecha de cambio de horario de verano.
+6. Renovar la conexión, cerrar sesión y ejecutar el scheduler. Revocar luego el
+   consentimiento y comprobar que se solicita reconexión.
+
+Los proveedores externos usan una conexión IMAP separada, con hostname público,
+puerto 993, TLS con certificado validado, usuario y contraseña de aplicación.
+El backend rechaza direcciones privadas, locales, reservadas o mezcladas en DNS
+y conecta directamente a las IP públicas verificadas para impedir DNS rebinding.
+Usa `EXAMINE` y `BODY.PEEK`, sin marcar mensajes como leídos. Agrupa mediante
+`Message-ID`, `References` e `In-Reply-To`; no une mensajes sólo por asunto.
+Las operaciones de lectura siguen [RFC 9051](https://www.rfc-editor.org/rfc/rfc9051.html).
+Puede autodetectar la carpeta Enviados mediante SPECIAL-USE o nombres frecuentes;
+si no existe una detección fiable, seleccionar su nombre exacto.
+
+Los límites iniciales IMAP son 20 carpetas por análisis, 5.000 cabeceras,
+200 mensajes por conversación, 128 KiB recuperados por mensaje y 32 MiB por
+sesión. La falta de carpeta Enviados o los recortes de cabeceras/cuerpo dejan
+la cobertura incompleta explícita. No se descargan ni persisten adjuntos como
+archivos. Un proveedor que sólo ofrece OAuth u otro protocolo requiere su
+adaptador específico; tener un cliente Outlook instalado no determina el
+proveedor real.
+
 > Para: habilitar el botón "Conectar con Microsoft" (Outlook y Microsoft 365).
 > Requiere: una cuenta Microsoft. **No** requiere suscripción de pago ni tarjeta:
 > registrar una aplicación en Entra ID es gratis.
@@ -133,12 +225,15 @@ botón de Microsoft deja de funcionar y el síntoma en los logs es un error de
    como servicio autónomo).
 4. Busca y marca:
    - `Mail.Read` — leer el correo de la persona que conecta.
+   - `Mail.Read.Shared` — agregar si se ofrecerán casillas compartidas o delegadas
+     de Microsoft 365. El backend lo solicita sólo al elegir una casilla destino.
    - `offline_access` — sin esto Microsoft **no entrega refresh token** y la
      conexión se cae en una hora, rompiendo el análisis programado.
 5. Click **Add permissions**.
 
-La lista final debe tener exactamente estos tres permisos delegados:
-`User.Read`, `Mail.Read`, `offline_access`.
+La conexión propia usa estos tres permisos delegados:
+`User.Read`, `Mail.Read`, `offline_access`. Para una casilla compartida o delegada,
+se agrega `Mail.Read.Shared`.
 
 > **No agregues `Mail.ReadWrite` ni `Mail.Send`.** Mira solo lee, y pedir
 > permisos que no usa hace que más administradores rechacen la app — además de
@@ -233,7 +328,7 @@ Registrado como deuda aceptada en `plan-production-ready.md` §4.1, junto a
 
 1. Entra a Mira con una cuenta que tenga plan o trial activo y sin casilla
    conectada.
-2. La pantalla de conexión debe mostrar **dos** botones.
+2. La pantalla de conexión debe ofrecer Microsoft entre los proveedores disponibles.
 3. Aprieta "Conectar con Microsoft".
 4. Microsoft pide login y muestra la pantalla de consentimiento con el nombre
    "Mira Helpdesk" y los tres permisos.
@@ -242,6 +337,30 @@ Registrado como deuda aceptada en `plan-production-ready.md` §4.1, junto a
    trae hilos.
 
 ---
+
+## Requisito para métricas de un buzón compartido: copias de enviados
+
+Mira sólo puede medir las respuestas almacenadas en la casilla auditada. En
+Exchange, los envíos de un delegado pueden quedar únicamente en su propia
+carpeta de enviados. Antes de usar las métricas de un buzón compartido, su
+administrador debe comprobar que también se guardan copias en ese buzón.
+
+Desde Exchange Online PowerShell, una persona administradora puede habilitar
+las copias para ambas modalidades de envío:
+
+```powershell
+Set-Mailbox "soporte@empresa.cl" -MessageCopyForSentAsEnabled $true -MessageCopyForSendOnBehalfEnabled $true
+Get-Mailbox "soporte@empresa.cl" | Format-List MessageCopyForSentAsEnabled,MessageCopyForSendOnBehalfEnabled
+```
+
+Después, enviar una respuesta de prueba desde una cuenta delegada y verificar
+que la copia aparece en los enviados del buzón compartido. Este ajuste sólo
+permite observar las copias; Mira sigue usando permisos de lectura. La etiqueta
+"Sin respuesta registrada" significa que no se encontró una respuesta en la
+casilla conectada, y no demuestra ausencia de atención por otros canales.
+
+Referencia: [documentación oficial de Microsoft sobre enviados de buzones
+compartidos](https://learn.microsoft.com/en-us/troubleshoot/exchange/user-and-shared-mailboxes/sent-mail-is-not-saved).
 
 ## Errores frecuentes y qué significan
 
@@ -263,3 +382,27 @@ Registrado como deuda aceptada en `plan-production-ready.md` §4.1, junto a
 2. Cargar la versión nueva en Secret Manager y desplegar.
 3. Verificar un connect real.
 4. Recién entonces borrar el secreto viejo en Azure.
+
+## Excepción de auditoría de dependencias
+
+La revisión local del 4 de octubre retiró `jsonwebtoken`, que no tenía ningún
+uso en el backend. La sesión se valida mediante WorkOS en servidor y la cookie
+local firmada; retirar esa dependencia no elimina una verificación JWT activa.
+Se actualizaron `anyhow` a 1.0.103 y `event-listener` a 5.4.2.
+
+`cargo audit` todavía encuentra RUSTSEC-2023-0071 en el lockfile por
+`sqlx-mysql`, dependencia opcional que Cargo conserva aunque SQLx está
+configurado con `default-features=false` y sólo PostgreSQL. `rsa` no se compila:
+
+```sh
+cargo tree --manifest-path apps/api/Cargo.toml --invert rsa --target all --prefix none
+```
+
+Ese comando devuelve un árbol vacío. La excepción en `.cargo/audit.toml` aplica
+exclusivamente a esta dependencia inactiva; CI debe comprobar que el árbol sigue
+vacío. Si cambia la configuración de SQLx o se introduce RSA, hay que retirar
+la excepción y evaluar [el advisory de RustSec](https://rustsec.org/advisories/RUSTSEC-2023-0071.html).
+No se ignoran vulnerabilidades nuevas ni los avisos de mantenimiento o yanked.
+La configuración se encuentra al ejecutar `cargo audit --file apps/api/Cargo.lock`
+desde la raíz del repo; ejecutar el comando desde otro directorio requiere
+comprobar que cargó la misma configuración.

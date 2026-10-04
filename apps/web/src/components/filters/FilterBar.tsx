@@ -5,7 +5,7 @@ import { split } from "../../lib/format";
 import { DateRangePopover } from "./DateRangePopover";
 import { todayInHelpdeskTz } from "./dateUtils";
 import { LabelPickerModal } from "./LabelPickerModal";
-import { INBOX_TOKEN, tokenDisplayName } from "./labels";
+import { isInboxLabel, labelToken, tokenDisplayName } from "./labels";
 import { SavedFiltersPopover } from "./SavedFiltersPopover";
 import { TimeRangePopover } from "./TimeRangePopover";
 
@@ -26,9 +26,10 @@ export function FilterBar({
   onSavePreset,
   onDeletePreset,
 }: Props) {
+  const timezone = orgConfig?.draft.analysis_policy.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
   // El selector arranca siempre en la fecha actual (hoy), recalculada en cada montaje.
-  const [dateFromVal, setDateFrom] = useState(todayInHelpdeskTz);
-  const [dateToVal, setDateTo] = useState(todayInHelpdeskTz);
+  const [dateFromVal, setDateFrom] = useState(() => todayInHelpdeskTz(timezone));
+  const [dateToVal, setDateTo] = useState(() => todayInHelpdeskTz(timezone));
   const [timeFrom, setTimeFrom] = useState("00:00");
   const [timeTo, setTimeTo] = useState("23:59");
 
@@ -83,8 +84,9 @@ export function FilterBar({
     if (seededInbox.current || labels.length === 0) return;
     seededInbox.current = true;
     if (filterPresets.some((preset) => preset.is_default)) return;
-    if (labels.some((label) => label.id.toUpperCase() === INBOX_TOKEN)) {
-      setIncludeLabels((current) => (current.length === 0 ? [INBOX_TOKEN] : current));
+    const inbox = labels.find(isInboxLabel);
+    if (inbox) {
+      setIncludeLabels((current) => (current.length === 0 ? [labelToken(inbox)] : current));
     }
   }, [labels, filterPresets]);
 
@@ -138,6 +140,7 @@ export function FilterBar({
   return (
     <form className="filter-bar" onSubmit={handleSubmit}>
       <DateRangePopover
+        timezone={timezone}
         fromValue={dateFromVal}
         toValue={dateToVal}
         onChange={(from, to) => {
@@ -164,12 +167,13 @@ export function FilterBar({
           <Tags size={16} />
           <span className="lp-trigger-text">
             {includeLabels.length === 0
-              ? "Recibidos"
+              ? excludeLabels.length > 0 ? "Casilla con exclusiones" : "Recibidos"
               : includeLabels.map((token) => tokenDisplayName(token, labels)).join(", ")}
           </span>
           <span className="lp-trigger-count">{includeLabels.length}</span>
         </button>
       )}
+      {orgConfig?.mailbox_metadata?.folders_truncated && <span className="muted-note" role="status">El proveedor entregó un catálogo parcial de carpetas. Revisa la selección antes de analizar.</span>}
 
       <LabelPickerModal
         open={labelModalOpen}

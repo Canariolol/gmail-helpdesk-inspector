@@ -7,8 +7,10 @@ import {
   Loader2,
   PauseCircle,
 } from "lucide-react";
-import type { OperationsHistory, OperationsStatus, OrgConfig, PutConfigResponse } from "../api/types";
+import type { OperationsHistory, OperationsStatus, OrgConfig, PutConfigResponse, RequestScope } from "../api/types";
 import { api } from "../api/client";
+import { useDateTimeFormat } from "../lib/format";
+import { buildPutBody, initDraft, splitLines, type WizardDraft } from "../lib/configuration";
 
 const TIMEZONES = [
   "America/Santiago",
@@ -22,7 +24,7 @@ const TIMEZONES = [
   "Europe/Madrid",
   "UTC",
 ];
-const ANALYSIS_HOURS = ["08:00", "14:00", "18:00", "22:00"];
+const WEEKDAYS = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"];
 
 type SectionKey = "org" | "equipo" | "cuenta" | "ia" | "programacion" | "retencion";
 
@@ -35,167 +37,11 @@ const SECTIONS: Array<{ key: SectionKey; label: string; optional: boolean }> = [
   { key: "retencion", label: "Retención", optional: true },
 ];
 
-type WizardDraft = {
-  orgName: string;
-  orgTimezone: string;
-  internalDomainsText: string;
-  mailboxAliasesText: string;
-  validCriteriaText: string;
-  nonResponsibilityText: string;
-  ignoredDomainsText: string;
-  ignoredKeywordsText: string;
-  validSignalKeywordsText: string;
-  countHistoricalClosuresAsValid: boolean;
-  countPreviousRequestFollowupsAsValid: boolean;
-  countOrgHostedTrainingAsValid: boolean;
-  aiEnabled: boolean;
-  aiConsentChecked: boolean;
-  autoApplyThreshold: number;
-  manualReviewThreshold: number;
-  maxAuditMessages: number;
-  maxBodyCharsPerMessage: number;
-  schedulerEnabled: boolean;
-  analysisTime: string;
-  reportRecipientsText: string;
-  reportMode: "metrics_only" | "metrics_and_review_items";
-  retentionDays: number;
-};
-
 type Props = {
   orgConfig: OrgConfig | null;
   isLoading: boolean;
   isError: boolean;
 };
-
-function splitLines(text: string): string[] {
-  return text
-    .split(/[\n,]+/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-}
-
-function initDraft(config: OrgConfig | null): WizardDraft {
-  if (!config) {
-    return {
-      orgName: "",
-      orgTimezone: "America/Santiago",
-      internalDomainsText: "",
-      mailboxAliasesText: "",
-      validCriteriaText: "",
-      nonResponsibilityText: "",
-      ignoredDomainsText: "google.com\ncalendar.google.com",
-      ignoredKeywordsText: "newsletter\nboletín\npromoción",
-      validSignalKeywordsText: "",
-      countHistoricalClosuresAsValid: false,
-      countPreviousRequestFollowupsAsValid: false,
-      countOrgHostedTrainingAsValid: true,
-      aiEnabled: true,
-      aiConsentChecked: true,
-      autoApplyThreshold: 0.85,
-      manualReviewThreshold: 0.72,
-      maxAuditMessages: 4,
-      maxBodyCharsPerMessage: 280,
-      schedulerEnabled: false,
-      analysisTime: "08:00",
-      reportRecipientsText: "",
-      reportMode: "metrics_only",
-      retentionDays: 30,
-    };
-  }
-  const { draft, org } = config;
-  const detectedAliases = (config.mailbox_metadata?.send_as ?? [])
-    .map((address) => address.email.trim())
-    .filter(
-      (email) =>
-        email &&
-        email.toLowerCase() !== config.mailbox.google_account_email.toLowerCase(),
-    );
-  const mailboxAliases =
-    draft.mailbox_aliases_configured || draft.analysis_policy.mailbox_aliases.length > 0
-      ? draft.analysis_policy.mailbox_aliases
-      : detectedAliases;
-  return {
-    orgName: org.name,
-    orgTimezone: org.default_timezone,
-    internalDomainsText: draft.analysis_policy.internal_domains.join("\n"),
-    mailboxAliasesText: mailboxAliases.join("\n"),
-    validCriteriaText: draft.analysis_policy.valid_request_criteria.join("\n"),
-    nonResponsibilityText: draft.analysis_policy.non_responsibility_rules.join("\n"),
-    ignoredDomainsText: draft.analysis_policy.ignored_domains.join("\n"),
-    ignoredKeywordsText: draft.analysis_policy.ignored_keywords.join("\n"),
-    validSignalKeywordsText: (draft.analysis_policy.valid_signal_keywords ?? []).join("\n"),
-    countHistoricalClosuresAsValid:
-      draft.analysis_policy.count_historical_closures_as_valid ?? false,
-    countPreviousRequestFollowupsAsValid:
-      draft.analysis_policy.count_previous_request_followups_as_valid ?? false,
-    countOrgHostedTrainingAsValid:
-      draft.analysis_policy.count_org_hosted_training_as_valid ?? true,
-    aiEnabled: draft.ai_policy.enabled,
-    aiConsentChecked: draft.ai_policy.enabled,
-    autoApplyThreshold: draft.ai_policy.auto_apply_threshold,
-    manualReviewThreshold: draft.ai_policy.manual_review_threshold,
-    maxAuditMessages: draft.ai_policy.max_audit_messages,
-    maxBodyCharsPerMessage: draft.ai_policy.max_body_chars_per_message,
-    schedulerEnabled: draft.schedule_report_policy.scheduler_enabled,
-    analysisTime: draft.schedule_report_policy.analysis_time ?? "08:00",
-    reportRecipientsText: draft.schedule_report_policy.report_recipients.join("\n"),
-    reportMode: draft.schedule_report_policy.report_content.mode,
-    retentionDays: draft.retention_policy.retention_days,
-  };
-}
-
-function buildPutBody(d: WizardDraft, finalize = false) {
-  return {
-    finalize,
-    org: { name: d.orgName.trim(), default_timezone: d.orgTimezone, locale: "es-CL" },
-    analysis_policy: {
-      timezone: d.orgTimezone,
-      internal_domains: splitLines(d.internalDomainsText),
-      responder_emails: [],
-      mailbox_aliases: splitLines(d.mailboxAliasesText),
-      valid_request_criteria: splitLines(d.validCriteriaText),
-      non_responsibility_rules: splitLines(d.nonResponsibilityText),
-      ignored_senders: [],
-      ignored_domains: splitLines(d.ignoredDomainsText),
-      ignored_keywords: splitLines(d.ignoredKeywordsText),
-      valid_signal_keywords: splitLines(d.validSignalKeywordsText),
-      count_historical_closures_as_valid: d.countHistoricalClosuresAsValid,
-      count_previous_request_followups_as_valid: d.countPreviousRequestFollowupsAsValid,
-      count_org_hosted_training_as_valid: d.countOrgHostedTrainingAsValid,
-      default_time_from: "00:00",
-      default_time_to: "23:59",
-      max_threads_per_run: 50,
-    },
-    ai_policy: {
-      enabled: d.aiEnabled,
-      consent_confirmed: d.aiConsentChecked,
-      auto_apply_threshold: d.autoApplyThreshold,
-      manual_review_threshold: d.manualReviewThreshold,
-      max_audit_messages: d.maxAuditMessages,
-      max_body_chars_per_message: d.maxBodyCharsPerMessage,
-    },
-    schedule_report_policy: {
-      scheduler_enabled: d.schedulerEnabled,
-      preset: "weekdays_08_local",
-      timezone: d.orgTimezone,
-      analysis_time: d.analysisTime,
-      report_recipients: d.schedulerEnabled ? splitLines(d.reportRecipientsText) : [],
-      report_content: { mode: d.reportMode, include_subjects: false, include_senders: false },
-      failure_notice_enabled: true,
-    },
-    retention_policy: { retention_days: d.retentionDays },
-  };
-}
-
-function formatDateTime(iso: string | null): string {
-  if (!iso) return "—";
-  return new Date(iso).toLocaleString("es-CL", {
-    day: "2-digit",
-    month: "short",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
 
 function formatExecutionStatus(status: string): string {
   if (status === "running") return "En curso";
@@ -206,12 +52,14 @@ function formatExecutionStatus(status: string): string {
 
 function formatMissingSetupItem(item: string): string {
   if (item === "internal_domains") return "dominios de tu equipo";
+  if (item === "responder_emails") return "direcciones de quienes responden";
   if (item === "valid_request_criteria") return "qué correos deben contar como solicitudes";
   if (item === "report_recipients") return "destinatarios de reportes";
   return "un dato de configuración";
 }
 
 function SchedulerStatusPanel({ status }: { status: OperationsStatus | undefined }) {
+  const formatDateTime = useDateTimeFormat();
   if (!status) {
     return (
       <div className="scheduler-status-panel muted">
@@ -234,7 +82,7 @@ function SchedulerStatusPanel({ status }: { status: OperationsStatus | undefined
         </div>
         <span className={status.scheduler.enabled ? "wizard-ready-badge" : "wizard-not-ready-badge"}>
           {status.scheduler.enabled
-            ? `Lunes a viernes, ${status.scheduler.analysis_time}`
+            ? `Hora local: ${status.scheduler.analysis_time}`
             : "Solo manual"}
         </span>
       </div>
@@ -261,6 +109,7 @@ function SchedulerStatusPanel({ status }: { status: OperationsStatus | undefined
 }
 
 function OperationsHistoryPanel({ history }: { history: OperationsHistory | undefined }) {
+  const formatDateTime = useDateTimeFormat();
   if (!history) {
     return null;
   }
@@ -375,7 +224,7 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
 
   function sectionComplete(key: SectionKey): boolean {
     if (key === "org") return draft.orgName.trim().length > 0;
-    if (key === "equipo") return splitLines(draft.internalDomainsText).length > 0;
+    if (key === "equipo") return validateSection("equipo") === null;
     if (key === "cuenta") return splitLines(draft.validCriteriaText).length > 0;
     if (key === "programacion")
       return !draft.schedulerEnabled || splitLines(draft.reportRecipientsText).length > 0;
@@ -384,12 +233,20 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
 
   function validateSection(key: SectionKey): string | null {
     if (key === "org" && !draft.orgName.trim()) return "El nombre de la organización es requerido.";
-    if (key === "equipo" && splitLines(draft.internalDomainsText).length === 0)
-      return "Agrega al menos un dominio interno (sin @). Ej: tuempresa.com";
+    if (key === "equipo") {
+      const hasResponders = splitLines(draft.responderEmailsText).length > 0;
+      const hasDomains = splitLines(draft.internalDomainsText).length > 0;
+      if (!hasResponders && (!hasDomains || draft.requestScope !== "external"))
+        return "Agrega las direcciones exactas del equipo que responde.";
+      if (draft.requestScope === "internal" && !hasDomains)
+        return "Agrega el dominio de la organización para reconocer a los solicitantes internos.";
+    }
     if (key === "cuenta" && splitLines(draft.validCriteriaText).length === 0)
       return "Describe al menos un criterio de solicitud válida.";
     if (key === "programacion" && draft.schedulerEnabled && splitLines(draft.reportRecipientsText).length === 0)
       return "Agrega al menos un destinatario para activar el análisis automático.";
+    if (key === "programacion" && draft.schedulerEnabled && draft.daysOfWeek.length === 0)
+      return "Elige al menos un día de análisis automático.";
     return null;
   }
 
@@ -535,15 +392,17 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
             </div>
             <div className="field">
               <label htmlFor="org-tz">Zona horaria</label>
-              <select
+              <input
                 id="org-tz"
+                list="organization-timezones"
                 value={draft.orgTimezone}
                 onChange={(e) => set("orgTimezone", e.target.value)}
-              >
+              />
+              <datalist id="organization-timezones">
                 {TIMEZONES.map((tz) => (
                   <option key={tz} value={tz}>{tz}</option>
                 ))}
-              </select>
+              </datalist>
             </div>
             <p className="wizard-help">
               La zona horaria se usa para calcular tiempos de respuesta y programar análisis
@@ -555,12 +414,25 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
           <section className="cfg-section" data-section="equipo" ref={registerSection("equipo")}>
             <div className="cfg-section-head">
               <span className="mono-label">02 · Equipo</span>
-              <h3>¿Quién forma parte de tu equipo?</h3>
-              <p>Los correos enviados desde estos dominios se contarán como respuestas internas.</p>
+              <h3>Solicitantes y equipo de atención</h3>
+              <p>Identifica quién pide ayuda y quién responde. Una persona de tu organización puede ser solicitante sin pertenecer al equipo de atención.</p>
+            </div>
+            <div className="field">
+              <label htmlFor="request-scope">¿A quién atiendes?</label>
+              <select id="request-scope" value={draft.requestScope} onChange={(e) => set("requestScope", e.target.value as RequestScope)}>
+                <option value="external">Clientes externos</option>
+                <option value="internal">Personas de mi organización</option>
+                <option value="all">Clientes externos y personas de mi organización</option>
+              </select>
+            </div>
+            <div className="field">
+              <label htmlFor="responder-emails">Direcciones del equipo que responde</label>
+              <textarea id="responder-emails" rows={3} value={draft.responderEmailsText} onChange={(e) => set("responderEmailsText", e.target.value)} placeholder={"soporte@tuempresa.com\nagente@tuempresa.com"} />
+              <span className="cfg-hint">Una dirección por línea. Para atención interna o mixta, define cuentas explícitas. En atención externa, si dejas vacías estas cuentas y los alias, los dominios corporativos identifican a quienes responden. Si usas Gmail, Hotmail u otro correo personal, usa direcciones exactas.</span>
             </div>
             <div className="field">
               <label htmlFor="internal-domains">
-                Dominios internos<span className="cfg-required">*</span>
+                Dominios de la organización{draft.requestScope === "internal" && <span className="cfg-required">*</span>}
               </label>
               <textarea
                 id="internal-domains"
@@ -569,12 +441,12 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
                 onChange={(e) => set("internalDomainsText", e.target.value)}
                 placeholder={"tuempresa.com\notro-dominio.cl"}
               />
-              <span className="cfg-hint">Un dominio por línea, sin @</span>
+              <span className="cfg-hint">Un dominio corporativo por línea, sin @. No uses dominios públicos como gmail.com u outlook.com para identificar a tu organización.</span>
             </div>
             {domains.length > 0 && (
               <div className="wizard-preview">
-                Los correos de {domains.map((d) => `@${d}`).join(", ")} se contarán como respuestas
-                de tu equipo.
+                Miembros de la organización: {domains.map((d) => `@${d}`).join(", ")}.
+                En atención externa, sin cuentas explícitas ni alias, estos dominios también identifican a quienes responden.
               </div>
             )}
             <div className="field">
@@ -635,7 +507,7 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
               </span>
             </div>
             <div className="field">
-              <label htmlFor="valid-signal-keywords">Palabras que confirman un ticket (opcional)</label>
+              <label htmlFor="valid-signal-keywords">Señales de ticket (opcional)</label>
               <textarea
                 id="valid-signal-keywords"
                 rows={3}
@@ -644,8 +516,8 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
                 placeholder={"ticket\nincidencia\ncaso\nfolio"}
               />
               <span className="cfg-hint">
-                Si la respuesta del equipo menciona alguna de estas palabras, el correo se cuenta
-                como solicitud válida y Mira confirma el resultado. Una por línea.
+                Ayudan a detectar posibles tickets. La IA o tu revisión manual debe confirmar que
+                cumplen los criterios de atención. Una por línea.
               </span>
             </div>
             <div className="field">
@@ -689,6 +561,11 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
               />
             </div>
             <div className="field">
+              <label htmlFor="ignored-senders">Remitentes ignorados</label>
+              <textarea id="ignored-senders" rows={3} value={draft.ignoredSendersText} onChange={(e) => set("ignoredSendersText", e.target.value)} placeholder={"avisos@proveedor.com"} />
+              <span className="cfg-hint">Direcciones exactas, una por línea.</span>
+            </div>
+            <div className="field">
               <label htmlFor="ignored-domains">Dominios ignorados</label>
               <textarea
                 id="ignored-domains"
@@ -722,15 +599,14 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
               <h3>Revisión con Mira</h3>
               <p>
                 Mira revisa las conversaciones para detectar casos que necesitan revisión manual.
-                Viene activada para potenciar la calidad del servicio; puedes desactivarla cuando
-                quieras.
+                Se habilita con tu autorización. Puedes desactivarla cuando quieras.
               </p>
             </div>
             <div className="wizard-ai-card">
               <h4>¿Qué información usa Mira?</h4>
               <ul>
                 <li>Participantes, fecha, asunto y hasta {draft.maxBodyCharsPerMessage} caracteres de cada mensaje</li>
-                <li>Hasta 4 mensajes clave por conversación, sin duplicados</li>
+                <li>Hasta {draft.maxAuditMessages} mensajes clave por conversación, sin duplicados</li>
                 <li>
                   Un mensaje corto puede incluirse completo dentro de ese límite; los extractos pueden contener texto sensible
                 </li>
@@ -746,11 +622,11 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
                 checked={draft.aiEnabled}
                 onChange={(e) => {
                   set("aiEnabled", e.target.checked);
-                  // Activarla (incl. reactivarla tras un opt-out) confirma el consentimiento.
+                  // La autorización se registra al guardar esta elección explícita.
                   set("aiConsentChecked", e.target.checked);
                 }}
               />
-              <span>Mira activada</span>
+              <span>Autorizo que Amazon Bedrock procese estos fragmentos para la revisión con IA</span>
             </label>
             {draft.aiEnabled ? (
               <p className="wizard-help">
@@ -759,8 +635,9 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
               </p>
             ) : (
               <p className="wizard-help">
-                Desactivaste a Mira. Las conversaciones con una clasificación incierta irán a revisión
-                manual. Puedes reactivarla cuando quieras; al hacerlo confirmas su uso para los
+                La revisión con IA está desactivada. Los filtros siguen separando correos automáticos e ignorados,
+                pero debes confirmar manualmente si cada candidato cumple tus criterios de solicitud válida.
+                Puedes reactivarla cuando quieras; al hacerlo confirmas su uso para los
                 próximos análisis.
               </p>
             )}
@@ -782,7 +659,7 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
                   checked={draft.schedulerEnabled}
                   onChange={(e) => set("schedulerEnabled", e.target.checked)}
                 />
-                <span>Analizar automáticamente los días laborables</span>
+                <span>Activar análisis automático</span>
               </label>
               <span className="cfg-hint">
                 El cambio se aplica cuando guardas o publicas la configuración.
@@ -792,16 +669,21 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
               <>
                 <div className="field">
                   <label htmlFor="analysis-time">Hora del análisis</label>
-                  <select
+                  <input
                     id="analysis-time"
+                    type="time"
+                    required
                     value={draft.analysisTime}
                     onChange={(e) => set("analysisTime", e.target.value)}
-                  >
-                    {ANALYSIS_HOURS.map((hour) => (
-                      <option key={hour} value={hour}>{hour}</option>
-                    ))}
-                  </select>
+                  />
                   <span className="cfg-hint">Se usa la zona horaria de tu organización.</span>
+                </div>
+                <div className="field">
+                  <label>Días de análisis</label>
+                  {WEEKDAYS.map((day, index) => <label className="checkline" key={day}>
+                    <input type="checkbox" checked={draft.daysOfWeek.includes(index + 1)} onChange={(e) => set("daysOfWeek", e.target.checked ? [...draft.daysOfWeek, index + 1].sort() : draft.daysOfWeek.filter((value) => value !== index + 1))} />{day}
+                  </label>)}
+                  <span className="cfg-hint">Cada análisis cubre los días transcurridos desde el día programado anterior. No usa un calendario de feriados.</span>
                 </div>
                 <div className="field">
                   <label htmlFor="report-recipients">Destinatarios de reportes por email</label>
@@ -843,14 +725,18 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
                     onChange={() => set("reportMode", "metrics_and_review_items")}
                   />
                   <span>
-                    <strong>Métricas + asuntos en revisión</strong>
+                    <strong>Métricas + casos en revisión</strong>
                     <span className="wizard-warning">
-                      ⚠ Incluye asuntos de correos de clientes en el reporte. Asegúrate de que los
+                      Incluye casos pendientes. Si agregas asuntos o remitentes, asegúrate de que los
                       destinatarios tienen autorización para ver esta información.
                     </span>
                   </span>
                 </label>
               </div>
+              {draft.reportMode === "metrics_and_review_items" && <>
+                <label className="checkline"><input type="checkbox" checked={draft.includeReportSubjects} onChange={(e) => set("includeReportSubjects", e.target.checked)} />Incluir asuntos de correos</label>
+                <label className="checkline"><input type="checkbox" checked={draft.includeReportSenders} onChange={(e) => set("includeReportSenders", e.target.checked)} />Incluir direcciones de remitentes</label>
+              </>}
             </div>
 
             {/* Estado operativo: vive donde pertenece, junto a la programación. */}

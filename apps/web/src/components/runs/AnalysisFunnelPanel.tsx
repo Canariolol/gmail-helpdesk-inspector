@@ -1,11 +1,11 @@
 import { useState } from "react";
 import { Bot, ChevronDown, Clock, Filter, Inbox, ListChecks } from "lucide-react";
 import type { AnalysisRun, DroppedThreadInfo } from "../../api/types";
-import { formatDateTime } from "../../lib/format";
+import { useDateTimeFormat } from "../../lib/format";
 
 const DROP_REASON_LABELS: Record<string, string> = {
   dropped_not_primary_inbox: "Fuera de la pestaña Principal",
-  dropped_no_external_in_window: "Sin actividad del cliente en la ventana",
+  dropped_no_external_in_window: "Sin solicitud del público configurado en la ventana",
 };
 
 const DROP_REASON_TONE: Record<string, string> = {
@@ -28,10 +28,12 @@ export function AnalysisFunnelPanel({ run }: Props) {
   const droppedNotPrimary = funnel.dropped_not_primary_inbox;
   const droppedWindow = funnel.dropped_no_external_in_window;
   const skippedByPlan = funnel.skipped_by_plan_cap ?? 0;
+  const failed = funnel.failed_threads ?? 0;
+  const truncated = funnel.truncated_threads ?? 0;
   const totalDropped = droppedNotPrimary + droppedWindow + skippedByPlan;
   const aiBatch = funnel.ai_batch_classified ?? 0;
   const aiUnique = funnel.ai_unique_threads ?? 0;
-  if (totalDropped === 0 && aiUnique === 0) return null;
+  if (totalDropped === 0 && aiUnique === 0 && failed === 0 && truncated === 0 && !funnel.more_beyond_retrieved) return null;
 
   const candidates = run.total_candidate_threads;
   const analyzed = run.metrics.total_threads;
@@ -49,7 +51,7 @@ export function AnalysisFunnelPanel({ run }: Props) {
           Resumen del análisis
         </span>
         <span className="funnel-subtitle">
-          Se encontraron {candidates}; se analizaron {analyzed} y Mira pidió revisar {aiUnique}.
+          Se encontraron {candidates}; se analizaron {analyzed} y se auditaron {aiUnique} con IA.
         </span>
         <ChevronDown size={18} className={open ? "funnel-chevron open" : "funnel-chevron"} />
       </button>
@@ -66,13 +68,20 @@ export function AnalysisFunnelPanel({ run }: Props) {
             />
             <FunnelStat
               icon={Clock}
-              label="Sin actividad del cliente en la ventana"
+              label="Sin solicitante del público configurado"
               value={droppedWindow}
               tone="tone-orange"
             />
             <FunnelStat icon={ListChecks} label="Analizados" value={analyzed} tone="tone-mint" />
             <FunnelStat icon={Bot} label="Auditados con Mira" value={aiBatch} tone="tone-violet" />
           </div>
+
+          {(failed > 0 || truncated > 0 || funnel.more_beyond_retrieved) && <p className="funnel-hint" role="alert">
+            Cobertura incompleta. {failed > 0 && `${failed} conversaciones no pudieron recuperarse. `}
+            {truncated > 0 && `${truncated} conversaciones contienen historial incompleto y requieren revisión. `}
+            {funnel.more_beyond_retrieved && "Hay más conversaciones fuera del lote recuperado. "}
+            Los resultados no representan toda la casilla.
+          </p>}
 
           {skippedByPlan > 0 && (
             <p className="funnel-hint">
@@ -83,8 +92,7 @@ export function AnalysisFunnelPanel({ run }: Props) {
 
           {droppedWindow > 0 && (
             <p className="funnel-hint">
-              Estos correos llegaron fuera del rango de fechas u horas analizado. Si buscabas correos
-              de otro día, ajusta el rango arriba y vuelve a analizar.
+              No contienen solicitudes del público configurado dentro de las fechas y horas seleccionadas. Revisa el rango y el tipo de solicitantes en Configuración si esperabas incluirlas.
             </p>
           )}
 
@@ -124,6 +132,7 @@ function FunnelStat({ icon: Icon, label, value, tone }: FunnelStatProps) {
 }
 
 function DroppedRow({ dropped }: { dropped: DroppedThreadInfo }) {
+  const formatDateTime = useDateTimeFormat();
   const tone = DROP_REASON_TONE[dropped.reason] ?? "tone-gray";
   const label = DROP_REASON_LABELS[dropped.reason] ?? dropped.reason;
   return (

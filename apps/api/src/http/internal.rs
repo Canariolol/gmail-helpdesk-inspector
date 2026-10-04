@@ -13,7 +13,7 @@ const CRON_SECRET_HEADER: &str = "x-cron-secret";
 
 #[derive(Debug, Default, Deserialize)]
 pub struct ScheduledAnalysisRequest {
-    /// Fecha local (America/Santiago) del tick; permite backfill manual.
+    /// Fecha local del tenant; permite backfill manual.
     pub as_of_date: Option<String>,
 }
 
@@ -24,17 +24,7 @@ pub async fn scheduled_analysis(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<Vec<ScheduledOutcome>>, ApiError> {
-    let Some(expected_secret) = &state.config.scheduler.cron_secret else {
-        // Sin CRON_SECRET el disparo externo está apagado; no revelar la ruta.
-        return Err(ApiError::not_found("recurso no encontrado"));
-    };
-    let provided_secret = headers
-        .get(CRON_SECRET_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or_default();
-    if !cron_secret_matches(provided_secret, expected_secret) {
-        return Err(ApiError::unauthorized());
-    }
+    require_cron_secret(&state, &headers)?;
 
     let request: ScheduledAnalysisRequest = if body.is_empty() {
         ScheduledAnalysisRequest::default()
@@ -53,6 +43,30 @@ pub async fn scheduled_analysis(
         None => scheduler::run_due_scheduled_analysis(&state, &mailer, Utc::now()).await?,
     };
     Ok(Json(outcomes))
+}
+
+fn require_cron_secret(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
+    let Some(expected_secret) = &state.config.scheduler.cron_secret else {
+        // Sin CRON_SECRET el disparo externo está apagado; no revelar la ruta.
+        return Err(ApiError::not_found("recurso no encontrado"));
+    };
+    let provided_secret = headers
+        .get(CRON_SECRET_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    if !cron_secret_matches(provided_secret, expected_secret) {
+        return Err(ApiError::unauthorized());
+    }
+
+    Ok(())
+}
+
+pub async fn maintenance(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require_cron_secret(&state, &headers)?;
+    Ok(Json(scheduler::maintain(&state).await?))
 }
 
 /// Comparar digests hace que el tiempo no dependa del punto donde difieren
@@ -122,7 +136,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn saturday_returns_weekend_skip() {
+    async fn saturday_without_config_returns_config_skip() {
         let response = app(Some("dev-secret"))
             .oneshot(request(
                 Some("dev-secret"),
@@ -132,7 +146,7 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = body_text(response).await;
-        assert!(body.contains("fin de semana"));
+        assert!(body.contains("sin configuración"));
     }
 
     #[tokio::test]
@@ -159,6 +173,43 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn maintenance_requires_cron_auth_and_returns_only_counts() {
+        let make_request = |secret: &str| {
+            Request::builder()
+                .method("POST")
+                .uri("/internal/maintenance")
+                .header(CRON_SECRET_HEADER, secret)
+                .body(Body::empty())
+                .unwrap()
+        };
+        assert_eq!(
+            app(None)
+                .oneshot(make_request("dev-secret"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            app(Some("dev-secret"))
+                .oneshot(make_request("wrong"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let response = app(Some("dev-secret"))
+            .oneshot(make_request("dev-secret"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body_text(response).await).unwrap(),
+            serde_json::json!({"interrupted_runs":0,"purged_runs":0})
+        );
     }
 
     #[test]

@@ -13,6 +13,15 @@ const RESEND_ENDPOINT: &str = "https://api.resend.com/emails";
 pub trait ReportMailer: Send + Sync {
     /// Envía un correo HTML y devuelve el id asignado por el proveedor.
     async fn send(&self, to: &[String], subject: &str, html: &str) -> anyhow::Result<String>;
+    async fn send_with_key(
+        &self,
+        to: &[String],
+        subject: &str,
+        html: &str,
+        _key: &str,
+    ) -> anyhow::Result<String> {
+        self.send(to, subject, html).await
+    }
 }
 
 pub struct ResendMailer {
@@ -52,6 +61,17 @@ impl ResendMailer {
 #[async_trait]
 impl ReportMailer for ResendMailer {
     async fn send(&self, to: &[String], subject: &str, html: &str) -> anyhow::Result<String> {
+        let key = uuid::Uuid::new_v4().to_string();
+        self.send_with_key(to, subject, html, &key).await
+    }
+
+    async fn send_with_key(
+        &self,
+        to: &[String],
+        subject: &str,
+        html: &str,
+        key: &str,
+    ) -> anyhow::Result<String> {
         if to.is_empty() {
             return Err(anyhow!("no hay destinatarios para el reporte"));
         }
@@ -59,6 +79,7 @@ impl ReportMailer for ResendMailer {
             .http
             .post(RESEND_ENDPOINT)
             .bearer_auth(&self.api_key)
+            .header("Idempotency-Key", key)
             .json(&resend_payload(&self.from, to, subject, html))
             .send()
             .await

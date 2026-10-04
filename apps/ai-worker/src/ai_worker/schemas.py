@@ -58,6 +58,7 @@ class AuditPolicyContext(BaseModel):
     workspace_domain: str = ""
     internal_domains: list[str] = Field(default_factory=list)
     responder_emails: list[str] = Field(default_factory=list)
+    request_scope: Literal["external", "internal", "all"] = "external"
     mailbox_aliases: list[str] = Field(default_factory=list)
     valid_request_criteria: list[str] = Field(default_factory=list)
     non_responsibility_rules: list[str] = Field(default_factory=list)
@@ -83,6 +84,8 @@ class AuditThreadRequest(BaseModel):
 class BatchMessageSummary(BaseModel):
     message_id: str
     from_email: str
+    to_emails: list[str] = Field(default_factory=list)
+    cc_emails: list[str] = Field(default_factory=list)
     date: datetime
     is_internal: bool
     is_automated: bool

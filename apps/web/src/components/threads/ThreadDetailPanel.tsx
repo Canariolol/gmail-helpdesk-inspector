@@ -1,5 +1,5 @@
 import type { ThreadDetail } from "../../api/types";
-import { formatDateTime, formatDuration, formatReason, threadReceivedAt } from "../../lib/format";
+import { useDateTimeFormat, formatDuration, formatReason, threadReceivedAt } from "../../lib/format";
 import { StatusBadge } from "../common/StatusBadge";
 import { ReviewForm } from "./ReviewForm";
 
@@ -12,6 +12,7 @@ type Props = {
 };
 
 export function ThreadDetailPanel({ detail, onReview, saving, reviewError, reviewSavedAt }: Props) {
+  const formatDateTime = useDateTimeFormat();
   return (
     <div className="card-surface thread-detail">
       <div className="thread-detail-head">
@@ -52,6 +53,10 @@ export function ThreadDetailPanel({ detail, onReview, saving, reviewError, revie
               <strong>{message.from_email}</strong>
               <time>{formatDateTime(message.date)}</time>
             </header>
+            <p className="message-recipients">
+              Para: {message.to_emails.length ? message.to_emails.join(", ") : "sin destinatarios disponibles"}
+              {message.cc_emails.length > 0 && <> · CC: {message.cc_emails.join(", ")}</>}
+            </p>
             <p>{message.snippet || "Sin snippet disponible"}</p>
           </article>
         ))}

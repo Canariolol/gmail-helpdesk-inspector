@@ -1,4 +1,12 @@
 import type { AnalysisRun, AnalysisStatus, Classification, EmailThread } from "../api/types";
+import { createContext, useContext } from "react";
+
+export const DateTimeZoneContext = createContext(Intl.DateTimeFormat().resolvedOptions().timeZone);
+
+export function useDateTimeFormat() {
+  const timezone = useContext(DateTimeZoneContext);
+  return (value: string | null | undefined) => formatDateTime(value, timezone);
+}
 
 export const classificationLabels: Record<Classification, string> = {
   valid_client_request: "Solicitud válida",
@@ -46,10 +54,10 @@ export function split(value: string): string[] {
   return value.split(",").map((item) => item.trim()).filter(Boolean);
 }
 
-export function formatDateTime(value: string | null | undefined): string {
+export function formatDateTime(value: string | null | undefined, timezone = Intl.DateTimeFormat().resolvedOptions().timeZone): string {
   if (!value) return "Sin dato";
   return new Intl.DateTimeFormat("es-CL", {
-    timeZone: "America/Santiago",
+    timeZone: timezone,
     day: "2-digit",
     month: "2-digit",
     year: "numeric",

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if git grep -nIE \
+if git grep --untracked --exclude-standard -lIE \
   -e '-----BEGIN [A-Z ]*PRIVATE KEY-----' \
   -e 'AKIA[0-9A-Z]{16}' \
   -e 'AIza[0-9A-Za-z_-]{35}' \
@@ -11,6 +11,10 @@ if git grep -nIE \
   -e 'ghp_[0-9A-Za-z]{36}' \
   -e 'github_pat_[0-9A-Za-z_]{20,}'
 then
-  echo "Potential credential found in a tracked file." >&2
+  echo "Potential credential found; only affected file names are printed." >&2
   exit 1
+else
+  status="$?"
+  # git grep returns 1 only when no match exists; a scan error must fail CI.
+  if (( status != 1 )); then exit "$status"; fi
 fi

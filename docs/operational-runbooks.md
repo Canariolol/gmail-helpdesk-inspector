@@ -213,8 +213,10 @@ POSTGRES_DATABASE_URL="$(gcloud secrets versions access latest --secret=mira-pos
 El script verifica la integridad del dump (`pg_restore --list`) y que
 contenga las tablas conocidas de ambos schemas (`mira.records`,
 `mira.schema_migrations`, `billing.plans`, `billing.subscriptions`,
-`billing.checkout_sessions`, `billing.usage_ledger`); si falla, el respaldo
-no es válido.
+`billing.checkout_sessions`, `billing.usage_ledger`, `billing.quota_alerts`).
+Escribe con permisos `0600` y publica el `.dump` sólo después de verificarlo;
+un fallo elimina el archivo parcial y no rota respaldos anteriores.
+`BACKUP_KEEP` debe ser un entero positivo (14 por defecto).
 
 **Restaurar (drill o recuperación a base limpia):**
 
@@ -233,12 +235,25 @@ no es válido.
 2. Restaurar el dump más reciente:
 
    ```bash
-   pg_restore --no-owner --no-acl \
+   pg_restore --exit-on-error --no-owner --no-acl \
      -d "postgresql://postgres:test@127.0.0.1:55432/postgres" \
      backups/postgres/mira-<fecha>.dump
    ```
 
-3. Verificar conteos contra los del momento del respaldo:
+3. El dump omite ACL para admitir otro rol propietario. Antes de conectar la
+   API, confirmar el bloqueo de roles públicos, especialmente si la base
+   destino tiene privilegios por defecto distintos:
+
+   ```sql
+   REVOKE ALL ON SCHEMA mira, billing FROM PUBLIC, anon, authenticated, service_role;
+   REVOKE ALL ON ALL TABLES IN SCHEMA mira, billing FROM PUBLIC, anon, authenticated, service_role;
+   ```
+
+   El rol de la API debe ser propietario o disponer de sus permisos específicos;
+   no habilitar lectura mediante roles expuestos por PostgREST. Verificar
+   también que RLS permanece habilitado y que no existen políticas públicas.
+
+4. Verificar conteos contra los del momento del respaldo:
 
    ```bash
    psql "postgresql://postgres:test@127.0.0.1:55432/postgres" -tA \
@@ -251,7 +266,7 @@ no es válido.
          UNION ALL SELECT 'billing.quota_alerts', count(*) FROM billing.quota_alerts"
    ```
 
-4. Registrar en la bitácora fecha, dump usado, conteos y duración. No copiar
+5. Registrar en la bitácora fecha, dump usado, conteos y duración. No copiar
    contenido de correos al registro.
 
 **Recuperación real hacia Supabase:** restaurar sobre una base/proyecto nuevo
@@ -265,6 +280,13 @@ Evidencia del drill 2026-07-18: ciclo completo backup→restore contra
 PostgreSQL 17 local con la migración real, 500 registros sintéticos y la tabla
 de migraciones; conteos e índices coincidieron y la rotación conservó
 exactamente `BACKUP_KEEP` dumps.
+
+El drill de octubre de 2026 queda automatizado en `scripts/check-postgres.sh`
+y CI: PostgreSQL 16 descartable, migraciones completas, fixtures de análisis
+y facturación, respaldo mediante el script real y restauración en una base
+nueva. Compara contenido de todas las tablas, columnas, índices, constraints
+y RLS, y comprueba que los roles públicos no pueden leerlas. Esta evidencia
+local no reemplaza probar un respaldo del entorno desplegado antes del cambio.
 
 ## Solicitud de borrar análisis
 

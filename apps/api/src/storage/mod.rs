@@ -16,7 +16,7 @@ use crate::{
         message_fingerprint, reconcile_legacy_thread_classification,
     },
     auth::UserSession,
-    billing::{Account, CheckoutSession, Subscription, UsageLedger},
+    billing::{Account, CheckoutSession, PlanLimits, Subscription, UsageLedger},
     mailbox::{FilterPreset, MailboxConnection, MailboxMetadata},
     policies::{OrgConfigBundle, PolicyVersion},
     scheduler::model::{ScheduleConfig, ScheduleRunStatus, ScheduleState},
@@ -72,8 +72,72 @@ pub enum MailboxConnectionRefresh {
     ConnectionChanged,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UsageAmounts {
+    pub runs: u32,
+    pub retrieved: u32,
+    pub ai: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct UsageReservation {
+    pub org_id: String,
+    pub period_key: String,
+    pub amounts: UsageAmounts,
+    pub updated_at: DateTime<Utc>,
+}
+
+pub(crate) fn reserve_amounts(
+    usage: &mut UsageLedger,
+    previous: UsageAmounts,
+    desired: UsageAmounts,
+    limits: &PlanLimits,
+) -> anyhow::Result<UsageAmounts> {
+    let base_runs = usage.runs_created.saturating_sub(previous.runs);
+    let base_retrieved = usage.retrieved_threads.saturating_sub(previous.retrieved);
+    let base_ai = usage.ai_analyzed_threads.saturating_sub(previous.ai);
+    if base_runs.saturating_add(desired.runs) > limits.runs_per_month {
+        anyhow::bail!("usage_quota_exceeded");
+    }
+    let granted = UsageAmounts {
+        runs: desired.runs,
+        retrieved: desired.retrieved.min(
+            limits
+                .retrieved_threads_per_month
+                .saturating_sub(base_retrieved),
+        ),
+        ai: desired
+            .ai
+            .min(limits.ai_analyzed_threads_per_month.saturating_sub(base_ai)),
+    };
+    usage.runs_created = base_runs.saturating_add(granted.runs);
+    usage.retrieved_threads = base_retrieved.saturating_add(granted.retrieved);
+    usage.ai_analyzed_threads = base_ai.saturating_add(granted.ai);
+    usage.updated_at = Utc::now();
+    Ok(granted)
+}
+
 #[async_trait]
 pub trait StorageRepository: Send + Sync {
+    async fn claim_billing_operation(
+        &self,
+        org_id: &str,
+        token: &str,
+        now: DateTime<Utc>,
+        stale_before: DateTime<Utc>,
+    ) -> anyhow::Result<bool>;
+    async fn release_billing_operation(&self, org_id: &str, token: &str) -> anyhow::Result<()>;
+    async fn reserve_analysis_usage(
+        &self,
+        run: &AnalysisRun,
+        period_key: &str,
+        desired: UsageAmounts,
+        limits: &PlanLimits,
+    ) -> anyhow::Result<UsageAmounts>;
+    async fn settle_analysis_usage(&self, run_id: &str, actual: UsageAmounts)
+    -> anyhow::Result<()>;
+    async fn purge_expired_analysis_data(&self, now: DateTime<Utc>) -> anyhow::Result<u64>;
+    async fn fail_stale_analysis_runs(&self, before: DateTime<Utc>) -> anyhow::Result<u64>;
     /// Chequeo liviano de readiness. Por defecto no consulta nada; cada
     /// backend con conexión real (PostgreSQL) lo sobreescribe.
     async fn ping(&self) -> anyhow::Result<()> {
@@ -142,6 +206,10 @@ pub trait StorageRepository: Send + Sync {
     ) -> anyhow::Result<Option<Subscription>>;
     async fn upsert_checkout_session(&self, checkout: &CheckoutSession) -> anyhow::Result<()>;
     async fn get_checkout_session(&self, id: &str) -> anyhow::Result<Option<CheckoutSession>>;
+    async fn find_incomplete_checkout_for_org(
+        &self,
+        org_id: &str,
+    ) -> anyhow::Result<Option<CheckoutSession>>;
     async fn find_checkout_session_by_provider_id(
         &self,
         provider_subscription_id: &str,
@@ -237,6 +305,11 @@ pub trait StorageRepository: Send + Sync {
         &self,
         owner_email: &str,
     ) -> anyhow::Result<Option<MailboxMetadata>>;
+    async fn save_current_mailbox_metadata(
+        &self,
+        connection: &MailboxConnection,
+        metadata: &MailboxMetadata,
+    ) -> anyhow::Result<bool>;
     async fn list_filter_presets(&self, owner_email: &str) -> anyhow::Result<Vec<FilterPreset>>;
     async fn upsert_filter_preset(&self, preset: &FilterPreset) -> anyhow::Result<()>;
     async fn delete_filter_preset(&self, owner_email: &str, preset_id: &str) -> anyhow::Result<()>;
@@ -255,6 +328,8 @@ pub struct MemoryStorage {
 
 #[derive(Default)]
 struct MemoryInner {
+    billing_operations: HashMap<String, (String, DateTime<Utc>)>,
+    usage_reservations: HashMap<String, UsageReservation>,
     sessions: HashMap<String, UserSession>,
     gmail_connections: HashMap<String, MailboxConnection>,
     accounts: HashMap<String, Account>,
@@ -299,6 +374,26 @@ impl MemoryStorage {
 
 fn thread_storage_key(run_id: &str, thread_id: &str) -> String {
     format!("{run_id}:{thread_id}")
+}
+
+fn remove_memory_runs(inner: &mut MemoryInner, ids: &HashSet<String>) {
+    inner.runs.retain(|id, _| !ids.contains(id));
+    inner
+        .ai_usage_attempts
+        .retain(|_, attempt| !ids.contains(&attempt.run_id));
+    inner
+        .threads
+        .retain(|_, thread| !ids.contains(&thread.analysis_run_id));
+    inner
+        .messages
+        .retain(|key, _| !ids.iter().any(|id| key.starts_with(&format!("{id}:"))));
+    inner
+        .audits
+        .retain(|key, _| !ids.iter().any(|id| key.starts_with(&format!("{id}:"))));
+    inner.reviews.retain(|(id, _)| !ids.contains(id));
+    inner
+        .manual_review_overrides
+        .retain(|_, review| !ids.contains(&review.source_run_id));
 }
 
 fn override_storage_key(owner_email: &str, thread_id: &str) -> String {
@@ -370,6 +465,10 @@ pub fn gmail_connection_from_legacy(session: &UserSession) -> Option<MailboxConn
         owner_email: session.google_account_email.clone(),
         // Las credenciales heredadas de la sesión solo pudieron venir de Google.
         provider: crate::mailbox::MailboxProviderKind::Google,
+        microsoft_target_email: None,
+        imap_config: None,
+        imap_password_encrypted: None,
+        needs_reauth_at: None,
         mailbox_email: session.gmail_account_email.clone()?,
         access_token_encrypted,
         refresh_token_encrypted: session
@@ -384,6 +483,156 @@ pub fn gmail_connection_from_legacy(session: &UserSession) -> Option<MailboxConn
 
 #[async_trait]
 impl StorageRepository for MemoryStorage {
+    async fn claim_billing_operation(
+        &self,
+        org_id: &str,
+        token: &str,
+        now: DateTime<Utc>,
+        stale_before: DateTime<Utc>,
+    ) -> anyhow::Result<bool> {
+        let mut inner = self.inner.write().await;
+        if inner
+            .billing_operations
+            .get(org_id)
+            .is_some_and(|(_, at)| *at > stale_before)
+        {
+            return Ok(false);
+        }
+        inner
+            .billing_operations
+            .insert(org_id.to_string(), (token.to_string(), now));
+        Ok(true)
+    }
+
+    async fn release_billing_operation(&self, org_id: &str, token: &str) -> anyhow::Result<()> {
+        let mut inner = self.inner.write().await;
+        if inner
+            .billing_operations
+            .get(org_id)
+            .is_some_and(|(current, _)| current == token)
+        {
+            inner.billing_operations.remove(org_id);
+        }
+        Ok(())
+    }
+
+    async fn reserve_analysis_usage(
+        &self,
+        run: &AnalysisRun,
+        period_key: &str,
+        desired: UsageAmounts,
+        limits: &PlanLimits,
+    ) -> anyhow::Result<UsageAmounts> {
+        let org_id = run
+            .org_id
+            .as_deref()
+            .ok_or_else(|| anyhow!("analysis_missing_organization"))?;
+        let mut inner = self.inner.write().await;
+        let reservation = inner.usage_reservations.get(&run.id).cloned();
+        let period_key = reservation
+            .as_ref()
+            .map_or(period_key, |value| value.period_key.as_str());
+        let previous = reservation
+            .as_ref()
+            .map(|value| value.amounts)
+            .unwrap_or_default();
+        let key = format!("{org_id}:{period_key}");
+        let usage = inner
+            .usage_ledgers
+            .entry(key)
+            .or_insert_with(|| UsageLedger {
+                org_id: org_id.to_string(),
+                period_key: period_key.to_string(),
+                runs_created: 0,
+                retrieved_threads: 0,
+                ai_analyzed_threads: 0,
+                updated_at: Utc::now(),
+            });
+        let granted = reserve_amounts(usage, previous, desired, limits)?;
+        inner.usage_reservations.insert(
+            run.id.clone(),
+            UsageReservation {
+                org_id: org_id.to_string(),
+                period_key: period_key.to_string(),
+                amounts: granted,
+                updated_at: Utc::now(),
+            },
+        );
+        Ok(granted)
+    }
+
+    async fn settle_analysis_usage(
+        &self,
+        run_id: &str,
+        actual: UsageAmounts,
+    ) -> anyhow::Result<()> {
+        let mut inner = self.inner.write().await;
+        let Some(previous) = inner.usage_reservations.get(run_id).cloned() else {
+            return Ok(());
+        };
+        let actual = UsageAmounts {
+            runs: actual.runs.min(previous.amounts.runs),
+            retrieved: actual.retrieved.min(previous.amounts.retrieved),
+            ai: actual.ai.min(previous.amounts.ai),
+        };
+        if let Some(usage) = inner
+            .usage_ledgers
+            .get_mut(&format!("{}:{}", previous.org_id, previous.period_key))
+        {
+            usage.runs_created = usage
+                .runs_created
+                .saturating_sub(previous.amounts.runs)
+                .saturating_add(actual.runs.min(previous.amounts.runs));
+            usage.retrieved_threads = usage
+                .retrieved_threads
+                .saturating_sub(previous.amounts.retrieved)
+                .saturating_add(actual.retrieved.min(previous.amounts.retrieved));
+            usage.ai_analyzed_threads = usage
+                .ai_analyzed_threads
+                .saturating_sub(previous.amounts.ai)
+                .saturating_add(actual.ai.min(previous.amounts.ai));
+            usage.updated_at = Utc::now();
+        }
+        inner.usage_reservations.insert(
+            run_id.to_string(),
+            UsageReservation {
+                amounts: actual,
+                updated_at: Utc::now(),
+                ..previous
+            },
+        );
+        Ok(())
+    }
+
+    async fn purge_expired_analysis_data(&self, now: DateTime<Utc>) -> anyhow::Result<u64> {
+        let mut inner = self.inner.write().await;
+        let ids = inner
+            .runs
+            .values()
+            .filter(|run| run.retention_deadline() <= now)
+            .map(|run| run.id.clone())
+            .collect::<HashSet<_>>();
+        remove_memory_runs(&mut inner, &ids);
+        Ok(ids.len() as u64)
+    }
+
+    async fn fail_stale_analysis_runs(&self, before: DateTime<Utc>) -> anyhow::Result<u64> {
+        let mut inner = self.inner.write().await;
+        let mut count = 0;
+        for run in inner
+            .runs
+            .values_mut()
+            .filter(|run| run.status == AnalysisStatus::Running && run.created_at < before)
+        {
+            run.status = AnalysisStatus::Failed;
+            run.error_message = Some("analysis_interrupted".to_string());
+            run.progress_message =
+                "El análisis se interrumpió; puedes iniciar uno nuevo".to_string();
+            count += 1;
+        }
+        Ok(count)
+    }
+
     async fn upsert_account(&self, account: &Account) -> anyhow::Result<()> {
         self.inner
             .write()
@@ -574,6 +823,10 @@ impl StorageRepository for MemoryStorage {
         if let Some(connection) = inner.gmail_connections.get_mut(&owner_key(owner_email)) {
             connection.access_token_encrypted.clear();
             connection.refresh_token_encrypted = None;
+            connection.imap_password_encrypted = None;
+            connection.imap_config = None;
+            connection.microsoft_target_email = None;
+            connection.needs_reauth_at = None;
             connection.revoked_at = Some(now);
             connection.updated_at = now;
         }
@@ -692,6 +945,7 @@ impl StorageRepository for MemoryStorage {
     async fn user_is_org_member(&self, org_id: &str, user_email: &str) -> anyhow::Result<bool> {
         Ok(self.inner.read().await.org_configs.values().any(|bundle| {
             bundle.org.id == org_id
+                && bundle.org.status != crate::policies::OrganizationStatus::Disabled
                 && bundle
                     .membership
                     .user_email
@@ -740,6 +994,28 @@ impl StorageRepository for MemoryStorage {
 
     async fn get_checkout_session(&self, id: &str) -> anyhow::Result<Option<CheckoutSession>> {
         Ok(self.inner.read().await.checkout_sessions.get(id).cloned())
+    }
+
+    async fn find_incomplete_checkout_for_org(
+        &self,
+        org_id: &str,
+    ) -> anyhow::Result<Option<CheckoutSession>> {
+        Ok(self
+            .inner
+            .read()
+            .await
+            .checkout_sessions
+            .values()
+            .filter(|checkout| {
+                checkout.org_id == org_id
+                    && matches!(
+                        checkout.status,
+                        crate::billing::CheckoutSessionStatus::Pending
+                            | crate::billing::CheckoutSessionStatus::ProviderCreated
+                    )
+            })
+            .max_by_key(|checkout| checkout.created_at)
+            .cloned())
     }
 
     async fn find_checkout_session_by_provider_id(
@@ -850,11 +1126,15 @@ impl StorageRepository for MemoryStorage {
     }
 
     async fn update_analysis_run(&self, run: &AnalysisRun) -> anyhow::Result<()> {
-        self.inner
-            .write()
-            .await
+        let mut inner = self.inner.write().await;
+        if !inner
             .runs
-            .insert(run.id.clone(), run.clone());
+            .get(&run.id)
+            .is_some_and(|current| current.status != AnalysisStatus::Failed)
+        {
+            anyhow::bail!("analysis_cancelled_or_deleted");
+        }
+        inner.runs.insert(run.id.clone(), run.clone());
         Ok(())
     }
 
@@ -878,9 +1158,11 @@ impl StorageRepository for MemoryStorage {
     }
 
     async fn record_ai_usage_attempt(&self, attempt: &AiUsageAttempt) -> anyhow::Result<()> {
-        self.inner
-            .write()
-            .await
+        let mut inner = self.inner.write().await;
+        if !inner.runs.contains_key(&attempt.run_id) {
+            anyhow::bail!("analysis_cancelled_or_deleted");
+        }
+        inner
             .ai_usage_attempts
             .entry(attempt.id.clone())
             .or_insert_with(|| attempt.clone());
@@ -949,6 +1231,13 @@ impl StorageRepository for MemoryStorage {
         messages: &[EmailMessage],
     ) -> anyhow::Result<()> {
         let mut inner = self.inner.write().await;
+        if !inner
+            .runs
+            .get(&thread.analysis_run_id)
+            .is_some_and(|run| run.status != AnalysisStatus::Failed)
+        {
+            anyhow::bail!("analysis_cancelled_or_deleted");
+        }
         inner.threads.insert(
             thread_storage_key(&thread.analysis_run_id, &thread.id),
             thread.clone(),
@@ -1032,9 +1321,15 @@ impl StorageRepository for MemoryStorage {
         thread_id: &str,
         audit: &AiAuditResult,
     ) -> anyhow::Result<()> {
-        self.inner
-            .write()
-            .await
+        let mut inner = self.inner.write().await;
+        if !inner
+            .runs
+            .get(_run_id)
+            .is_some_and(|run| run.status != AnalysisStatus::Failed)
+        {
+            anyhow::bail!("analysis_cancelled_or_deleted");
+        }
+        inner
             .audits
             .entry(thread_storage_key(_run_id, thread_id))
             .or_default()
@@ -1072,6 +1367,8 @@ impl StorageRepository for MemoryStorage {
         thread.resolution_time_minutes = review.resolution_time_minutes;
         thread.notes = review.notes.clone();
         thread.manual_review_required = false;
+        thread.ai_suggestion = None;
+        thread.classification_confidence = 1.0;
         thread.manual_override_applied = true;
         thread.updated_at = Utc::now();
         inner.reviews.push((
@@ -1102,7 +1399,11 @@ impl StorageRepository for MemoryStorage {
         &self,
         review: &ManualReviewOverride,
     ) -> anyhow::Result<()> {
-        self.inner.write().await.manual_review_overrides.insert(
+        let mut inner = self.inner.write().await;
+        if !inner.runs.contains_key(&review.source_run_id) {
+            anyhow::bail!("analysis_cancelled_or_deleted");
+        }
+        inner.manual_review_overrides.insert(
             override_storage_key(&review.owner_email, &review.thread_id),
             review.clone(),
         );
@@ -1213,6 +1514,10 @@ impl StorageRepository for MemoryStorage {
                 thread_id: review.email_thread_id.clone(),
                 source_run_id: run_id,
                 message_fingerprint: message_fingerprint(&messages),
+                review_context: Some(crate::analysis::manual_review_context(
+                    &run.config,
+                    run.policy_snapshot.as_ref(),
+                )),
                 reviewer_label: review.reviewer_label,
                 classification: review.new_classification,
                 is_answered: review.is_answered,
@@ -1340,6 +1645,25 @@ impl StorageRepository for MemoryStorage {
             .cloned())
     }
 
+    async fn save_current_mailbox_metadata(
+        &self,
+        connection: &MailboxConnection,
+        metadata: &MailboxMetadata,
+    ) -> anyhow::Result<bool> {
+        let mut inner = self.inner.write().await;
+        let key = owner_key(&connection.owner_email);
+        if !inner.gmail_connections.get(&key).is_some_and(|current| {
+            current.connected_at == connection.connected_at
+                && current.provider == connection.provider
+                && current.mailbox_email == connection.mailbox_email
+                && current.revoked_at.is_none()
+        }) {
+            return Ok(false);
+        }
+        inner.mailbox_metadata.insert(key, metadata.clone());
+        Ok(true)
+    }
+
     async fn list_filter_presets(&self, owner_email: &str) -> anyhow::Result<Vec<FilterPreset>> {
         let owner = owner_email.trim().to_lowercase();
         let mut presets: Vec<FilterPreset> = self
@@ -1438,6 +1762,8 @@ mod tests {
                 retention_expires_at: None,
                 data_minimization_mode: None,
                 config: AnalysisConfig {
+                    responder_emails: vec![],
+                    request_scope: crate::analysis::RequestScope::External,
                     date_from: "2026-07-23".to_string(),
                     date_to: "2026-07-24".to_string(),
                     time_from: "00:00".to_string(),
@@ -1570,6 +1896,10 @@ mod tests {
             .unwrap();
         storage
             .upsert_gmail_connection(&MailboxConnection {
+                microsoft_target_email: None,
+                imap_config: None,
+                imap_password_encrypted: None,
+                needs_reauth_at: None,
                 owner_email: "owner@example.com".to_string(),
                 provider: crate::mailbox::MailboxProviderKind::Google,
                 mailbox_email: "owner@example.com".to_string(),
@@ -1618,6 +1948,10 @@ mod tests {
     async fn refresh_does_not_restore_a_gmail_connection_after_disconnect() {
         let storage = MemoryStorage::default();
         let previous = MailboxConnection {
+            microsoft_target_email: None,
+            imap_config: None,
+            imap_password_encrypted: None,
+            needs_reauth_at: None,
             owner_email: "owner@example.com".to_string(),
             provider: crate::mailbox::MailboxProviderKind::Google,
             mailbox_email: "owner@example.com".to_string(),
@@ -1797,6 +2131,8 @@ mod tests {
                 retention_expires_at: None,
                 data_minimization_mode: None,
                 config: AnalysisConfig {
+                    responder_emails: vec![],
+                    request_scope: crate::analysis::RequestScope::External,
                     date_from: "2026-06-01".to_string(),
                     date_to: "2026-06-02".to_string(),
                     time_from: "00:00".to_string(),
@@ -1823,6 +2159,7 @@ mod tests {
 
         let legacy_thread =
             |id: &str, classification: Classification, is_valid_client_request: bool| EmailThread {
+                ai_suggestion: None,
                 id: id.to_string(),
                 analysis_run_id: "legacy-run".to_string(),
                 thread_id: format!("gmail-{id}"),
@@ -1921,6 +2258,8 @@ mod tests {
             retention_expires_at: None,
             data_minimization_mode: None,
             config: AnalysisConfig {
+                responder_emails: vec![],
+                request_scope: crate::analysis::RequestScope::External,
                 date_from: "2026-06-01".to_string(),
                 date_to: "2026-06-02".to_string(),
                 time_from: "00:00".to_string(),
@@ -1956,6 +2295,7 @@ mod tests {
             .unwrap();
 
         let make_thread = |run_id: &str, id: &str| EmailThread {
+            ai_suggestion: None,
             id: id.to_string(),
             analysis_run_id: run_id.to_string(),
             thread_id: id.to_string(),
@@ -2110,6 +2450,7 @@ mod tests {
             ignored_keywords: vec![],
             timezone: "America/Santiago".to_string(),
             analysis_time: crate::scheduler::window::DEFAULT_ANALYSIS_TIME.to_string(),
+            days_of_week: vec![1, 2, 3, 4, 5],
             gmail_max_threads: Some(120),
             updated_at: Utc::now(),
         };
@@ -2234,6 +2575,8 @@ mod tests {
                 retention_expires_at: None,
                 data_minimization_mode: None,
                 config: AnalysisConfig {
+                    responder_emails: vec![],
+                    request_scope: crate::analysis::RequestScope::External,
                     date_from: "2026-07-01".to_string(),
                     date_to: "2026-07-01".to_string(),
                     time_from: "00:00".to_string(),

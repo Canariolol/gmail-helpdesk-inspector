@@ -8,6 +8,7 @@ type DetectedProvider = MailboxProviderId | "unsupported" | "unknown";
 
 interface MailboxConnectGateProps {
   accountEmail: string;
+  needsReauth?: boolean;
   /** Proveedores que este despliegue puede ofrecer, según `/mailbox/providers`. */
   providers: MailboxProviderId[];
   connectUrlFor: (provider: MailboxProviderId) => string;
@@ -17,7 +18,7 @@ interface MailboxConnectGateProps {
 }
 
 const GUARANTEES = [
-  "No enviamos ni respondemos correos",
+  "No enviamos ni respondemos desde tu casilla",
   "No etiquetamos, archivamos ni borramos nada",
   "No guardamos el cuerpo completo de tus correos",
 ];
@@ -30,10 +31,12 @@ const GUARANTEES = [
 const PROVIDERS: Record<MailboxProviderId, { name: string; hint: string }> = {
   google: { name: "Conectar con Google", hint: "Gmail y dominios en Google Workspace" },
   microsoft: { name: "Conectar con Microsoft", hint: "Outlook y Microsoft 365" },
+  imap: { name: "Conectar por IMAP", hint: "Correo de hosting y otros proveedores con TLS" },
 };
 
 export function MailboxConnectGate({
   accountEmail,
+  needsReauth=false,
   providers,
   connectUrlFor,
   planName,
@@ -47,10 +50,12 @@ export function MailboxConnectGate({
           <Check size={14} /> {isTrial ? "Prueba activa" : "Plan activo"}
           {planName ? ` · ${planName}` : ""}
         </span>
-        <h1>Conecta la casilla de correo que vas a auditar</h1>
+        <h1>{needsReauth ? "Vuelve a conectar tu casilla de correo" : "Conecta la casilla de correo que vas a auditar"}</h1>
+        {needsReauth && <p role="alert" className="access-error">La autorización de lectura venció o fue revocada. Vuelve a conectar la casilla para continuar.</p>}
         <p className="access-lede">
-          Último paso. Autoriza el acceso de <strong>solo lectura</strong> a la casilla que quieres
-          medir. Es distinto de tu cuenta: aquí eliges qué bandeja auditar.
+          Autoriza la lectura de la casilla que quieres medir. Es distinto de tu cuenta:
+          aquí eliges qué bandeja auditar. Con Google y Microsoft solicitamos permisos de
+          solo lectura; por IMAP, Mira utiliza únicamente operaciones de lectura.
         </p>
       </div>
 
@@ -63,7 +68,7 @@ export function MailboxConnectGate({
       </ul>
 
       <div className="access-actions access-actions-stack">
-        {providers.map((provider, index) => (
+        {providers.filter((provider) => provider !== "imap").map((provider, index) => (
           <a
             key={provider}
             className={index === 0 ? "btn-primary" : "btn-ghost"}
@@ -76,6 +81,8 @@ export function MailboxConnectGate({
             </span>
           </a>
         ))}
+        {providers.includes("microsoft") && <SharedMicrosoftConnect connectUrl={connectUrlFor("microsoft")} />}
+        {providers.includes("imap") && <ImapConnect accountEmail={accountEmail} />}
         <NotSureOption providers={providers} connectUrlFor={connectUrlFor} />
       </div>
 
@@ -98,6 +105,57 @@ type NotSureProps = {
   providers: MailboxProviderId[];
   connectUrlFor: (provider: MailboxProviderId) => string;
 };
+
+function SharedMicrosoftConnect({ connectUrl }: { connectUrl: string }) {
+  const [open, setOpen] = useState(false);
+  const [mailbox, setMailbox] = useState("");
+  if (!open) return <button type="button" className="btn-ghost" onClick={() => setOpen(true)}>Conectar un buzón compartido de Microsoft 365</button>;
+  return <form className="access-detect" onSubmit={(event) => {
+    event.preventDefault();
+    const url = new URL(connectUrl, window.location.origin);
+    url.searchParams.set("target_mailbox", mailbox.trim());
+    window.location.href = url.toString();
+  }}>
+    <label htmlFor="shared-mailbox">Dirección del buzón compartido</label>
+    <input id="shared-mailbox" type="email" required value={mailbox} onChange={(event) => setMailbox(event.target.value)} placeholder="soporte@empresa.cl" />
+    <p className="access-note-muted">Inicia sesión en Microsoft con una cuenta que tenga permiso para leer ese buzón. Tu administrador puede tener que autorizar la conexión y habilitar copias de los mensajes enviados en el buzón compartido. Si se guardan sólo en la cuenta del delegado, Mira no puede observar esas respuestas.</p>
+    <button type="submit" className="btn-primary">Autorizar lectura del buzón</button>
+  </form>;
+}
+
+function ImapConnect({ accountEmail }: { accountEmail: string }) {
+  const [open, setOpen] = useState(false);
+  const [mailbox, setMailbox] = useState(accountEmail);
+  const [host, setHost] = useState("");
+  const [username, setUsername] = useState(accountEmail);
+  const [password, setPassword] = useState("");
+  const [sentFolder, setSentFolder] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  if (!open) return <button type="button" className="btn-ghost" onClick={() => setOpen(true)}>Conectar por IMAP</button>;
+  return <form className="access-detect" onSubmit={async (event) => {
+    event.preventDefault();setSaving(true);setError(null);
+    try {
+      await api("/mailbox/connect/imap", { method: "POST", body: JSON.stringify({ mailbox_email: mailbox.trim(), host: host.trim(), port: 993, username: username.trim(), password, sent_folder: sentFolder.trim() || null }) });
+      setPassword("");window.location.reload();
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "No se pudo conectar la casilla."); }
+    finally { setSaving(false); }
+  }}>
+    <label htmlFor="imap-mailbox">Casilla que vas a auditar</label>
+    <input id="imap-mailbox" type="email" required value={mailbox} onChange={(event) => setMailbox(event.target.value)} />
+    <label htmlFor="imap-host">Servidor IMAP</label>
+    <input id="imap-host" required value={host} onChange={(event) => setHost(event.target.value)} placeholder="mail.empresa.cl" autoCapitalize="none" />
+    <label htmlFor="imap-user">Usuario de acceso</label>
+    <input id="imap-user" required autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} />
+    <label htmlFor="imap-password">Contraseña o contraseña de aplicación</label>
+    <input id="imap-password" type="password" required autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} />
+    <label htmlFor="imap-sent">Carpeta de enviados, opcional</label>
+    <input id="imap-sent" value={sentFolder} onChange={(event) => setSentFolder(event.target.value)} placeholder="Sent" />
+    <p className="access-note-muted">La conexión usa TLS en el puerto 993. Las credenciales se guardan cifradas. Revisa la carpeta de enviados para que Mira pueda identificar respuestas.</p>
+    {error && <p role="alert">{error}</p>}
+    <button type="submit" className="btn-primary" disabled={saving}>{saving ? "Validando conexión…" : "Conectar casilla"}</button>
+  </form>;
+}
 
 /**
  * Tercera opción: quien no sabe qué proveedor usa escribe su correo y lo
@@ -122,7 +180,7 @@ function NotSureOption({ providers, connectUrlFor }: NotSureProps) {
       const provider = result.provider;
       if ((provider === "google" || provider === "microsoft") && providers.includes(provider)) {
         // Redirección de página completa, como si hubiera apretado el botón.
-        const url = new URL(connectUrlFor(provider));
+        const url = new URL(connectUrlFor(provider), window.location.origin);
         url.searchParams.set("login_hint", email.trim());
         window.location.href = url.toString();
         return;
@@ -167,10 +225,8 @@ function NotSureOption({ providers, connectUrlFor }: NotSureProps) {
 
       {outcome === "unsupported" && (
         <p className="access-note-muted">
-          <strong>Tu casilla no está en Google ni en Microsoft.</strong> Estamos implementando
-          el soporte para otros proveedores de correo (Hostinger, cPanel, Zoho y similares).
-          Por ahora Mira solo puede auditar casillas de Google y Microsoft. Guardamos tu
-          correo y te avisamos apenas esté disponible.
+          Tu casilla usa otro proveedor. Puedes conectarla por IMAP con los datos de servidor
+          y acceso que te entregue tu proveedor de correo.
         </p>
       )}
       {outcome === "unknown" && (

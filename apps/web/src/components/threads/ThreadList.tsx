@@ -1,5 +1,5 @@
 import type { EmailThread } from "../../api/types";
-import { formatDateTime, formatSource, threadReceivedAt } from "../../lib/format";
+import { useDateTimeFormat, formatSource, threadReceivedAt } from "../../lib/format";
 import { StatusBadge } from "../common/StatusBadge";
 import { ThreadFilterSelect } from "./ThreadFilterSelect";
 
@@ -12,6 +12,7 @@ type Props = {
 };
 
 export function ThreadList(props: Props) {
+  const formatDateTime = useDateTimeFormat();
   return (
     <section className="card thread-section">
       <div className="card-toolbar">
@@ -29,7 +30,7 @@ export function ThreadList(props: Props) {
             <span className="subject">{thread.subject}</span>
             <span className="thread-item-meta">Recepción: {formatDateTime(threadReceivedAt(thread))}</span>
             <span className={thread.is_answered ? "chip tone-teal" : "chip tone-orange"}>
-              {thread.is_answered ? "Respondido" : "Sin respuesta"}
+              {thread.is_answered ? "Respondido" : "Sin respuesta registrada"}
             </span>
             <StatusBadge classification={thread.classification} />
             <span className="chip tone-gray">{thread.manual_review_required ? "Revisar" : formatSource(thread.classification_source)}</span>

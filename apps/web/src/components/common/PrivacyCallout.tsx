@@ -13,8 +13,8 @@ export function PrivacyCallout({ compact = false }: Props) {
       <div>
         <h2>Acceso de solo lectura a tu casilla</h2>
         <p>
-          La app solo puede leer los correos necesarios para el análisis: no puede enviar, editar, etiquetar ni borrar
-          mensajes.
+          Mira lee correos para el análisis: no envía, edita, etiqueta ni borra mensajes.
+          En conexiones IMAP, los permisos de la credencial dependen de tu proveedor; usa una contraseña de aplicación cuando esté disponible.
         </p>
         <ul>
           <li>

@@ -33,11 +33,13 @@ function humanizeReason(reason: string): string {
   if (reason === "already_disconnected") return "La casilla ya está desconectada";
   if (reason === "account_deletion_policy_pending") return "El borrado de cuenta aún está en definición";
   if (reason === "requires_confirmation") return "Requiere confirmación";
+  if (reason === "requires_owner_admin") return "Requiere el rol de propietario o administrador";
   return reason.split("_").join(" ");
 }
 
 function formatMissingSetupItem(item: string): string {
   if (item === "internal_domains") return "dominios de tu equipo";
+  if (item === "responder_emails") return "direcciones de quienes responden";
   if (item === "valid_request_criteria") return "qué correos deben contar como solicitudes";
   if (item === "report_recipients") return "destinatarios de reportes";
   return "un dato de configuración";
@@ -45,6 +47,9 @@ function formatMissingSetupItem(item: string): string {
 
 function formatRole(role: string): string {
   if (role === "owner") return "Propietario";
+  if (role === "admin") return "Administrador";
+  if (role === "analyst") return "Analista";
+  if (role === "viewer") return "Lectura";
   if (role === "member") return "Miembro";
   return "Miembro de la organización";
 }
@@ -129,7 +134,10 @@ export function PrivacidadDatosView() {
       setConfirmingDeletion(false);
       setDeletionConfirmation("");
       queryClient.invalidateQueries({ queryKey: ["data-summary"] });
-      queryClient.invalidateQueries({ queryKey: ["runs"] });
+      queryClient.invalidateQueries({ queryKey: ["analysis-runs"] });
+      queryClient.invalidateQueries({ queryKey: ["consolidated-report"] });
+      queryClient.removeQueries({ queryKey: ["threads"] });
+      queryClient.removeQueries({ queryKey: ["thread"] });
     },
   });
   const disconnectGmail = useMutation({
@@ -171,9 +179,12 @@ export function PrivacidadDatosView() {
   // Cada proveedor declara su propio scope de solo lectura; el badge no puede
   // buscar el de Google o mentiría en una casilla de Microsoft.
   const READ_ONLY_SCOPES = ["gmail.readonly", "Mail.Read"];
-  const readonlyScope = data.account.gmail_scope_snapshot.some((scope) =>
+  const readonlyScope = data.account.mailbox_connected && data.account.gmail_scope_snapshot.some((scope) =>
     READ_ONLY_SCOPES.some((readOnly) => scope.includes(readOnly)),
   );
+  const imapConnection = data.account.mailbox_connected && data.account.gmail_scope_snapshot.some((scope) => scope.startsWith("IMAP "));
+  const permissionLabel = !data.account.mailbox_connected ? "Sin permiso activo" : imapConnection ? "Lectura por IMAP" : readonlyScope ? "Lectura de correo por OAuth" : "Permiso pendiente de confirmar";
+  const hasManagementRole = data.org.role === "owner" || data.org.role === "admin";
 
   return (
     <div className="view privacy-view">
@@ -186,7 +197,7 @@ export function PrivacidadDatosView() {
             requieren confirmaciones explícitas antes de ejecutarse.
           </p>
         </div>
-        <BoolBadge value={readonlyScope} trueLabel="Solo lectura" falseLabel="Permiso pendiente de confirmar" />
+        <span className={`privacy-badge ${readonlyScope || imapConnection ? "ok" : "muted"}`}><ShieldCheck size={13} />{permissionLabel}</span>
       </section>
 
       <div className="privacy-grid two">
@@ -195,10 +206,10 @@ export function PrivacidadDatosView() {
           <DataRow label="Cuenta de acceso" value={data.account.google_account_email} />
           <DataRow label="Casilla de correo" value={<BoolBadge value={data.account.mailbox_connected} trueLabel="Conectada" falseLabel="Desconectada" />} />
           <DataRow label="Revocado el" value={formatDate(data.account.mailbox_revoked_at)} />
-          <DataRow label="Permiso" value="Solo lectura" />
+          <DataRow label="Permiso" value={permissionLabel} />
           <p className="privacy-note">
-            La app puede leer la información necesaria para el análisis, pero no puede enviar, modificar, etiquetar ni
-            borrar correos en tu casilla.
+            Mira lee información para el análisis; no envía, modifica, etiqueta ni borra correos.
+            {imapConnection && " La contraseña IMAP puede tener permisos más amplios según tu proveedor, aunque Mira sólo realiza lecturas. Revócala desde tu proveedor si deseas invalidarla por completo."}
           </p>
         </section>
 
@@ -245,7 +256,7 @@ export function PrivacidadDatosView() {
           efectos, retención y protecciones de seguridad.
         </p>
         <div className="privacy-actions">
-          {data.actions.disconnect_gmail.available ? (
+          {hasManagementRole && data.actions.disconnect_gmail.available ? (
             <div className="privacy-action-card warning">
               <div className="privacy-action-head">
                 <div className="privacy-action-icon" aria-hidden="true"><Unplug size={19} /></div>
@@ -283,11 +294,11 @@ export function PrivacidadDatosView() {
               icon={<Unplug size={19} />}
               title="Desconectar la casilla"
               description="Quita el permiso de acceso y detiene los análisis automáticos."
-              reason={data.actions.disconnect_gmail.reason}
+              reason={hasManagementRole ? data.actions.disconnect_gmail.reason : "requires_owner_admin"}
               tone="warning"
             />
           )}
-          {data.actions.delete_analysis_data.available ? (
+          {hasManagementRole && data.actions.delete_analysis_data.available ? (
             <div className="privacy-action-card danger">
               <div className="privacy-action-head">
                 <div className="privacy-action-icon" aria-hidden="true"><Trash2 size={19} /></div>
@@ -331,7 +342,7 @@ export function PrivacidadDatosView() {
               icon={<Trash2 size={19} />}
               title="Borrar análisis"
               description="Eliminar los resultados de tus análisis. Estamos definiendo si esta acción será por análisis individual o para todos."
-              reason={data.actions.delete_analysis_data.reason}
+              reason={hasManagementRole ? data.actions.delete_analysis_data.reason : "requires_owner_admin"}
               tone="danger"
             />
           )}

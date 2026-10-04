@@ -14,21 +14,22 @@ import { FilterPopover } from "./FilterPopover";
 const WEEKDAYS = ["lu", "ma", "mi", "ju", "vi", "sá", "do"];
 
 type Props = {
+  timezone?: string;
   fromValue: string;
   toValue: string;
   onChange: (from: string, to: string) => void;
 };
 
-type Preset = { label: string; range: () => [string, string] };
+type Preset = { label: string; range: (timezone?: string) => [string, string] };
 
 const PRESETS: Preset[] = [
-  { label: "Hoy", range: () => [todayInHelpdeskTz(), todayInHelpdeskTz()] },
-  { label: "Ayer", range: () => [addDays(todayInHelpdeskTz(), -1), addDays(todayInHelpdeskTz(), -1)] },
-  { label: "Últimos 7 días", range: () => [addDays(todayInHelpdeskTz(), -6), todayInHelpdeskTz()] },
-  { label: "Últimos 30 días", range: () => [addDays(todayInHelpdeskTz(), -29), todayInHelpdeskTz()] },
+  { label: "Hoy", range: (tz) => [todayInHelpdeskTz(tz), todayInHelpdeskTz(tz)] },
+  { label: "Ayer", range: (tz) => [addDays(todayInHelpdeskTz(tz), -1), addDays(todayInHelpdeskTz(tz), -1)] },
+  { label: "Últimos 7 días", range: (tz) => [addDays(todayInHelpdeskTz(tz), -6), todayInHelpdeskTz(tz)] },
+  { label: "Últimos 30 días", range: (tz) => [addDays(todayInHelpdeskTz(tz), -29), todayInHelpdeskTz(tz)] },
 ];
 
-export function DateRangePopover({ fromValue, toValue, onChange }: Props) {
+export function DateRangePopover({ fromValue, toValue, onChange, timezone }: Props) {
   // `view` sigue al inicio del rango salvo que el usuario navegue meses (override).
   const [viewOverride, setViewOverride] = useState<{ year: number; month: number } | null>(null);
   // `anchor` marca el primer clic mientras se elige un rango nuevo.
@@ -38,7 +39,7 @@ export function DateRangePopover({ fromValue, toValue, onChange }: Props) {
   const base = parseYmd(fromValue);
   const view = viewOverride ?? { year: base.year, month: base.month };
   const cells = buildMonthGrid(view.year, view.month);
-  const today = todayInHelpdeskTz();
+  const today = todayInHelpdeskTz(timezone);
 
   function shiftMonth(delta: number) {
     const next = new Date(view.year, view.month - 1 + delta, 1);
@@ -59,7 +60,7 @@ export function DateRangePopover({ fromValue, toValue, onChange }: Props) {
   }
 
   function applyPreset(preset: Preset) {
-    const [from, to] = preset.range();
+    const [from, to] = preset.range(timezone);
     onChange(from, to);
     setAnchor(null);
     setHover(null);

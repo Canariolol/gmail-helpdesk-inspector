@@ -10,7 +10,7 @@ export function ClassificationBarChart({ metrics }: Props) {
   const data = [
     { name: "Válidas", value: metrics.valid_requests, color: chartColors.valid },
     { name: "Respondidas", value: metrics.answered, color: chartColors.answered },
-    { name: "Sin respuesta", value: metrics.unanswered, color: chartColors.unanswered },
+    { name: "Sin respuesta registrada", value: metrics.unanswered, color: chartColors.unanswered },
     { name: "Ignoradas", value: metrics.ignored, color: chartColors.ignored },
     { name: "Ambiguas", value: metrics.ambiguous, color: chartColors.ambiguous },
   ];

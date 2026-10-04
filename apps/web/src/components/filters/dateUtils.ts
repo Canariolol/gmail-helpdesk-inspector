@@ -2,12 +2,10 @@
 // Trabaja con cadenas "YYYY-MM-DD" y fechas-calendario (sin instantes UTC) para
 // evitar corrimientos de día por zona horaria.
 
-const HELPDESK_TZ = "America/Santiago";
-
 // Fecha de hoy en la zona del helpdesk, formato YYYY-MM-DD.
-export function todayInHelpdeskTz(): string {
+export function todayInHelpdeskTz(timezone = Intl.DateTimeFormat().resolvedOptions().timeZone): string {
   return new Intl.DateTimeFormat("en-CA", {
-    timeZone: HELPDESK_TZ,
+    timeZone: timezone,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",

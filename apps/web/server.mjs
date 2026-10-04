@@ -1,5 +1,5 @@
 import { createReadStream, existsSync, statSync } from "node:fs";
-import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { extname, join, normalize } from "node:path";
 import { createServer } from "node:http";
 
@@ -40,11 +40,20 @@ const contentTypes = {
   ".webp": "image/webp",
 };
 
-createServer(async (request, response) => {
+const server = createServer(async (request, response) => {
   for (const [name, value] of Object.entries(securityHeaders)) response.setHeader(name, value);
 
-  const requestUrl = new URL(request.url ?? "/", "http://localhost");
-  const rawPath = decodeURIComponent(requestUrl.pathname);
+  let requestUrl;
+  let rawPath;
+  try {
+    requestUrl = new URL(request.url ?? "/", "http://localhost");
+    rawPath = decodeURIComponent(requestUrl.pathname);
+    if (rawPath.includes("\0")) throw new URIError("invalid path");
+  } catch {
+    response.writeHead(400, { "Content-Type": "text/plain; charset=utf-8" });
+    response.end("La URL solicitada no es válida.");
+    return;
+  }
   if (apiProxyTarget && apiPrefixes.some((prefix) => rawPath === prefix || rawPath.startsWith(`${prefix}/`))) {
     await proxyApiRequest(request, response, requestUrl);
     return;
@@ -61,7 +70,11 @@ createServer(async (request, response) => {
     "Cache-Control",
     filePath === requestedPath && rawPath.startsWith("/assets/") ? "public, max-age=31536000, immutable" : "no-cache",
   );
-  createReadStream(filePath).pipe(response);
+  try {
+    await pipeline(createReadStream(filePath), response);
+  } catch {
+    response.destroy();
+  }
 }).listen(port, "0.0.0.0", () => {
   console.log(JSON.stringify({
     severity: "INFO",
@@ -69,7 +82,7 @@ createServer(async (request, response) => {
     service: "web",
     environment: appEnv,
     operation: "startup",
-    port,
+    port: server.address().port,
   }));
 });
 
@@ -93,6 +106,7 @@ async function proxyApiRequest(request, response, requestUrl) {
       body: request.method === "GET" || request.method === "HEAD" ? undefined : request,
       redirect: "manual",
       duplex: "half",
+      signal: AbortSignal.timeout(requestUrl.pathname.endsWith("/events") ? 35 * 60 * 1000 : 60 * 1000),
     });
 
     response.statusCode = upstream.status;
@@ -112,7 +126,7 @@ async function proxyApiRequest(request, response, requestUrl) {
     response.setHeader("Cache-Control", "no-store");
 
     if (upstream.body) {
-      Readable.fromWeb(upstream.body).pipe(response);
+      await pipeline(upstream.body, response);
     } else {
       response.end();
     }
@@ -126,6 +140,10 @@ async function proxyApiRequest(request, response, requestUrl) {
       status: 502,
       error_code: "api_proxy_failed",
     }));
+    if (response.headersSent || response.destroyed) {
+      response.destroy();
+      return;
+    }
     response.writeHead(502, { "Content-Type": "application/json; charset=utf-8" });
     response.end(JSON.stringify({ error: "No se pudo conectar con la API." }));
   }

@@ -52,7 +52,7 @@ impl BillingInterval {
         }
     }
 
-    fn period_end(&self, start: DateTime<Utc>) -> DateTime<Utc> {
+    pub fn period_end(&self, start: DateTime<Utc>) -> DateTime<Utc> {
         start
             .checked_add_months(Months::new(match self {
                 Self::Monthly => 1,
@@ -110,6 +110,18 @@ pub struct BillingPlan {
     pub trial_days: u32,
     pub limits: PlanLimits,
     pub highlighted: bool,
+}
+
+impl BillingPlan {
+    pub fn amount_for(&self, interval: &BillingInterval) -> Option<u32> {
+        if self.id == BillingPlanId::Gratis {
+            return None;
+        }
+        match interval {
+            BillingInterval::Monthly => Some(self.clp_monthly),
+            BillingInterval::Annual => self.clp_annual,
+        }
+    }
 }
 
 /// Centinela para "sin tope de hilos en el reporte por análisis" (planes de pago).
@@ -276,8 +288,8 @@ pub fn public_plans() -> Vec<BillingPlan> {
             trial_days: 30,
             highlighted: true,
             limits: PlanLimits {
-                mailboxes: 3,
-                members: 3,
+                mailboxes: 1,
+                members: 1,
                 runs_per_month: 120,
                 retrieved_threads_per_month: 15_000,
                 reported_threads_per_run: UNLIMITED_REPORTED_PER_RUN,
@@ -328,16 +340,13 @@ pub fn subscription_allows_access(subscription: Option<&Subscription>, now: Date
     let Some(subscription) = subscription else {
         return false;
     };
+    let paid = subscription.current_period_end.is_some_and(|end| end > now);
+    let trial = subscription.trial_ends_at.is_some_and(|end| end > now);
     match subscription.status {
-        SubscriptionStatus::Active => {
-            if subscription.cancel_at_period_end {
-                // Cancelación agendada: acceso solo hasta que termina el período pagado.
-                subscription.current_period_end.is_none_or(|end| end > now)
-            } else {
-                true
-            }
-        }
-        SubscriptionStatus::Trialing => subscription.trial_ends_at.is_none_or(|ends| ends > now),
+        SubscriptionStatus::Active
+        | SubscriptionStatus::PastDue
+        | SubscriptionStatus::Cancelled => paid || trial,
+        SubscriptionStatus::Trialing => trial || paid,
         _ => false,
     }
 }
@@ -361,8 +370,10 @@ pub fn active_subscription_for_trial(
         },
         provider: "mercadopago".to_string(),
         provider_subscription_id,
-        current_period_start: Some(now),
-        current_period_end: Some(billing_interval.period_end(now)),
+        // Autorizar una tarjeta no confirma un cobro. Las facturas aprobadas
+        // establecen el período adquirido durante la reconciliación.
+        current_period_start: None,
+        current_period_end: None,
         trial_ends_at: (plan.trial_days > 0)
             .then_some(now + Duration::days(plan.trial_days as i64)),
         cancel_at_period_end: false,
@@ -423,6 +434,8 @@ mod tests {
     fn expired_trial_blocks_access() {
         let now = Utc::now();
         let mut sub = subscription(SubscriptionStatus::Trialing, now);
+        sub.current_period_start = None;
+        sub.current_period_end = None;
         sub.trial_ends_at = Some(now - Duration::minutes(1));
         assert!(!subscription_allows_access(Some(&sub), now));
     }
@@ -513,28 +526,46 @@ mod tests {
     #[test]
     fn billing_periods_follow_calendar_months() {
         let now = "2027-03-01T00:00:00Z".parse().unwrap();
-        let sub = active_subscription_for_trial(
+        assert_eq!(
+            BillingInterval::Annual.period_end(now),
+            "2028-03-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap()
+        );
+        assert_eq!(
+            BillingInterval::Monthly.period_end(now),
+            "2027-04-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap()
+        );
+    }
+
+    #[test]
+    fn authorization_does_not_grant_a_paid_period_and_missing_expiry_fails_closed() {
+        let now = Utc::now();
+        let mut sub = active_subscription_for_trial(
             "org-1".to_string(),
             BillingPlanId::Inicial,
             None,
             BillingInterval::Annual,
             now,
         );
-        assert_eq!(
-            sub.current_period_end.unwrap(),
-            "2028-03-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap()
-        );
+        assert!(sub.current_period_end.is_none());
+        sub.status = SubscriptionStatus::Active;
+        assert!(!subscription_allows_access(Some(&sub), now));
+        sub.status = SubscriptionStatus::Trialing;
+        assert!(!subscription_allows_access(Some(&sub), now));
+    }
 
-        let monthly = active_subscription_for_trial(
-            "org-1".to_string(),
-            BillingPlanId::Inicial,
-            None,
-            BillingInterval::Monthly,
-            now,
-        );
+    #[test]
+    fn failed_renewal_and_provider_cancellation_keep_only_the_acquired_period() {
+        let now = Utc::now();
+        for status in [SubscriptionStatus::PastDue, SubscriptionStatus::Cancelled] {
+            let mut sub = subscription(status, now);
+            assert!(subscription_allows_access(Some(&sub), now));
+            sub.current_period_end = Some(now);
+            assert!(!subscription_allows_access(Some(&sub), now));
+        }
         assert_eq!(
-            monthly.current_period_end.unwrap(),
-            "2027-04-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap()
+            plan_by_id(&BillingPlanId::Pro).amount_for(&BillingInterval::Annual),
+            Some(299_900)
         );
+        assert_eq!(free_plan().amount_for(&BillingInterval::Monthly), None);
     }
 }

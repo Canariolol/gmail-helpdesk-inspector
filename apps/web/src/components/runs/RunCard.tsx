@@ -20,10 +20,10 @@ export function RunCard({ run, isActive, onSelect }: Props) {
         <RunStatusChip status={run.status} />
       </div>
       <div className="run-card-meta">
-        <span>Creado: {formatDateTime(run.created_at)}</span>
+        <span>Creado: {formatDateTime(run.created_at, run.config.timezone)}</span>
         <span>
           {run.metrics.total_threads} hilos · {run.metrics.valid_requests} válidas · {run.metrics.answered} respondidas ·
-          clasificación automática {formatPercent(run.metrics.report_confidence)}
+          sin revisión pendiente {formatPercent(run.metrics.report_confidence)}
         </span>
       </div>
     </button>

@@ -2,10 +2,9 @@ import { Building2 } from "lucide-react";
 import { CONTACTO } from "../landing/pages/legalContent";
 
 const SCOPE_ITEMS = [
-  "Cuatro o más casillas, con usuarios y permisos a medida",
-  "Gmail y Microsoft 365 en la misma organización",
-  "Retención configurable y objetivos de SLA",
-  "SSO, registros administrativos e integraciones (API, webhooks, BI)",
+  "El producto actual admite una casilla y una cuenta propietaria por organización",
+  "Podemos evaluar mayor volumen o requisitos de operación",
+  "Casillas adicionales, usuarios e integraciones requieren un acuerdo y desarrollo previo",
 ];
 
 /**
@@ -25,8 +24,8 @@ export function EnterpriseContactCard() {
         <h3>Empresa</h3>
         <p>
           Para organizaciones con una operación más grande o requisitos particulares. Definimos
-          casillas, volumen, integraciones, retención y soporte según tus necesidades — sujeto a
-          evaluación, no viene con un precio fijo.
+          el alcance según tus necesidades, sujeto a evaluación y acuerdo. Las funcionalidades
+          adicionales no están incluidas en los planes actuales.
         </p>
         <ul>
           {SCOPE_ITEMS.map((item) => (

@@ -33,7 +33,7 @@ export function ReportTrendCharts({ points }: Props) {
             <Legend />
             <Line type="monotone" dataKey="avgFirstResponse" name="T. medio respuesta (min)" stroke={chartColors.avgResponse} strokeWidth={2.5} connectNulls dot={{ r: 4 }} />
             <Line type="monotone" dataKey="p90FirstResponse" name="P90 respuesta (min)" stroke={chartColors.p90Response} strokeWidth={2.5} connectNulls dot={{ r: 4 }} />
-            <Line type="monotone" dataKey="avgResolution" name="Cierre medio (min)" stroke={chartColors.resolution} strokeWidth={2.5} connectNulls dot={{ r: 4 }} />
+            <Line type="monotone" dataKey="avgResolution" name="Hasta último envío (min)" stroke={chartColors.resolution} strokeWidth={2.5} connectNulls dot={{ r: 4 }} />
           </LineChart>
         </ResponsiveContainer>
         <p className="muted-note">El P90 no es agregable matemáticamente entre análisis; se muestra por análisis.</p>
@@ -48,7 +48,7 @@ export function ReportTrendCharts({ points }: Props) {
             <Tooltip />
             <Legend />
             <Bar dataKey="answered" name="Respondidas" stackId="composition" fill={chartColors.answered} maxBarSize={42} />
-            <Bar dataKey="unanswered" name="Sin respuesta" stackId="composition" fill={chartColors.unanswered} maxBarSize={42} />
+            <Bar dataKey="unanswered" name="Sin respuesta registrada" stackId="composition" fill={chartColors.unanswered} maxBarSize={42} />
             <Bar dataKey="ignored" name="Ignoradas" stackId="composition" fill={chartColors.ignored} maxBarSize={42} />
             <Bar dataKey="ambiguous" name="Ambiguas" stackId="composition" fill={chartColors.ambiguous} radius={[6, 6, 0, 0]} maxBarSize={42} />
           </BarChart>

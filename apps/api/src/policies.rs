@@ -4,13 +4,14 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::analysis::RequestScope;
 use crate::mailbox::MailboxMetadata;
 
 pub const GMAIL_READONLY_SCOPE: &str = "https://www.googleapis.com/auth/gmail.readonly";
 pub const POLICY_SCHEMA_VERSION: u32 = 2;
 pub const DEFAULT_AUTO_APPLY_THRESHOLD: f64 = 0.85;
 const LEGACY_AUTO_APPLY_THRESHOLD: f64 = 0.92;
-const DEFAULT_PROMPT_VERSION: &str = "helpdesk-auditor-v2";
+const DEFAULT_PROMPT_VERSION: &str = "helpdesk-auditor-v3";
 const LEGACY_PROMPT_VERSION: &str = "helpdesk-auditor-v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,6 +132,8 @@ pub struct AnalysisPolicy {
     pub timezone: String,
     pub internal_domains: Vec<String>,
     pub responder_emails: Vec<String>,
+    #[serde(default)]
+    pub request_scope: RequestScope,
     pub mailbox_aliases: Vec<String>,
     pub valid_request_criteria: Vec<String>,
     pub non_responsibility_rules: Vec<String>,
@@ -187,6 +190,9 @@ pub struct ScheduleReportPolicy {
     pub timezone: String,
     #[serde(default = "default_analysis_time")]
     pub analysis_time: String,
+    /// Días ISO: lunes=1, domingo=7.
+    #[serde(default = "default_days_of_week")]
+    pub days_of_week: Vec<u8>,
     pub report_recipients: Vec<String>,
     pub report_content: ReportContentPolicy,
     pub failure_notice_enabled: bool,
@@ -205,6 +211,39 @@ fn default_true() -> bool {
 
 fn default_analysis_time() -> String {
     "08:00".to_string()
+}
+
+pub fn default_days_of_week() -> Vec<u8> {
+    vec![1, 2, 3, 4, 5]
+}
+
+pub fn is_public_mail_domain(domain: &str) -> bool {
+    matches!(
+        domain
+            .trim()
+            .trim_start_matches('@')
+            .to_lowercase()
+            .as_str(),
+        "gmail.com"
+            | "googlemail.com"
+            | "outlook.com"
+            | "hotmail.com"
+            | "hotmail.cl"
+            | "hotmail.es"
+            | "live.com"
+            | "live.cl"
+            | "live.es"
+            | "msn.com"
+            | "yahoo.com"
+            | "yahoo.cl"
+            | "yahoo.es"
+            | "icloud.com"
+            | "me.com"
+            | "aol.com"
+            | "proton.me"
+            | "protonmail.com"
+            | "fastmail.com"
+    )
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -280,6 +319,31 @@ impl OrgConfigBundle {
     }
 }
 
+pub fn responders_for_mailbox(policy: &AnalysisPolicy, mailbox_email: &str) -> Vec<String> {
+    let mut responders = policy
+        .responder_emails
+        .iter()
+        .chain(&policy.mailbox_aliases)
+        .cloned()
+        .collect::<Vec<_>>();
+    if responders.is_empty()
+        && policy.request_scope == RequestScope::External
+        && policy
+            .internal_domains
+            .iter()
+            .any(|domain| !is_public_mail_domain(domain))
+    {
+        return responders;
+    }
+    if !responders
+        .iter()
+        .any(|email| email.eq_ignore_ascii_case(mailbox_email))
+    {
+        responders.push(mailbox_email.to_string());
+    }
+    responders
+}
+
 pub fn provision_default_config(user_email: &str, now: DateTime<Utc>) -> OrgConfigBundle {
     let domain = email_domain(user_email).unwrap_or_else(|| "example.com".to_string());
     let org_id = Uuid::new_v4().to_string();
@@ -319,8 +383,13 @@ pub fn provision_default_config(user_email: &str, now: DateTime<Utc>) -> OrgConf
         mailbox_aliases_configured: false,
         analysis_policy: AnalysisPolicy {
             timezone: org.default_timezone.clone(),
-            internal_domains: vec![domain],
+            internal_domains: if is_public_mail_domain(&domain) {
+                vec![]
+            } else {
+                vec![domain]
+            },
             responder_emails: vec![],
+            request_scope: RequestScope::External,
             mailbox_aliases: vec![],
             valid_request_criteria: vec![],
             non_responsibility_rules: vec![],
@@ -337,14 +406,14 @@ pub fn provision_default_config(user_email: &str, now: DateTime<Utc>) -> OrgConf
             default_time_to: "23:59".to_string(),
             max_threads_per_run: 50,
         },
-        // Modelo opt-out: las orgs nuevas nacen con IA activa (consentimiento sellado al
-        // provisionar). El usuario puede desactivarla proactivamente en Configuración.
-        ai_policy: default_ai_policy(true, Some(now)),
+        // El consentimiento solo se registra cuando una persona habilita la IA.
+        ai_policy: default_ai_policy(false, None),
         schedule_report_policy: ScheduleReportPolicy {
             scheduler_enabled: false,
             preset: SchedulePreset::Weekdays08Local,
             timezone: org.default_timezone.clone(),
             analysis_time: default_analysis_time(),
+            days_of_week: default_days_of_week(),
             report_recipients: vec![],
             report_content: ReportContentPolicy {
                 mode: ReportMode::MetricsOnly,
@@ -407,7 +476,15 @@ pub fn policy_version_from_draft(
 
 pub fn setup_state(draft: &PolicyDraft) -> SetupState {
     let mut missing = Vec::new();
-    if draft.analysis_policy.internal_domains.is_empty() {
+    if draft.analysis_policy.responder_emails.is_empty()
+        && (draft.analysis_policy.internal_domains.is_empty()
+            || draft.analysis_policy.request_scope != RequestScope::External)
+    {
+        missing.push("responder_emails".to_string());
+    }
+    if draft.analysis_policy.request_scope == RequestScope::Internal
+        && draft.analysis_policy.internal_domains.is_empty()
+    {
         missing.push("internal_domains".to_string());
     }
     if draft.analysis_policy.valid_request_criteria.is_empty() {
@@ -495,19 +572,12 @@ fn default_ai_policy(enabled: bool, consent_granted_at: Option<DateTime<Utc>>) -
     }
 }
 
-/// Aplica el default "IA activa" (opt-out) a una política existente. Idempotente:
-/// corre una sola vez por org (marca `ai_defaults_applied`). Enciende la IA solo si
-/// estaba apagada y no había sido migrada; tras esto, un opt-out posterior del usuario
-/// persiste porque el flag ya quedó en true. Devuelve `true` si cambió algo (para persistir).
-pub fn apply_ai_defaults_migration(ai: &mut AiPolicy, now: DateTime<Utc>) -> bool {
+/// Marca la migración sin cambiar la elección previa ni inventar consentimiento.
+pub fn apply_ai_defaults_migration(ai: &mut AiPolicy, _now: DateTime<Utc>) -> bool {
     if ai.ai_defaults_applied {
         return false;
     }
     ai.ai_defaults_applied = true;
-    if !ai.enabled {
-        ai.enabled = true;
-        ai.consent_granted_at = ai.consent_granted_at.or(Some(now));
-    }
     true
 }
 
@@ -522,7 +592,7 @@ pub fn apply_ai_threshold_migration(ai: &mut AiPolicy) -> bool {
 }
 
 pub fn apply_ai_prompt_version_migration(ai: &mut AiPolicy) -> bool {
-    if ai.prompt_version != LEGACY_PROMPT_VERSION {
+    if ai.prompt_version != LEGACY_PROMPT_VERSION && ai.prompt_version != "helpdesk-auditor-v2" {
         return false;
     }
     ai.prompt_version = DEFAULT_PROMPT_VERSION.to_string();
@@ -549,10 +619,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn new_orgs_default_to_ai_enabled() {
+    fn corporate_external_mode_preserves_domain_responders_until_accounts_are_defined() {
+        let mut bundle = provision_default_config("support@company.test", Utc::now());
+        let policy = &mut bundle.draft.analysis_policy;
+        assert!(responders_for_mailbox(policy, "support@company.test").is_empty());
+        policy.responder_emails = vec!["agent@company.test".to_string()];
+        assert_eq!(
+            responders_for_mailbox(policy, "support@company.test"),
+            vec!["agent@company.test", "support@company.test"]
+        );
+        policy.responder_emails.clear();
+        policy.mailbox_aliases.push("desk@company.test".to_string());
+        assert_eq!(
+            responders_for_mailbox(policy, "support@company.test"),
+            vec!["desk@company.test", "support@company.test"]
+        );
+    }
+
+    #[test]
+    fn internal_and_public_mailboxes_use_exact_responder_accounts() {
+        let mut corporate = provision_default_config("support@company.test", Utc::now());
+        for scope in [RequestScope::Internal, RequestScope::All] {
+            corporate.draft.analysis_policy.request_scope = scope;
+            assert_eq!(
+                responders_for_mailbox(&corporate.draft.analysis_policy, "support@company.test"),
+                vec!["support@company.test"]
+            );
+        }
+        let personal = provision_default_config("support@gmail.com", Utc::now());
+        assert_eq!(
+            responders_for_mailbox(&personal.draft.analysis_policy, "support@gmail.com"),
+            vec!["support@gmail.com"]
+        );
+    }
+
+    #[test]
+    fn new_orgs_require_explicit_ai_consent() {
         let bundle = provision_default_config("agente@cliente.cl", Utc::now());
-        assert!(bundle.draft.ai_policy.enabled);
-        assert!(bundle.draft.ai_policy.consent_granted_at.is_some());
+        assert!(!bundle.draft.ai_policy.enabled);
+        assert!(bundle.draft.ai_policy.consent_granted_at.is_none());
         assert!(bundle.draft.ai_policy.ai_defaults_applied);
         assert_eq!(
             bundle.draft.ai_policy.auto_apply_threshold,
@@ -594,25 +699,34 @@ mod tests {
     }
 
     #[test]
-    fn ai_defaults_migration_enables_legacy_off_orgs_once_and_respects_opt_out() {
+    fn ai_defaults_migration_preserves_disabled_and_enabled_choices() {
         let now = Utc::now();
-        // Org previa al cambio: IA apagada y sin el flag de migración.
-        let mut ai = default_ai_policy(false, None);
-        ai.ai_defaults_applied = false;
+        let mut disabled = default_ai_policy(false, None);
+        disabled.ai_defaults_applied = false;
+        assert!(apply_ai_defaults_migration(&mut disabled, now));
+        assert!(!disabled.enabled);
+        assert!(disabled.consent_granted_at.is_none());
+        assert!(!apply_ai_defaults_migration(&mut disabled, now));
 
-        // Primera carga: la migración la enciende y sella el consentimiento.
-        assert!(apply_ai_defaults_migration(&mut ai, now));
-        assert!(ai.enabled);
-        assert!(ai.consent_granted_at.is_some());
-        assert!(ai.ai_defaults_applied);
+        let mut enabled = default_ai_policy(true, Some(now));
+        enabled.ai_defaults_applied = false;
+        assert!(apply_ai_defaults_migration(&mut enabled, now));
+        assert!(enabled.enabled);
+        assert_eq!(enabled.consent_granted_at, Some(now));
+    }
 
-        // El usuario decide desactivarla proactivamente (opt-out).
-        ai.enabled = false;
-        ai.consent_granted_at = None;
-
-        // Cargas posteriores NO la vuelven a encender: el opt-out persiste.
-        assert!(!apply_ai_defaults_migration(&mut ai, now));
-        assert!(!ai.enabled);
+    #[test]
+    fn public_mail_domains_do_not_become_organization_membership() {
+        let mut bundle = provision_default_config("support@gmail.com", Utc::now());
+        assert!(bundle.draft.analysis_policy.internal_domains.is_empty());
+        assert!(
+            setup_state(&bundle.draft)
+                .missing
+                .contains(&"responder_emails".to_string())
+        );
+        bundle.draft.analysis_policy.responder_emails = vec!["support@gmail.com".to_string()];
+        bundle.draft.analysis_policy.valid_request_criteria = vec!["Support requests".to_string()];
+        assert!(setup_state(&bundle.draft).ready_for_analysis);
     }
 
     #[test]

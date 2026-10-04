@@ -1,5 +1,5 @@
 import type { EmailThread } from "../../api/types";
-import { formatDateTime, formatSource, threadReceivedAt } from "../../lib/format";
+import { useDateTimeFormat, formatSource, threadReceivedAt } from "../../lib/format";
 import { StatusBadge } from "../common/StatusBadge";
 import { ThreadFilterSelect } from "./ThreadFilterSelect";
 
@@ -14,6 +14,7 @@ type Props = {
 };
 
 export function ThreadTable(props: Props) {
+  const formatDateTime = useDateTimeFormat();
   return (
     <section className="card thread-section">
       <div className="card-toolbar">

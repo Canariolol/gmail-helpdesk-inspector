@@ -45,8 +45,8 @@ export function PlanCapBanner({ run, planName, onUpgrade }: Props) {
         {aiSkipped > 0 && (
           <span>
             {aiSkipped} {aiSkipped === 1 ? "hilo quedó" : "hilos quedaron"} sin revisar por
-            Mira: agotaste el cupo de revisiones de tu plan{planLabel} este mes. Se clasificaron
-            automáticamente, así que pueden perder precisión.
+            Mira: agotaste el cupo de revisiones de tu plan{planLabel} este mes. Quedaron pendientes
+            de confirmación manual y no cuentan como solicitudes válidas hasta que los revises.
           </span>
         )}
       </div>

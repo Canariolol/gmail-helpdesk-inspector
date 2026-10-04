@@ -42,9 +42,9 @@ export function tokenDisplayName(token: string, labels: GmailLabel[]): string {
 }
 
 export function isInboxLabel(label: GmailLabel): boolean {
-  return label.label_type !== "user" && label.id.toUpperCase() === INBOX_TOKEN;
+  return label.label_type === "inbox" || (label.label_type !== "user" && label.id.toUpperCase() === INBOX_TOKEN);
 }
 
 export function isAnalyzableLabel(label: GmailLabel): boolean {
-  return !HIDDEN_SYSTEM_LABELS.has(label.id.toUpperCase());
+  return !HIDDEN_SYSTEM_LABELS.has(label.id.toUpperCase()) && !["drafts", "junk", "trash"].includes(label.label_type ?? "");
 }

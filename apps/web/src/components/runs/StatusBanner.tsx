@@ -24,7 +24,7 @@ export function StatusBanner({ run, onStart, starting, onViewDetails }: Props) {
 
   const subtitle =
     run.status === "completed"
-      ? formatDateTime(run.completed_at)
+      ? formatDateTime(run.completed_at, run.config.timezone)
       : run.status === "failed"
         ? (run.error_message ?? run.progress_message)
         : run.progress_message;

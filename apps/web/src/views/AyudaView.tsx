@@ -19,8 +19,8 @@ export function AyudaView() {
         <h2>Cómo usar Mira</h2>
         <ol className="help-steps">
           <li>
-            <strong>Configura y analiza.</strong> En <em>Resumen</em>, define el rango de fechas y horario, los dominios
-            internos de tu empresa y lo que quieres ignorar (dominios y palabras clave). Pulsa <em>Analizar</em> para
+            <strong>Configura y analiza.</strong> En <em>Configuración</em>, define quiénes solicitan atención, las direcciones
+            del equipo y tus criterios de solicitud válida. En <em>Resumen</em>, elige fechas, horario y carpetas. Pulsa <em>Analizar</em> para
             crear e iniciar el análisis de la casilla.
           </li>
           <li>
@@ -37,8 +37,8 @@ export function AyudaView() {
             Corrige la clasificación, marca si fue respondido y guarda la revisión: las métricas se recalculan.
           </li>
           <li>
-            <strong>Genera reportes.</strong> En <em>Reportes</em> obtienes un consolidado gerencial de varios análisis en
-            un rango de tiempo: totales, promedios ponderados y tendencias.
+            <strong>Genera reportes.</strong> En <em>Reportes</em> obtienes un consolidado gerencial de varios análisis del
+            período: solicitudes sin duplicar reanálisis, tiempos y comparación de ejecuciones.
           </li>
         </ol>
       </section>
@@ -58,24 +58,25 @@ export function AyudaView() {
         <ul className="help-list plain">
           <li>
             <strong>T. medio respuesta:</strong> promedio entre la recepción del primer mensaje del cliente y la primera
-            respuesta interna.
+            respuesta humana del equipo dirigida al solicitante en Para o CC. Los intercambios entre miembros del equipo no cuentan como atención al solicitante.
           </li>
           <li><strong>P90 respuesta:</strong> el 90% de las solicitudes se respondió en este tiempo o menos.</li>
-          <li><strong>Cierre medio:</strong> promedio entre la recepción y el último envío interno del hilo.</li>
+          <li><strong>Sin respuesta registrada:</strong> Mira sólo observa los mensajes almacenados en la casilla conectada. Una respuesta guardada en la cuenta personal de un agente o enviada por otro canal puede existir sin aparecer aquí. Confirma que las respuestas de tu equipo se archiven en la casilla auditada; para buzones compartidos de Microsoft 365, tu administrador debe habilitar las copias de enviados.</li>
+          <li><strong>Hasta último envío:</strong> tiempo corrido entre la recepción y el último envío del equipo dirigido al solicitante. No confirma que la solicitud esté resuelta.</li>
           <li><strong>Pendientes de revisión:</strong> conversaciones donde Mira necesita tu confirmación; pueden tener un estado tentativo mientras esperan revisión.</li>
-          <li><strong>Clasificación automática:</strong> proporción de hilos que no están pendientes de revisión manual.</li>
+          <li><strong>Sin revisión pendiente:</strong> proporción de hilos sin revisión pendiente, incluidas las correcciones manuales. No indica la exactitud de la clasificación.</li>
         </ul>
       </section>
       <section className="card">
         <h2>Privacidad y permisos</h2>
         <PrivacyCallout />
         <ul className="help-list plain">
-          <li>El permiso sobre tu casilla es exclusivamente de solo lectura.</li>
+          <li>En Google y Microsoft solicitamos permisos de lectura del correo. Por IMAP, Mira realiza operaciones de lectura; los permisos de la credencial los define tu proveedor.</li>
           <li>Mira no envía, etiqueta, archiva, edita ni elimina correos.</li>
           <li>Los cuerpos completos se usan solo durante el análisis/auditoría y no se conservan como datos de producto.</li>
           <li>
-            Mira viene activa para mejorar la clasificación. Puedes desactivarla desde
-            <em> Configuración</em>; los casos inciertos pasarán a revisión manual y el cambio se aplicará al próximo análisis.
+            La revisión IA se habilita con tu autorización. Puedes desactivarla desde
+            <em> Configuración</em>; cada candidato que requiera evaluar tus criterios de atención pasará a revisión manual y el cambio se aplicará al próximo análisis.
           </li>
           <li>Las métricas guardan trazabilidad: puedes revisar qué hilos componen cada número.</li>
         </ul>
@@ -85,8 +86,8 @@ export function AyudaView() {
 }
 
 const classificationDescriptions: Record<Classification, string> = {
-  valid_client_request: "Solicitud real de un cliente que requiere atención del equipo.",
-  internal: "Conversación entre miembros del equipo interno.",
+  valid_client_request: "Solicitud de una persona del público configurado que requiere atención del equipo.",
+  internal: "Conversación sin solicitante, entre personas del equipo que responde.",
   automated: "Mensaje generado automáticamente (confirmaciones, avisos de sistema).",
   newsletter: "Boletines y correos de marketing.",
   spam: "Correo no deseado.",

@@ -30,7 +30,7 @@ export const PRIVACY: LegalDoc = {
     },
     {
       heading: "Acceso a la casilla (solo lectura)",
-      body: "Mira usa exclusivamente permisos de solo lectura: gmail.readonly en Gmail y Google Workspace, y Mail.Read en Outlook y Microsoft 365. No enviamos, respondemos, etiquetamos, archivamos ni eliminamos correos. Las credenciales de acceso se guardan cifradas y puedes desconectar la casilla en cualquier momento desde la aplicación; al hacerlo revocamos el acceso también ante el proveedor cuando es posible.",
+      body: "Para leer correo mediante OAuth solicitamos gmail.readonly en Google y Mail.Read en Microsoft; los buzones compartidos de Microsoft 365 también requieren Mail.Read.Shared. En conexiones IMAP, Mira realiza operaciones de lectura sobre TLS, pero los permisos de la contraseña dependen del proveedor: recomendamos una contraseña de aplicación cuando esté disponible. No enviamos, respondemos, etiquetamos, archivamos ni eliminamos correos. Las credenciales se guardan cifradas y puedes desconectar la casilla; intentamos revocar el acceso OAuth ante el proveedor cuando es posible. Una contraseña IMAP debe revocarse desde tu proveedor.",
     },
     {
       heading: "Finalidad del tratamiento",
@@ -38,19 +38,19 @@ export const PRIVACY: LegalDoc = {
     },
     {
       heading: "Auditoría con inteligencia artificial",
-      body: "La auditoría IA viene activada por defecto y la organización puede desactivarla desde Configuración; el cambio aplica al próximo análisis. Al proveedor de IA (Amazon Bedrock) se envían participantes, fecha, asunto y un texto limitado por mensaje; no se envían adjuntos, imágenes ni encabezados completos. Un mensaje corto puede caber completo dentro del límite de texto, por lo que fragmentos con información sensible podrían ser procesados.",
+      body: "La auditoría IA se habilita cuando la persona propietaria la autoriza en Configuración. Puede desactivarse y el cambio aplica al próximo análisis. Al proveedor de IA (Amazon Bedrock) se envían participantes, fecha, asunto y un texto limitado por mensaje; no se envían adjuntos, imágenes ni encabezados completos. Un mensaje corto puede caber completo dentro del límite de texto, por lo que fragmentos con información sensible podrían ser procesados.",
     },
     {
       heading: "Conservación y eliminación",
-      body: "Los datos derivados de los análisis se conservan mientras la cuenta esté activa. Hoy no existe una eliminación automática por antigüedad; puedes borrar todos tus análisis y sus datos derivados desde la aplicación con confirmación expresa, y solicitar la eliminación completa de tu cuenta escribiendo a nuestro canal de contacto, donde se procesa de forma manual verificando tu identidad.",
+      body: "Cada análisis conserva el plazo de retención vigente cuando se creó; los cambios de política aplican a los próximos análisis. Los registros anteriores sin fecha ni política de retención usan un plazo de 90 días desde su creación. Al vencer dejan de ser accesibles y el mantenimiento programado elimina sus registros cuando está habilitado en el despliegue. Puedes borrar tus análisis y solicitar la eliminación completa de tu cuenta por el canal de contacto, verificando tu identidad. Los respaldos pueden conservar copias hasta que venza el plazo establecido por su operador.",
     },
     {
       heading: "Encargados y subprocesadores",
-      body: "Tratan datos por encargo nuestro: WorkOS (autenticación y sesiones), Google (OAuth y lectura de la casilla, cuando conectas Gmail o Google Workspace), Microsoft (OAuth y lectura de la casilla, cuando conectas Outlook o Microsoft 365), Google Cloud (infraestructura de la aplicación, EE.UU.), Supabase (base de datos, EE.UU.), Amazon Web Services — Bedrock (auditoría IA) y Resend (envío de reportes por correo). Cuando se habiliten los cobros, Mercado Pago procesará los pagos; Mira no recibe ni almacena números de tarjeta.",
+      body: "Los servicios integrados incluyen WorkOS (autenticación y sesiones), Google y Microsoft (acceso OAuth al correo), el proveedor de correo configurado por IMAP, Google Cloud (infraestructura), Supabase/PostgreSQL (base de datos según el despliegue), Amazon Web Services — Bedrock (auditoría IA) y Resend (reportes por correo). Mercado Pago procesa los pagos habilitados; Mira no recibe ni almacena números de tarjeta. El operador debe mantener la lista de proveedores aplicable a su despliegue.",
     },
     {
       heading: "Transferencias internacionales",
-      body: "Los datos se alojan y procesan en servidores ubicados en Estados Unidos a través de los proveedores indicados. Al usar Mira aceptas esa transferencia, resguardada por los compromisos de seguridad de cada proveedor.",
+      body: "La ubicación de alojamiento y procesamiento depende de la configuración del despliegue y de los proveedores utilizados. El operador debe informar las regiones y las condiciones de las transferencias internacionales aplicables antes de ofrecer el servicio público.",
     },
     {
       heading: "Derechos del titular",
@@ -87,7 +87,7 @@ export const TERMS: LegalDoc = {
     },
     {
       heading: "Autorización sobre la casilla conectada",
-      body: "Quien conecta una casilla declara contar con autorización de su organización para hacerlo y para que Mira lea esos correos con permiso de solo lectura. Mira no envía ni modifica correos.",
+      body: "Quien conecta una casilla declara contar con autorización para conectarla y para que Mira lea esos correos. Mira no envía ni modifica correos. En conexiones IMAP, quien conecta la casilla es responsable de gestionar y revocar la contraseña entregada al proveedor.",
     },
     {
       heading: "Resultados de la IA y revisión humana",
@@ -136,7 +136,7 @@ export const SECURITY: LegalDoc = {
   sections: [
     {
       heading: "Permiso mínimo sobre la casilla",
-      body: "El único permiso solicitado es de lectura: gmail.readonly en Gmail y Google Workspace, Mail.Read en Outlook y Microsoft 365. Mira no puede enviar, modificar, etiquetar ni borrar correos.",
+      body: "El acceso OAuth al correo utiliza gmail.readonly en Google, Mail.Read en Microsoft y Mail.Read.Shared para sus buzones compartidos. En IMAP se usa TLS y operaciones de lectura; la contraseña puede tener permisos más amplios según el proveedor. Mira no envía, modifica, etiqueta ni borra correos.",
     },
     {
       heading: "Cifrado",
@@ -160,11 +160,11 @@ export const SECURITY: LegalDoc = {
     },
     {
       heading: "Respaldo y recuperación",
-      body: "Mantenemos respaldos de la base de datos y un procedimiento de restauración probado, además de protecciones contra borrado accidental en la infraestructura.",
+      body: "El operador del despliegue debe configurar respaldos y verificar la restauración. Sus ubicaciones y plazos de conservación dependen de esa configuración. El borrado de datos de la aplicación no elimina de inmediato las copias que puedan permanecer en respaldos.",
     },
     {
       heading: "Retención y eliminación",
-      body: "Puedes borrar todos tus análisis desde la aplicación con confirmación expresa y solicitar la eliminación completa de la cuenta por el canal de contacto. Hoy no hay eliminación automática por antigüedad y no la prometemos hasta que exista.",
+      body: "Los análisis vencidos dejan de ser accesibles y el mantenimiento programado elimina sus registros cuando está habilitado en el despliegue. Puedes borrar tus análisis desde la aplicación y solicitar la eliminación de la cuenta por el canal de contacto. Las copias en respaldos siguen el plazo de conservación definido por el operador.",
     },
     {
       heading: "Reporte de vulnerabilidades",

@@ -33,8 +33,24 @@ pub fn build_report_email(
     web_base_url: &str,
 ) -> ReportEmail {
     let window = window_label_es(&run.config.date_from, &run.config.date_to);
-    let subject = if review_items.is_empty() {
-        format!("Reporte Helpdesk · {window} · todo en orden")
+    let subject = if run.metrics.funnel.failed_threads > 0
+        || run.metrics.funnel.truncated_threads > 0
+        || run.metrics.funnel.more_beyond_retrieved
+        || run.metrics.funnel.truncated_by_plan
+    {
+        format!("Reporte Helpdesk · {window} · cobertura incompleta")
+    } else if run.metrics.pending_review > 0 {
+        format!(
+            "Reporte Helpdesk · {window} · {} hilos por revisar",
+            run.metrics.pending_review
+        )
+    } else if run.metrics.unanswered > 0 {
+        format!(
+            "Reporte Helpdesk · {window} · {} solicitudes sin respuesta registrada",
+            run.metrics.unanswered
+        )
+    } else if review_items.is_empty() {
+        format!("Reporte Helpdesk · {window} · resumen de atención")
     } else {
         format!(
             "Reporte Helpdesk · {window} · {} {} por revisar",
@@ -58,7 +74,7 @@ pub fn build_report_email(
         html: wrap_html(
             "Tu reporte del Helpdesk",
             &window,
-            "¡Buenos días! Aquí va el resumen de tu casilla, preciosura. ☕",
+            "Este informe considera las solicitudes y respuestas registradas en la casilla auditada para el período indicado.",
             &body,
         ),
     }
@@ -82,9 +98,9 @@ El análisis programado no pudo completarse:<br/><strong>{}</strong>
     ReportEmail {
         subject: format!("Reporte Helpdesk · {window} · el análisis falló"),
         html: wrap_html(
-            "Ups, hoy no pudimos",
+            "El análisis no pudo completarse",
             &window,
-            "El análisis programado tuvo un tropiezo. Te contamos qué pasó:",
+            "El análisis programado falló. Revisa la conexión y el estado operativo de la casilla.",
             &body,
         ),
     }
@@ -105,7 +121,7 @@ fn wrap_html(title: &str, window: &str, greeting: &str, body_rows: &str) -> Stri
 <tr><td style="padding:24px 28px 8px 28px;color:{TEXT};font-size:15px;line-height:1.6;">{}</td></tr>
 {body_rows}
 <tr><td style="padding:20px 28px 28px 28px;border-top:1px solid {BORDER};color:{TEXT_MUTED};font-size:12px;line-height:1.6;">
-Generado automáticamente por Gmail Helpdesk Inspector · análisis programado según la configuración de tu organización.
+Generado automáticamente por Mira Helpdesk · análisis programado según la configuración de tu organización.
 </td></tr>
 </table>
 </td></tr>
@@ -137,7 +153,7 @@ fn metrics_section(run: &AnalysisRun) -> String {
             Some((MINT_BG, MINT_FG)),
         ),
         metric_card(
-            "Sin responder",
+            "Sin respuesta registrada",
             &metrics.unanswered.to_string(),
             Some(unanswered_colors),
         ),
@@ -159,7 +175,7 @@ fn metrics_section(run: &AnalysisRun) -> String {
         ),
         metric_card("Descartados", &metrics.ignored.to_string(), None),
         metric_card(
-            "Clasificación automática",
+            "Sin revisión pendiente",
             &format!("{:.0}%", metrics.report_confidence * 100.0),
             None,
         ),
@@ -203,9 +219,16 @@ fn metric_card(label: &str, value: &str, colors: Option<(&str, &str)>) -> String
 fn findings_section(run: &AnalysisRun) -> String {
     let metrics = &run.metrics;
     let mut findings = Vec::new();
+    if metrics.funnel.failed_threads > 0
+        || metrics.funnel.truncated_threads > 0
+        || metrics.funnel.more_beyond_retrieved
+        || metrics.funnel.truncated_by_plan
+    {
+        findings.push(format!("Cobertura incompleta: {} hilos no pudieron procesarse y {} conversaciones quedaron truncadas. Las métricas describen únicamente lo recuperado; revisa los límites y avisos en la aplicación.",metrics.funnel.failed_threads,metrics.funnel.truncated_threads));
+    }
     if metrics.unanswered > 0 {
         findings.push(format!(
-            "<strong>{}</strong> {} válidas {} sin respuesta.",
+            "<strong>{}</strong> {} válidas {} sin respuesta registrada en la casilla auditada.",
             metrics.unanswered,
             plural(metrics.unanswered, "solicitud", "solicitudes"),
             plural(metrics.unanswered, "sigue", "siguen"),
@@ -226,10 +249,15 @@ fn findings_section(run: &AnalysisRun) -> String {
         ));
     }
     if findings.is_empty() {
+        let message = if metrics.valid_requests == 0 {
+            "No hay solicitudes válidas confirmadas en este informe."
+        } else {
+            "Sin pendientes entre las solicitudes válidas confirmadas de este informe."
+        };
         return format!(
             r#"<tr><td style="padding:12px 28px 4px 28px;">
 <div style="background:{MINT_BG};border:1px solid {BORDER};border-radius:12px;padding:14px 18px;color:{MINT_FG};font-size:14px;">
-Sin pendientes: todas las solicitudes válidas fueron atendidas. ✨
+{message}
 </div></td></tr>"#
         );
     }
@@ -376,6 +404,8 @@ mod tests {
                 time_to: "23:59".to_string(),
                 timezone: "America/Santiago".to_string(),
                 internal_domains: vec![],
+                responder_emails: vec![],
+                request_scope: crate::analysis::RequestScope::External,
                 ignored_senders: vec![],
                 ignored_domains: vec![],
                 ignored_keywords: vec![],
@@ -409,12 +439,39 @@ mod tests {
     }
 
     #[test]
-    fn empty_review_list_renders_all_clear_variant() {
+    fn empty_review_list_renders_neutral_summary_subject() {
         let run = run_with_metrics(AnalysisMetrics::default());
         let email = build_report_email(&run, &[], "https://app.x.cl");
-        assert!(email.subject.ends_with("todo en orden"));
-        assert!(email.html.contains("Sin pendientes"));
+        assert!(email.subject.ends_with("resumen de atención"));
+        assert!(
+            email
+                .html
+                .contains("No hay solicitudes válidas confirmadas")
+        );
         assert!(!email.html.contains("Requieren tu revisión"));
+    }
+
+    #[test]
+    fn metrics_only_report_still_announces_pending_reviews_and_unanswered_requests() {
+        let pending = run_with_metrics(AnalysisMetrics {
+            pending_review: 2,
+            ..Default::default()
+        });
+        let email = build_report_email(&pending, &[], "https://app.x.cl");
+        assert!(email.subject.ends_with("2 hilos por revisar"));
+        assert!(!email.html.contains("Sin pendientes"));
+
+        let unanswered = run_with_metrics(AnalysisMetrics {
+            unanswered: 3,
+            ..Default::default()
+        });
+        let email = build_report_email(&unanswered, &[], "https://app.x.cl");
+        assert!(
+            email
+                .subject
+                .ends_with("3 solicitudes sin respuesta registrada")
+        );
+        assert!(!email.html.contains("Sin pendientes"));
     }
 
     #[test]

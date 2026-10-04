@@ -24,6 +24,8 @@ pub struct ScheduleConfig {
     pub timezone: String,
     #[serde(default = "default_analysis_time")]
     pub analysis_time: String,
+    #[serde(default = "default_days_of_week")]
+    pub days_of_week: Vec<u8>,
     #[serde(default)]
     pub gmail_max_threads: Option<u32>,
     pub updated_at: DateTime<Utc>,
@@ -54,6 +56,10 @@ pub struct ScheduleState {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_days_of_week() -> Vec<u8> {
+    vec![1, 2, 3, 4, 5]
 }
 
 fn default_timezone() -> String {

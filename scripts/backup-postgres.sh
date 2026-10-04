@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 # Respaldo manual de la base PostgreSQL de Mira (Supabase, schemas `mira` y `billing`).
 #
@@ -23,10 +24,16 @@ set -euo pipefail
 DEST="${1:-backups/postgres}"
 KEEP="${BACKUP_KEEP:-14}"
 : "${POSTGRES_DATABASE_URL:?POSTGRES_DATABASE_URL es obligatoria (no se lee de .env a propósito)}"
+if [[ ! "$KEEP" =~ ^[1-9][0-9]{0,4}$ ]]; then
+  echo "BACKUP_KEEP debe ser un entero entre 1 y 99999." >&2
+  exit 1
+fi
 
-mkdir -p "$DEST"
+mkdir -p -- "$DEST"
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
-file="$DEST/mira-$stamp.dump"
+partial="$(mktemp "$DEST/mira-$stamp-XXXXXX.partial")"
+trap 'rm -f -- "$partial"' EXIT
+file="${partial%.partial}.dump"
 
 # Formato custom: permite verificar con pg_restore --list y restaurar tablas
 # sueltas. --no-owner/--no-acl para restaurar en cualquier rol destino.
@@ -36,25 +43,34 @@ pg_dump "$POSTGRES_DATABASE_URL" \
   --format=custom \
   --no-owner \
   --no-acl \
-  --file "$file"
+  --file "$partial"
 
 # Verificación de integridad: un dump truncado o corrupto no pasa el listado.
-pg_restore --list "$file" >/dev/null
+dump_listing="$(pg_restore --list "$partial")"
 
 # Antes de 0002, `billing` todavía no existe: ese respaldo sigue siendo válido.
 tables=("mira records" "mira schema_migrations")
-if pg_restore --list "$file" | grep -q "SCHEMA - billing"; then
+if grep -q "SCHEMA - billing" <<< "$dump_listing"; then
   tables+=("billing plans" "billing subscriptions" "billing checkout_sessions" "billing usage_ledger" "billing quota_alerts")
 fi
 for table in "${tables[@]}"; do
-  if ! pg_restore --list "$file" | grep -q "TABLE DATA $table"; then
+  if ! grep -q "TABLE DATA $table" <<< "$dump_listing"; then
     echo "ERROR: el dump no contiene ${table/ /.}" >&2
     exit 1
   fi
 done
+mv -- "$partial" "$file"
 
-# Rotación: conserva los KEEP más recientes.
-ls -1t "$DEST"/mira-*.dump 2>/dev/null | tail -n +"$((KEEP + 1))" | xargs -r rm --
+# Rotación: sólo después de un respaldo verificado, con nombres seguros incluso
+# si el directorio contiene espacios. Los archivos incompletos no cuentan.
+mapfile -d '' -t backups < <(
+  find "$DEST" -maxdepth 1 -type f -name 'mira-*.dump' -printf '%T@ %p\0' |
+    sort -zr | cut -z -d' ' -f2-
+)
+if (( ${#backups[@]} > KEEP )); then
+  rm -- "${backups[@]:KEEP}"
+fi
 
-count="$(ls -1 "$DEST"/mira-*.dump | wc -l)"
+count="${#backups[@]}"
+if (( count > KEEP )); then count="$KEEP"; fi
 echo "OK: $file ($(du -h "$file" | cut -f1)); $count respaldo(s) conservado(s) en $DEST"

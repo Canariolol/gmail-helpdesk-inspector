@@ -122,7 +122,7 @@ function DemoDetail({ thread }: { thread: DemoThread }) {
         </span>
         <span>
           <strong>1ª respuesta</strong>
-          {thread.firstReply ?? "Sin respuesta aún"}
+          {thread.firstReply ?? "Sin respuesta registrada"}
         </span>
         <span>
           <strong>Último envío</strong>

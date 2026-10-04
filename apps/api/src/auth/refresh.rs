@@ -34,8 +34,8 @@ pub async fn refresh_google_access_token(
     .await
 }
 
-/// Microsoft **rota** el refresh token en cada uso: la respuesta trae uno nuevo
-/// y el anterior deja de servir. Quien llame debe persistir el rotado.
+/// Microsoft entrega un refresh token nuevo. Se persiste el más reciente;
+/// emitirlo no revoca automáticamente el anterior. Se conserva el grant inicial.
 pub async fn refresh_microsoft_access_token(
     http: &reqwest::Client,
     microsoft: &MicrosoftConfig,
@@ -53,7 +53,6 @@ pub async fn refresh_microsoft_access_token(
             ("client_secret", microsoft.client_secret.as_str()),
             ("refresh_token", refresh_token),
             ("grant_type", "refresh_token"),
-            ("scope", super::MICROSOFT_MAIL_SCOPE),
         ],
     )
     .await
@@ -78,6 +77,9 @@ pub async fn refresh_access_token_for(
             })?;
             refresh_microsoft_access_token(http, microsoft, refresh_token).await
         }
+        MailboxProviderKind::Imap => Err(RefreshError::Other(anyhow!(
+            "IMAP uses an application password, not OAuth refresh"
+        ))),
     }
 }
 

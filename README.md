@@ -10,11 +10,11 @@ This builds and starts the local web, API, and AI worker with Docker Compose.
 Open `http://127.0.0.1:5173` when the services are ready.
 Docker publishes local ports on loopback only.
 
-Open-source MVP for auditing a Gmail inbox used as a lightweight help desk.
+Mailbox analysis for independent tenants using Gmail/Workspace, Outlook/Hotmail/Microsoft 365, or external IMAP providers. Each tenant currently has one account and one connected mailbox.
 
-The app reads Gmail with the minimum readonly scope, classifies support-like
-threads, calculates auditable response metrics, and uses an AI auditor through
-Amazon Bedrock by default. Each organization can disable it from Configuration.
+The app reads messages, classifies requests using the tenant policy, and calculates auditable response metrics. AI through Amazon Bedrock starts disabled and requires explicit consent. Without AI, semantic candidates require manual confirmation.
+
+Implementation, deployment checks and remaining external validation: [SaaS readiness, October 2026](docs/saas-readiness-2026-10.md). Provider setup: [Microsoft and IMAP runbook](docs/runbook-azure-ad-microsoft.md).
 
 ## Stack
 
@@ -133,22 +133,19 @@ organization, an owner membership, one mailbox record, a mutable policy draft
 and an immutable policy version.
 Analysis runs created from policy store a snapshot with org/mailbox ids, policy
 version/hash, Gmail scope snapshot, retention expiry and data minimization mode.
-Legacy per-run filters are still accepted for local/backward compatibility.
+New runs always use the current organization policy. Legacy requests cannot bypass organization, consent or quota checks.
 
 Key defaults for the initial release:
 
-- One Gmail mailbox per organization for now.
-- WorkOS AuthKit is the account login layer; Gmail OAuth is only the mailbox
-  connection layer.
-- Billing is enforced before Gmail connection, manual analysis, and scheduled
-  analysis when `BILLING_ENFORCEMENT_ENABLED=true`.
+- One connected mailbox and one account per organization; all plans reflect that supported capacity.
+- WorkOS AuthKit is the account login layer; Google/Microsoft OAuth and IMAP credentials belong to a separate mailbox connection.
+- With `BILLING_ENFORCEMENT_ENABLED=true`, Free/paid plan quotas are reserved atomically. Scheduled analysis requires a valid paid/trial entitlement. Workspace permissions apply independently of billing.
 - Plans charge in CLP through Mercado Pago. USD prices are reference copy only.
 - `Pro` is the only plan with a 30-day trial.
-- AI auditing is on by default and can be disabled at any time from
-  Configuration. Re-enabling it requires explicit confirmation.
-- Retention defaults to 30 days and is stored per run as `retention_expires_at`.
+- AI starts disabled. Enabling or re-enabling requires explicit confirmation; disabling it prevents later batches from being submitted.
+- Retention defaults to 30 days, stored per run. Historical runs without an expiry use their policy retention or a 90-day fallback. Expired runs are inaccessible and removed by maintenance.
 - Scheduled reports default to metrics-only content.
-- Gmail remains `gmail.readonly`; reports are sent via Resend, never via Gmail.
+- Google/Microsoft use read scopes. IMAP uses `EXAMINE`/`BODY.PEEK` over verified TLS; its credentials may grant broader provider permissions. Reports are sent via Resend.
 
 Useful authenticated endpoints:
 
@@ -162,6 +159,10 @@ Useful authenticated endpoints:
 | `POST /gmail/disconnect` | Revoke the Gmail connection and clear its stored credentials |
 | `GET /me/org/config` | Read/provision organization policy config |
 | `PUT /me/org/config` | Patch policy draft and create a new policy version when it changes |
+| `GET /me/report?date_from=YYYY-MM-DD&date_to=YYYY-MM-DD` | Consolidated report with deduplication and tenant-local date filtering |
+| `POST /mailbox/connect/imap` | Validate and connect a public IMAP server over TLS 993 |
+| `GET /mailbox/connect/microsoft/login?target_mailbox=shared@example.com` | Microsoft shared mailbox consent |
+| `POST /me/subscription/reconcile` | Reconcile canonical Mercado Pago state (Owner/Admin) |
 | `GET /me/data-summary` | Read-only privacy/data summary |
 | `DELETE /me/analysis-data` | Permanently delete the authenticated user's derived analysis data after confirmation |
 | `GET /me/operations/status` | Read-only scheduler/operations status |
@@ -179,14 +180,9 @@ Pagination note: `GET /analysis-runs` and `GET /analysis-runs/:id/threads` remai
 
 ## Scheduled Daily Analysis & Email Report
 
-The API can run the analysis automatically Monday to Friday at the whole hour
-selected by each tenant (`08:00` by default) in its configured timezone.
-Tuesday to Friday cover the previous local day (00:00–23:59); Monday covers Friday
-through Sunday. The report is sent with [Resend](https://resend.com), not Gmail —
-the Gmail scope stays readonly.
+Each tenant selects ISO weekdays, an `HH:MM` time and an IANA timezone. The default is weekdays at 08:00; Monday covers Friday through Sunday and other weekdays cover yesterday. Custom schedules cover the gap from the previous selected day through yesterday. Reports use [Resend](https://resend.com).
 
-It requires a user who has logged in at least once (the stored refresh token is
-used to mint a fresh access token at run time).
+It requires a configured policy, an active mailbox connection, explicit recipients and a paid/trial entitlement. OAuth refresh or encrypted IMAP credentials operate independently of the web session.
 
 ### Trigger modes
 
@@ -195,17 +191,14 @@ used to mint a fresh access token at run time).
    schedule config in its own IANA timezone.
 2. **External trigger** — `POST /internal/scheduled-analysis` authenticated
    with the `x-cron-secret` header (`CRON_SECRET` env var). Without `as_of_date`,
-   it uses the same due-by-timezone logic as the internal loop. Configure one
-   Configure Cloud Scheduler for the four available report slots on weekdays
-   (`0 8,14,18,22 * * 1-5`, `America/Santiago`); the API selects only tenants
-   whose configured hour is due and its idempotency lock prevents reruns.
+   it uses the same due-by-timezone logic as the internal loop. Trigger every minute (or an explicitly chosen delay tolerance) to support arbitrary tenant times and timezones. Idempotency prevents repeated windows.
    With `as_of_date`,
    it performs an explicit local-date backfill/testing run:
 
    ```bash
    curl -s -X POST http://localhost:8080/internal/scheduled-analysis \
      -H "x-cron-secret: $CRON_SECRET" -H "Content-Type: application/json" \
-     -d '{"as_of_date":"2026-06-12"}'   # optional; defaults to today in SCL
+     -d '{"as_of_date":"2026-06-12"}'   # optional explicit tenant-local date
    ```
 
 Both modes share the same core and the same idempotency lock, so they can be
@@ -261,8 +254,10 @@ Missed weekdays are not backfilled automatically — use the endpoint with
 - The AI worker is stateless: the API sends per-run policy context once per
   classification batch and again only for threads escalated to detailed audit.
   Do not configure tenant/company prompt defaults in the worker.
-- Retention expiry is stored per run, but destructive retention jobs are still a
-  later production hardening task.
+- Maintenance runs hourly on an always-on API and is also exposed through `POST /internal/maintenance` with `x-cron-secret`. Configure an external hourly trigger for hosts that suspend CPU. Back up and review historical retention before deploying this change.
+- Derived analysis deletion cancels subsequent writes. Interrupted jobs become failed after one hour; the execution timeout is 45 minutes.
+- Report delivery retries use a stable Resend idempotency key for up to 23 hours, without repeating the analysis. Failed analyses retry after 15 minutes.
+- Real provider consent, Google public verification and Mercado Pago sandbox validation remain required before public launch; local tests do not establish those approvals.
 
 ## Deployment Runbook
 
@@ -274,6 +269,8 @@ For initial release deployment guidance, see:
 They cover sandbox/live variables, `mira.ninfasolutions.com`, Cloud Run service order, OAuth, scheduler modes, smoke tests, rollback, and known initial-release risks.
 
 ## Development Checks
+
+`./scripts/check-postgres.sh` runs integration tests on a disposable PostgreSQL 16 instance. An explicit test DSN must point to a dedicated database named `mira_test`. It never migrates the production database.
 
 ```bash
 ./scripts/check-all.sh

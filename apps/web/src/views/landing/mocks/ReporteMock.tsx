@@ -4,7 +4,7 @@ const REPORT_STATS = [
   { label: "Analizados", value: "428", tone: "blue" },
   { label: "Válidas", value: "173", tone: "mint" },
   { label: "Respondidas", value: "91%", tone: "teal" },
-  { label: "Sin respuesta", value: "14", tone: "orange" },
+  { label: "Sin respuesta registrada", value: "14", tone: "orange" },
   { label: "1ª respuesta", value: "42 min", tone: "amber" },
 ];
 

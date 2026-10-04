@@ -46,13 +46,13 @@ export const ADVANTAGES: Advantage[] = [
     id: "privacidad",
     Icon: ShieldCheck,
     title: "Privacidad por diseño",
-    body: "Pedimos solo lectura de tu casilla. No enviamos, no etiquetamos, no archivamos y no guardamos el cuerpo completo de tus correos.",
+    body: "Leemos tu casilla para el análisis. No enviamos, no etiquetamos, no archivamos y no guardamos el cuerpo completo de tus correos.",
   },
   {
     id: "ia",
     Icon: Sparkles,
     title: "Mira, tu auditora con IA",
-    body: "Mira marca los casos dudosos por ti. Viene activada para mejorar la clasificación; puedes desactivarla cuando quieras y la última palabra siempre es tuya.",
+    body: "Mira marca los casos dudosos por ti. Se habilita con tu autorización y puedes desactivarla cuando quieras y la última palabra siempre es tuya.",
   },
   {
     id: "friccion",

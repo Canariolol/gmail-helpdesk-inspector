@@ -28,4 +28,7 @@ npm --prefix apps/web audit --omit=dev
 echo "==> Web build"
 npm --prefix apps/web run build
 
+echo "==> Web regression tests"
+npm --prefix apps/web test
+
 echo "==> All checks passed"

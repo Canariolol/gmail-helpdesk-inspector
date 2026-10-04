@@ -43,6 +43,7 @@ type Props = {
 
 function formatMissingSetupItem(item: string): string {
   if (item === "internal_domains") return "dominios de tu equipo";
+  if (item === "responder_emails") return "direcciones de quienes responden";
   if (item === "valid_request_criteria") return "qué correos deben contar como solicitudes";
   if (item === "report_recipients") return "destinatarios de reportes";
   return "un dato de configuración";
@@ -92,6 +93,7 @@ export function ResumenView(props: Props) {
         </div>
       )}
       <FilterBar
+        key={props.orgConfig?.draft.analysis_policy.timezone ?? "local"}
         loading={props.analyzing}
         onAnalyze={props.onAnalyze}
         orgConfig={props.orgConfig}
@@ -125,14 +127,14 @@ export function ResumenView(props: Props) {
               <MetricCard icon={Mail} label="Total analizados" value={run.metrics.total_threads} tone="blue" onClick={() => focusThreads("all")} />
               <MetricCard icon={CheckCircle2} label="Válidos" value={run.metrics.valid_requests} tone="mint" featured onClick={() => focusThreads("valid_client_request")} />
               <MetricCard icon={Reply} label="Respondidos" value={run.metrics.answered} tone="teal" onClick={() => focusThreads("answered")} />
-              <MetricCard icon={Clock} label="Sin respuesta" value={run.metrics.unanswered} tone="orange" onClick={() => focusThreads("unanswered")} />
+              <MetricCard icon={Clock} label="Sin respuesta registrada" value={run.metrics.unanswered} tone="orange" onClick={() => focusThreads("unanswered")} />
               <MetricCard icon={HelpCircle} label="Pendientes de revisión" value={run.metrics.pending_review} tone="amber" onClick={() => focusThreads("review")} />
-              <MetricCard icon={ShieldCheck} label="Clasificación automática" value={formatPercent(run.metrics.report_confidence)} tone="purple" description="Porcentaje de conversaciones que Mira pudo clasificar sin pedir una revisión manual." />
+              <MetricCard icon={ShieldCheck} label="Sin revisión pendiente" value={formatPercent(run.metrics.report_confidence)} tone="purple" description="Proporción de hilos sin revisión pendiente, incluidas correcciones manuales. No mide la exactitud de la clasificación." />
             </div>
             <div className="metric-grid times">
-              <MetricCard icon={Timer} label="T. medio respuesta" value={formatDuration(run.metrics.avg_first_response_minutes)} tone="gray" onClick={() => focusThreads("answered")} />
+              <MetricCard icon={Timer} label="T. medio respuesta" value={formatDuration(run.metrics.avg_first_response_minutes)} tone="gray" description="Tiempo corrido, incluye noches y fines de semana." onClick={() => focusThreads("answered")} />
               <MetricCard icon={Gauge} label="P90 respuesta" value={formatDuration(run.metrics.p90_first_response_minutes)} tone="gray" onClick={() => focusThreads("answered")} />
-              <MetricCard icon={CheckCheck} label="Cierre medio" value={formatDuration(run.metrics.avg_resolution_minutes)} tone="gray" onClick={() => focusThreads("answered")} />
+              <MetricCard icon={CheckCheck} label="Hasta último envío" value={formatDuration(run.metrics.avg_resolution_minutes)} tone="gray" description="Tiempo corrido hasta el último envío del equipo; no confirma resolución." onClick={() => focusThreads("answered")} />
             </div>
             <div className="charts-row">
               <ClassificationBarChart metrics={run.metrics} />

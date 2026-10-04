@@ -77,7 +77,7 @@ export const DEMO_METRICS: DemoMetric[] = [
   { id: "analizados", label: "Analizados", value: "428", tone: "blue", Icon: Inbox },
   { id: "validos", label: "Válidas", value: "173", tone: "mint", Icon: CheckCircle2 },
   { id: "respondidos", label: "Respondidas", value: "159", tone: "teal", Icon: Reply },
-  { id: "sin_respuesta", label: "Sin respuesta", value: "14", tone: "orange", Icon: Clock },
+  { id: "sin_respuesta", label: "Sin respuesta registrada", value: "14", tone: "orange", Icon: Clock },
   { id: "ambiguos", label: "Ambiguas", value: "12", tone: "amber", Icon: HelpCircle },
   { id: "ignorados", label: "Ignoradas", value: "84", tone: "purple", Icon: Filter },
 ];

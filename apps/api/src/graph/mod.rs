@@ -1,41 +1,35 @@
-//! Adaptador de Microsoft Graph: Outlook y Microsoft 365.
-//!
-//! Es el gemelo estructural del adaptador de Gmail: OAuth, hilos nativos y
-//! filtrado del lado del servidor. Las tres diferencias que importan:
-//!
-//! 1. El hilo es `conversationId` en cada mensaje, no un recurso propio. Se
-//!    listan mensajes de la ventana y se agrupan por conversación.
-//! 2. No existen las pestañas de Gmail (`CATEGORY_PROMOTIONS`/`SOCIAL`/…), así
-//!    que `folder_ids` trae IDs de carpeta y el refinamiento por pestaña queda
-//!    en no-op. Ver §6 de `docs/plan-conexion-multiproveedor.md`.
-//! 3. El refresh token **rota** en cada uso: quien refresque debe persistir el
-//!    nuevo valor o la conexión muere sola.
+//! Correo Microsoft Graph para casillas propias, compartidas y delegadas.
 
-use anyhow::{Context, anyhow};
+use std::collections::{HashSet, VecDeque};
+
+use anyhow::{Context, anyhow, ensure};
 use async_trait::async_trait;
-use chrono::{DateTime, Days, NaiveDate, TimeZone, Utc};
+use chrono::{DateTime, Utc};
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
-use crate::analysis::{AnalysisConfig, EmailMessage, is_automated_sender, is_internal_email};
+use crate::analysis::{AnalysisConfig, EmailMessage, is_automated_sender, is_responder_email};
 use crate::mailbox::{
     GmailLabel, GmailProfile, MailboxMetadata, MailboxProvider, MailboxProviderKind,
-    ProviderThread, ThreadListPage,
+    ProviderThread, ThreadListPage, analysis_window_utc, read_mail_json, send_mail_request,
 };
 
 const GRAPH_BASE: &str = "https://graph.microsoft.com/v1.0";
-/// Carpeta bien conocida de Graph. El equivalente funcional del `INBOX` +
-/// pestaña Principal de Gmail es simplemente la bandeja de entrada: Outlook no
-/// tiene pestañas.
 const INBOX_FOLDER: &str = "inbox";
-/// Graph pagina de a 1000 como máximo; se pide una sola página por análisis,
-/// igual que el adaptador de Gmail.
 const MAX_PAGE_SIZE: u32 = 1000;
+const MAX_LIST_PAGES: usize = 50;
+const MAX_CONVERSATION_MESSAGES: usize = 2_000;
+const MAX_FOLDERS: usize = 1_000;
+const MAX_FOLDER_REQUESTS: usize = 1_000;
+const MAX_FOLDER_DEPTH: usize = 20;
 
 #[derive(Clone)]
 pub struct GraphClient {
     client: Client,
+    mailbox: Option<String>,
+    base_url: String,
 }
 
 impl Default for GraphClient {
@@ -44,8 +38,11 @@ impl Default for GraphClient {
             client: Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .connect_timeout(std::time::Duration::from_secs(10))
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("failed to build graph http client"),
+            mailbox: None,
+            base_url: GRAPH_BASE.to_string(),
         }
     }
 }
@@ -62,48 +59,12 @@ impl MailboxProvider for GraphClient {
         config: &AnalysisConfig,
         max_threads: u32,
     ) -> anyhow::Result<ThreadListPage> {
-        // Se piden más mensajes que hilos porque varios mensajes colapsan en una
-        // misma conversación; el tope duro lo pone Graph.
-        let page_size = max_threads.saturating_mul(4).clamp(1, MAX_PAGE_SIZE);
-        let response: MessageListResponse = self
-            .client
-            .get(message_list_url(config))
-            .bearer_auth(access_token)
-            .query(&[
-                ("$filter", message_list_filter(config)?),
-                ("$select", "id,conversationId".to_string()),
-                ("$orderby", "receivedDateTime desc".to_string()),
-                ("$top", page_size.to_string()),
-            ])
-            .send()
-            .await?
-            .error_for_status()
-            .context("failed to list Graph messages")?
-            .json()
-            .await?;
-
-        let mut ids: Vec<String> = Vec::new();
-        for message in response.value {
-            let Some(conversation_id) = message.conversation_id else {
-                continue;
-            };
-            if !ids.iter().any(|existing| existing == &conversation_id) {
-                ids.push(conversation_id);
-            }
-        }
-        // `@odata.nextLink` es la señal de truncación equivalente al
-        // `nextPageToken` de Gmail: hay más mensajes en la ventana.
-        let next_page_token = response.next_link;
-        let truncated_by_cap = ids.len() > max_threads as usize;
-        ids.truncate(max_threads as usize);
-
-        Ok(ThreadListPage {
-            ids,
-            next_page_token: next_page_token
-                .or_else(|| truncated_by_cap.then(|| "truncated-by-max-threads".to_string())),
-            // Graph no entrega un estimado de total; se omite en vez de inventarlo.
-            result_size_estimate: None,
-        })
+        tokio::time::timeout(
+            std::time::Duration::from_secs(180),
+            self.list(access_token, config, max_threads),
+        )
+        .await
+        .context("Graph conversation listing timed out")?
     }
 
     async fn fetch_thread(
@@ -112,52 +73,12 @@ impl MailboxProvider for GraphClient {
         thread_id: &str,
         config: &AnalysisConfig,
     ) -> anyhow::Result<ProviderThread> {
-        let response: MessageListResponse = self
-            .client
-            .get(format!("{GRAPH_BASE}/me/messages"))
-            .bearer_auth(access_token)
-            // Pide el cuerpo en texto plano en vez de HTML: evita arrastrar el
-            // markup al motor de análisis y a la auditoría IA.
-            .header("Prefer", "outlook.body-content-type=\"text\"")
-            .query(&[
-                (
-                    "$filter",
-                    format!("conversationId eq '{}'", escape_odata(thread_id)),
-                ),
-                (
-                    "$select",
-                    "id,conversationId,parentFolderId,subject,from,toRecipients,ccRecipients,\
-                     receivedDateTime,bodyPreview,body,internetMessageHeaders"
-                        .to_string(),
-                ),
-                ("$top", MAX_PAGE_SIZE.to_string()),
-            ])
-            .send()
-            .await?
-            .error_for_status()
-            .with_context(|| format!("failed to fetch Graph conversation {thread_id}"))?
-            .json()
-            .await?;
-
-        let folder_ids = collect_folder_ids(&response.value);
-        let mut messages = response
-            .value
-            .into_iter()
-            .map(|message| normalize_message(message, config))
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        // Graph rechaza combinar `conversationId` en `$filter` con
-        // `$orderby=receivedDateTime` (`InefficientFilter`), así que el orden
-        // cronológico se aplica localmente.
-        messages.sort_by_key(|message| message.date);
-
-        Ok(ProviderThread {
-            id: thread_id.to_string(),
-            // La consulta ya vino acotada a la bandeja de entrada al listar; un
-            // hilo alcanzado por este camino está en la bandeja principal.
-            is_primary_inbox: true,
-            folder_ids,
-            messages,
-        })
+        tokio::time::timeout(
+            std::time::Duration::from_secs(180),
+            self.thread(access_token, thread_id, config),
+        )
+        .await
+        .context("Graph conversation retrieval timed out")?
     }
 
     async fn fetch_mailbox_metadata(
@@ -165,39 +86,217 @@ impl MailboxProvider for GraphClient {
         access_token: &str,
         now: DateTime<Utc>,
     ) -> MailboxMetadata {
-        let profile = self.get_profile(access_token).await.ok();
-        let labels = self.list_folders(access_token).await.unwrap_or_default();
+        let profile = match &self.mailbox {
+            Some(mailbox) => Some(GmailProfile {
+                email_address: mailbox.clone(),
+                messages_total: 0,
+                threads_total: 0,
+            }),
+            None => self.get_profile(access_token).await.ok(),
+        };
+        let (labels, folders_truncated) = match tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            self.folder_catalog(access_token),
+        )
+        .await
+        {
+            Ok(Ok(catalog)) => catalog,
+            _ => (Vec::new(), true),
+        };
         MailboxMetadata {
             profile,
             labels,
-            // Graph expone reglas y alias por otras rutas con scopes adicionales;
-            // no se piden permisos que Mira no usa.
             send_as: Vec::new(),
             filters_count: 0,
+            folders_truncated,
             synced_at: now,
         }
     }
 }
 
 impl GraphClient {
-    /// Identidad de la casilla. A diferencia de Gmail, sale de `/me` y no de un
-    /// endpoint de perfil de correo.
-    pub async fn get_profile(&self, access_token: &str) -> anyhow::Result<GmailProfile> {
-        let response: GraphUser = self
+    async fn list(
+        &self,
+        access_token: &str,
+        config: &AnalysisConfig,
+        max_threads: u32,
+    ) -> anyhow::Result<ThreadListPage> {
+        ensure!(max_threads > 0, "max_threads must be positive");
+        let page_size = max_threads.saturating_mul(4).clamp(1, MAX_PAGE_SIZE);
+        let request = self
             .client
-            .get(format!("{GRAPH_BASE}/me"))
+            .get(self.message_list_url(config))
             .bearer_auth(access_token)
-            .query(&[("$select", "mail,userPrincipalName")])
-            .send()
-            .await?
-            .error_for_status()
-            .context("failed to read Graph profile")?
-            .json()
-            .await?;
+            .query(&[
+                ("$filter", message_list_filter(config)?),
+                ("$select", "id,conversationId".to_string()),
+                ("$orderby", "receivedDateTime desc".to_string()),
+                ("$top", page_size.to_string()),
+            ]);
+        let mut response: MessageListResponse =
+            read_mail_json(send_mail_request(&self.client, request).await?).await?;
+        let mut ids = Vec::new();
+        let mut seen = HashSet::new();
+        let mut pages = 0;
+        loop {
+            pages += 1;
+            let mut remaining_in_page = false;
+            for message in response.value {
+                if let Some(id) = message.conversation_id
+                    && seen.insert(id.clone())
+                {
+                    if ids.len() == max_threads as usize {
+                        remaining_in_page = true;
+                        break;
+                    }
+                    ids.push(id);
+                }
+            }
+            if remaining_in_page || ids.len() == max_threads as usize || pages == MAX_LIST_PAGES {
+                return Ok(ThreadListPage {
+                    ids,
+                    next_page_token: response.next_link.or_else(|| {
+                        remaining_in_page.then(|| "truncated-by-max-threads".to_string())
+                    }),
+                    result_size_estimate: None,
+                });
+            }
+            let Some(next) = response.next_link else {
+                return Ok(ThreadListPage {
+                    ids,
+                    next_page_token: None,
+                    result_size_estimate: None,
+                });
+            };
+            response = self.get_page(access_token, &next).await?;
+        }
+    }
+
+    async fn thread(
+        &self,
+        access_token: &str,
+        thread_id: &str,
+        config: &AnalysisConfig,
+    ) -> anyhow::Result<ProviderThread> {
+        let request = self.client.get(format!("{}/messages", self.mailbox_url()))
+            .bearer_auth(access_token)
+            .header("Prefer", "outlook.body-content-type=\"text\", IdType=\"ImmutableId\"")
+            .query(&[
+                ("$filter", format!("conversationId eq '{}'", escape_odata(thread_id))),
+                ("$select", "id,conversationId,parentFolderId,subject,from,toRecipients,ccRecipients,receivedDateTime,bodyPreview,body,internetMessageHeaders".to_string()),
+                ("$top", "200".to_string()),
+            ]);
+        let mut response: MessageListResponse =
+            read_mail_json(send_mail_request(&self.client, request).await?).await?;
+        let mut raw = Vec::new();
+        let mut seen = HashSet::new();
+        let mut truncated = false;
+        let mut pages = 0;
+        loop {
+            pages += 1;
+            for message in response.value {
+                if seen.insert(message.id.clone()) {
+                    if raw.len() == MAX_CONVERSATION_MESSAGES {
+                        truncated = true;
+                        break;
+                    }
+                    raw.push(message);
+                }
+            }
+            if truncated || raw.len() == MAX_CONVERSATION_MESSAGES || pages == MAX_LIST_PAGES {
+                truncated |= response.next_link.is_some();
+                break;
+            }
+            let Some(next) = response.next_link else {
+                break;
+            };
+            response = self.get_page(access_token, &next).await?;
+        }
+        let folder_ids = collect_folder_ids(&raw);
+        let mut messages = raw
+            .into_iter()
+            .map(|message| normalize_message(message, config))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        messages.sort_by_key(|message| message.date);
+        Ok(ProviderThread {
+            id: thread_id.to_string(),
+            is_primary_inbox: true,
+            folder_ids,
+            messages,
+            truncated,
+        })
+    }
+
+    pub fn for_mailbox(email: &str) -> anyhow::Result<Self> {
+        Self::default().with_mailbox(email)
+    }
+
+    pub fn with_mailbox(&self, email: &str) -> anyhow::Result<Self> {
+        let email = email.trim().to_ascii_lowercase();
+        ensure!(
+            crate::provider_detect::domain_of(&email).is_some()
+                && !email.chars().any(|c| c.is_control() || c.is_whitespace())
+                && email.matches('@').count() == 1,
+            "invalid Microsoft mailbox email"
+        );
+        let mut client = self.clone();
+        client.mailbox = Some(email);
+        Ok(client)
+    }
+
+    fn mailbox_url(&self) -> String {
+        match &self.mailbox {
+            Some(email) => format!(
+                "{}/users/{}",
+                self.base_url,
+                utf8_percent_encode(email, NON_ALPHANUMERIC)
+            ),
+            None => format!("{}/me", self.base_url),
+        }
+    }
+
+    fn message_list_url(&self, config: &AnalysisConfig) -> String {
+        if config.include_labels.is_empty() && config.exclude_labels.is_empty() {
+            format!("{}/mailFolders/{INBOX_FOLDER}/messages", self.mailbox_url())
+        } else {
+            format!("{}/messages", self.mailbox_url())
+        }
+    }
+
+    /// Probe de lectura antes de guardar una conexión o cambiar al buzón delegado.
+    pub async fn validate_mailbox_access(&self, access_token: &str) -> anyhow::Result<()> {
+        send_mail_request(
+            &self.client,
+            self.client
+                .get(format!("{}/mailFolders/inbox/messages", self.mailbox_url()))
+                .bearer_auth(access_token)
+                .query(&[("$top", "1"), ("$select", "id")]),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// El token identifica al usuario que dio consentimiento, incluso si el
+    /// destino de correo es una casilla compartida.
+    pub async fn get_profile(&self, access_token: &str) -> anyhow::Result<GmailProfile> {
+        let response: GraphUser = read_mail_json(
+            send_mail_request(
+                &self.client,
+                self.client
+                    .get(format!("{}/me", self.base_url))
+                    .bearer_auth(access_token)
+                    .query(&[("$select", "mail,userPrincipalName")]),
+            )
+            .await?,
+        )
+        .await?;
         let email = response
             .mail
-            .or(response.user_principal_name)
-            .ok_or_else(|| anyhow!("Graph profile without an email address"))?;
+            .filter(|email| !email.trim().is_empty())
+            .or(response
+                .user_principal_name
+                .filter(|email| !email.trim().is_empty()))
+            .context("Graph profile without an email address")?;
         Ok(GmailProfile {
             email_address: email,
             messages_total: 0,
@@ -205,41 +304,122 @@ impl GraphClient {
         })
     }
 
-    /// Carpetas de la casilla, mapeadas a la misma forma que el catálogo de
-    /// etiquetas de Gmail para que la UI de filtros no cambie todavía.
     pub async fn list_folders(&self, access_token: &str) -> anyhow::Result<Vec<GmailLabel>> {
-        let response: FolderListResponse = self
-            .client
-            .get(format!("{GRAPH_BASE}/me/mailFolders"))
-            .bearer_auth(access_token)
-            .query(&[("$select", "id,displayName"), ("$top", "100")])
-            .send()
-            .await?
-            .error_for_status()
-            .context("failed to list Graph mail folders")?
-            .json()
-            .await?;
-        Ok(response
-            .value
-            .into_iter()
-            .map(|folder| GmailLabel {
-                id: folder.id,
-                name: folder.display_name,
-                label_type: "folder".to_string(),
-            })
-            .collect())
+        Ok(self.folder_catalog(access_token).await?.0)
+    }
+
+    async fn folder_catalog(&self, access_token: &str) -> anyhow::Result<(Vec<GmailLabel>, bool)> {
+        let inbox: GraphFolder = read_mail_json(
+            send_mail_request(
+                &self.client,
+                self.client
+                    .get(format!("{}/mailFolders/inbox", self.mailbox_url()))
+                    .bearer_auth(access_token)
+                    .query(&[("$select", "id,displayName,childFolderCount")]),
+            )
+            .await?,
+        )
+        .await?;
+        let mut queue = VecDeque::from([(
+            format!(
+                "{}/mailFolders?$select=id,displayName,childFolderCount&$top=100",
+                self.mailbox_url()
+            ),
+            String::new(),
+            0usize,
+        )]);
+        let mut labels = Vec::new();
+        let mut seen = HashSet::new();
+        let mut visited_pages = HashSet::new();
+        let mut requests = 0;
+        let mut truncated = false;
+        while let Some((url, parent, depth)) = queue.pop_front() {
+            if requests >= MAX_FOLDER_REQUESTS {
+                truncated = true;
+                break;
+            }
+            ensure!(
+                visited_pages.insert(url.clone()),
+                "Graph returned a repeated folder page"
+            );
+            requests += 1;
+            let response: FolderListResponse = self.get_page(access_token, &url).await?;
+            for folder in response.value {
+                if !seen.insert(folder.id.clone()) {
+                    continue;
+                }
+                if labels.len() == MAX_FOLDERS {
+                    truncated = true;
+                    break;
+                }
+                let name = if parent.is_empty() {
+                    folder.display_name
+                } else {
+                    format!("{parent}/{}", folder.display_name)
+                };
+                if folder.child_folder_count > 0 {
+                    if depth < MAX_FOLDER_DEPTH {
+                        queue.push_back((format!("{}/mailFolders/{}/childFolders?$select=id,displayName,childFolderCount&$top=100", self.mailbox_url(), utf8_percent_encode(&folder.id, NON_ALPHANUMERIC)), name.clone(), depth + 1));
+                    } else {
+                        truncated = true;
+                    }
+                }
+                labels.push(GmailLabel {
+                    label_type: if folder.id == inbox.id {
+                        "inbox"
+                    } else {
+                        "folder"
+                    }
+                    .to_string(),
+                    id: folder.id,
+                    name,
+                });
+            }
+            if labels.len() == MAX_FOLDERS {
+                truncated |= response.next_link.is_some() || !queue.is_empty();
+                break;
+            }
+            if let Some(next) = response.next_link {
+                queue.push_front((next, parent, depth));
+            }
+        }
+        Ok((labels, truncated))
+    }
+
+    async fn get_page<T: serde::de::DeserializeOwned>(
+        &self,
+        access_token: &str,
+        next: &str,
+    ) -> anyhow::Result<T> {
+        let url = url::Url::parse(next).context("invalid Graph pagination URL")?;
+        let base = url::Url::parse(&self.base_url)?;
+        ensure!(
+            url.scheme() == base.scheme()
+                && url.host_str() == base.host_str()
+                && url.port_or_known_default() == base.port_or_known_default()
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url
+                    .path()
+                    .starts_with(&format!("{}/", base.path().trim_end_matches('/'))),
+            "Graph pagination URL left the trusted origin"
+        );
+        read_mail_json(
+            send_mail_request(
+                &self.client,
+                self.client.get(url).bearer_auth(access_token).header(
+                    "Prefer",
+                    "outlook.body-content-type=\"text\", IdType=\"ImmutableId\"",
+                ),
+            )
+            .await?,
+        )
+        .await
     }
 }
 
-/// Ventana de fechas como filtro OData. `date_to` es inclusivo para el usuario,
-/// así que el filtro usa el día siguiente como cota exclusiva — mismo criterio
-/// que `gmail_end_exclusive`.
 fn received_window_filter(config: &AnalysisConfig) -> anyhow::Result<String> {
-    let from = parse_day_start(&config.date_from)
-        .with_context(|| format!("invalid date_from: {}", config.date_from))?;
-    let to = parse_day_start(&config.date_to)
-        .and_then(|date| date.checked_add_days(Days::new(1)))
-        .with_context(|| format!("invalid date_to: {}", config.date_to))?;
+    let (from, to) = analysis_window_utc(config)?;
     Ok(format!(
         "receivedDateTime ge {} and receivedDateTime lt {}",
         from.to_rfc3339(),
@@ -247,28 +427,16 @@ fn received_window_filter(config: &AnalysisConfig) -> anyhow::Result<String> {
     ))
 }
 
-fn message_list_url(config: &AnalysisConfig) -> String {
-    if config.include_labels.is_empty() && config.exclude_labels.is_empty() {
-        format!("{GRAPH_BASE}/me/mailFolders/{INBOX_FOLDER}/messages")
-    } else {
-        format!("{GRAPH_BASE}/me/messages")
-    }
-}
-
-/// Conserva `receivedDateTime` primero porque Graph lo exige al combinar
-/// `$filter` y `$orderby`. Los IDs vienen de Graph y se escapan como OData.
 fn message_list_filter(config: &AnalysisConfig) -> anyhow::Result<String> {
     let mut filter = received_window_filter(config)?;
-    if !config.include_labels.is_empty() {
-        let folders = config
-            .include_labels
-            .iter()
-            .filter(|folder| !folder.trim().is_empty())
-            .map(|folder| format!("parentFolderId eq '{}'", escape_odata(folder.trim())))
-            .collect::<Vec<_>>();
-        if !folders.is_empty() {
-            filter.push_str(&format!(" and ({})", folders.join(" or ")));
-        }
+    let folders = config
+        .include_labels
+        .iter()
+        .filter(|folder| !folder.trim().is_empty())
+        .map(|folder| format!("parentFolderId eq '{}'", escape_odata(folder.trim())))
+        .collect::<Vec<_>>();
+    if !folders.is_empty() {
+        filter.push_str(&format!(" and ({})", folders.join(" or ")));
     }
     for folder in config
         .exclude_labels
@@ -281,12 +449,6 @@ fn message_list_filter(config: &AnalysisConfig) -> anyhow::Result<String> {
         ));
     }
     Ok(filter)
-}
-
-fn parse_day_start(value: &str) -> Option<DateTime<Utc>> {
-    let date = NaiveDate::parse_from_str(value, "%Y-%m-%d").ok()?;
-    Utc.from_local_datetime(&date.and_hms_opt(0, 0, 0)?)
-        .single()
 }
 
 /// OData escapa la comilla simple duplicándola. Sin esto, un `conversationId`
@@ -322,7 +484,7 @@ fn normalize_message(
             )
         })
         .unwrap_or((None, String::new()));
-    let is_internal = is_internal_email(&from_email, &config.internal_domains);
+    let is_internal = is_responder_email(&from_email, config);
     let is_automated = is_automated_sender(&from_email, &Value::Object(persisted_headers.clone()));
     let date = message
         .received_date_time
@@ -435,6 +597,8 @@ struct GraphHeader {
 struct FolderListResponse {
     #[serde(default)]
     value: Vec<GraphFolder>,
+    #[serde(rename = "@odata.nextLink", default)]
+    next_link: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -442,6 +606,8 @@ struct GraphFolder {
     id: String,
     #[serde(rename = "displayName", default)]
     display_name: String,
+    #[serde(rename = "childFolderCount", default)]
+    child_folder_count: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -455,6 +621,7 @@ struct GraphUser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
 
     fn config() -> AnalysisConfig {
         AnalysisConfig {
@@ -464,6 +631,8 @@ mod tests {
             time_to: "23:59".to_string(),
             timezone: "America/Santiago".to_string(),
             internal_domains: vec!["west-ingenieria.cl".to_string()],
+            responder_emails: vec![],
+            request_scope: Default::default(),
             ignored_senders: vec![],
             ignored_domains: vec![],
             ignored_keywords: vec![],
@@ -475,9 +644,9 @@ mod tests {
     #[test]
     fn window_filter_uses_an_exclusive_upper_bound() {
         let filter = received_window_filter(&config()).unwrap();
-        assert!(filter.contains("receivedDateTime ge 2026-03-01T00:00:00+00:00"));
+        assert!(filter.contains("receivedDateTime ge 2026-03-01T03:00:00+00:00"));
         // 2026-03-31 es inclusivo para el usuario: la cota es el 1 de abril.
-        assert!(filter.contains("receivedDateTime lt 2026-04-01T00:00:00+00:00"));
+        assert!(filter.contains("receivedDateTime lt 2026-04-01T03:00:00+00:00"));
     }
 
     #[test]
@@ -487,18 +656,83 @@ mod tests {
         config.exclude_labels = vec!["deleted-id".to_string()];
 
         assert_eq!(
-            message_list_url(&config),
+            GraphClient::default().message_list_url(&config),
             format!("{GRAPH_BASE}/me/messages")
         );
         assert_eq!(
             message_list_filter(&config).unwrap(),
-            "receivedDateTime ge 2026-03-01T00:00:00+00:00 and receivedDateTime lt 2026-04-01T00:00:00+00:00 and (parentFolderId eq 'inbox-id' or parentFolderId eq 'team''s-folder') and parentFolderId ne 'deleted-id'"
+            "receivedDateTime ge 2026-03-01T03:00:00+00:00 and receivedDateTime lt 2026-04-01T03:00:00+00:00 and (parentFolderId eq 'inbox-id' or parentFolderId eq 'team''s-folder') and parentFolderId ne 'deleted-id'"
         );
     }
 
     #[test]
     fn odata_filter_escapes_single_quotes_in_conversation_ids() {
         assert_eq!(escape_odata("AAQk'AGI"), "AAQk''AGI");
+    }
+
+    #[tokio::test]
+    async fn graph_follows_message_conversation_and_nested_folder_pages() {
+        use axum::{Json, Router, routing::get};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/v1.0", listener.local_addr().unwrap());
+        let next = format!("{base}/me/messages-next");
+        let next_copy = next.clone();
+        let conversation_next = format!("{base}/me/conversation-next");
+        let app = Router::new()
+            .route("/v1.0/me/mailFolders/inbox/messages", get(move || {
+                let next = next_copy.clone();
+                async move { Json(serde_json::json!({ "value": [{"id":"m1","conversationId":"c1"},{"id":"m2","conversationId":"c1"}], "@odata.nextLink": next })) }
+            }))
+            .route("/v1.0/me/messages-next", get(|| async { Json(serde_json::json!({"value":[{"id":"m3","conversationId":"c2"}]})) }))
+            .route("/v1.0/me/messages", get(move || {
+                let next = conversation_next.clone();
+                async move { Json(serde_json::json!({ "value": [{"id":"m1","receivedDateTime":"2026-03-02T10:00:00Z"}], "@odata.nextLink": next })) }
+            }))
+            .route("/v1.0/me/conversation-next", get(|| async { Json(serde_json::json!({"value":[{"id":"m2","receivedDateTime":"2026-03-03T10:00:00Z"}]})) }))
+            .route("/v1.0/me/mailFolders/inbox", get(|| async { Json(serde_json::json!({"id":"inbox-id","displayName":"Inbox","childFolderCount":1})) }))
+            .route("/v1.0/me/mailFolders", get(|| async { Json(serde_json::json!({"value":[{"id":"inbox-id","displayName":"Inbox","childFolderCount":1}]})) }))
+            .route("/v1.0/me/mailFolders/inbox%2Did/childFolders", get(|| async { Json(serde_json::json!({"value":[{"id":"support-id","displayName":"Support","childFolderCount":0}]})) }));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let client = GraphClient {
+            base_url: base,
+            ..GraphClient::default()
+        };
+        let page = client.list_thread_ids("test", &config(), 2).await.unwrap();
+        assert_eq!(page.ids, ["c1", "c2"]);
+        assert!(page.next_page_token.is_none());
+        let thread = client.fetch_thread("test", "c1", &config()).await.unwrap();
+        assert_eq!(thread.messages.len(), 2);
+        assert!(!thread.truncated);
+        let (folders, truncated) = client.folder_catalog("test").await.unwrap();
+        assert_eq!(
+            folders
+                .iter()
+                .map(|folder| folder.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Inbox", "Inbox/Support"]
+        );
+        assert_eq!(folders[0].label_type, "inbox");
+        assert!(!truncated);
+        assert!(
+            client
+                .get_page::<MessageListResponse>("test", "http://example.com/v1.0/messages")
+                .await
+                .is_err()
+        );
+        server.abort();
+    }
+
+    #[test]
+    fn shared_mailbox_uses_users_routes_without_accepting_invalid_targets() {
+        let graph = GraphClient::for_mailbox("support@contoso.com").unwrap();
+        assert_eq!(
+            graph.mailbox_url(),
+            format!("{GRAPH_BASE}/users/support%40contoso%2Ecom")
+        );
+        assert!(GraphClient::for_mailbox("support@contoso.com/path").is_err());
+        assert!(GraphClient::for_mailbox("support @contoso.com").is_err());
     }
 
     #[test]

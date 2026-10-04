@@ -36,12 +36,14 @@ import { PrivacidadDatosView } from "./views/PrivacidadDatosView";
 import { ReportesView } from "./views/ReportesView";
 import { ResumenView } from "./views/ResumenView";
 import { RunsView } from "./views/RunsView";
+import { DateTimeZoneContext } from "./lib/format";
 
 // Google conserva su ruta histórica para no romper enlaces vivos; el resto de
 // los proveedores usa la ruta neutral.
 const CONNECT_URLS: Record<MailboxProviderId, string> = {
   google: `${API_BASE_URL}/gmail/connect/login`,
   microsoft: `${API_BASE_URL}/mailbox/connect/microsoft/login`,
+  imap: "#",
 };
 const DATA_VIEWS: AppView[] = ["resumen", "hilos", "revision", "anteriores", "reportes"];
 const BLOCKED_VIEWS: AppView[] = ["cuenta", "configuracion", "privacidad", "ayuda"];
@@ -200,6 +202,7 @@ export function App() {
                   ...thread,
                   classification: payload.new_classification,
                   classification_source: "manual",
+                  ai_suggestion: null,
                   is_valid_client_request:
                     payload.new_classification === "valid_client_request",
                   is_answered: payload.is_answered,
@@ -224,6 +227,7 @@ export function App() {
                   ...current.thread,
                   classification: payload.new_classification,
                   classification_source: "manual",
+                  ai_suggestion: null,
                   is_valid_client_request:
                     payload.new_classification === "valid_client_request",
                   is_answered: payload.is_answered,
@@ -240,6 +244,7 @@ export function App() {
       );
       queryClient.invalidateQueries({ queryKey: ["analysis-runs"] });
       queryClient.invalidateQueries({ queryKey: ["threads", selectedRunId] });
+      queryClient.invalidateQueries({ queryKey: ["consolidated-report"] });
       queryClient.invalidateQueries({
         queryKey: ["thread", selectedRunId, selectedThreadId],
       });
@@ -291,6 +296,14 @@ export function App() {
   const cancelSubscription = useMutation({
     mutationFn: () => api<EntitlementSnapshot>("/me/subscription/cancel", { method: "POST" }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["account"] }),
+  });
+
+  const reconcileSubscription = useMutation({
+    mutationFn: () => api<EntitlementSnapshot>("/me/subscription/reconcile", { method: "POST" }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["account"] });
+      queryClient.invalidateQueries({ queryKey: ["usage"] });
+    },
   });
 
   const disconnectGmail = useMutation({
@@ -468,6 +481,7 @@ export function App() {
     return (
       <MailboxConnectGate
         accountEmail={accountData.account_email}
+        needsReauth={accountData.mailbox_needs_reauth}
         providers={mailboxProviders.data?.providers ?? ["google"]}
         connectUrlFor={(provider) => CONNECT_URLS[provider]}
         planName={planName}
@@ -484,7 +498,7 @@ export function App() {
   const runsLimitReached = !isBlocked && runsLimit !== null && runsCreated >= runsLimit;
   // El cupo mensual de Free se mide en hilos ANALIZADOS, no solo en #análisis.
   // Cupos que BLOQUEAN un análisis nuevo: runs y correos recuperados. El cupo de
-  // IA no bloquea (degrada a heurística) y se informa en el reporte del run.
+  // IA no bloquea: los candidatos sin auditoría quedan para revisión manual.
   const retrievedLimit = usage.data?.limits?.retrieved_threads_per_month ?? null;
   const retrievedUsed = usage.data?.usage.retrieved_threads ?? 0;
   const retrievedLimitReached =
@@ -492,6 +506,7 @@ export function App() {
   const effectiveView = isBlocked && DATA_VIEWS.includes(view) ? "cuenta" : view;
 
   return (
+    <DateTimeZoneContext.Provider value={currentOrgConfig?.org.default_timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone}>
     <div className="app-shell">
       <Sidebar
         view={effectiveView}
@@ -581,6 +596,8 @@ export function App() {
             onOpenChangePlan={openPlans}
             onCancel={() => cancelSubscription.mutate()}
             cancelPending={cancelSubscription.isPending}
+            onReconcile={() => reconcileSubscription.mutate()}
+            reconcilePending={reconcileSubscription.isPending}
             onDisconnectGmail={() => disconnectGmail.mutate()}
             gmailDisconnectPending={disconnectGmail.isPending}
             onLogoutAll={() => logoutAllSessions.mutate()}
@@ -588,6 +605,7 @@ export function App() {
             error={
               checkout.error?.message ??
               cancelSubscription.error?.message ??
+              reconcileSubscription.error?.message ??
               disconnectGmail.error?.message ??
               logoutAllSessions.error?.message ??
               null
@@ -631,5 +649,6 @@ export function App() {
         />
       )}
     </div>
+    </DateTimeZoneContext.Provider>
   );
 }

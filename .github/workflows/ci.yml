@@ -12,6 +12,20 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: mira_test
+          POSTGRES_USER: mira_test
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mira_test -d mira_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.96.0
@@ -33,10 +47,19 @@ jobs:
           cache-dependency-path: apps/web/package-lock.json
       - run: npm --prefix apps/web ci
       - run: ./scripts/check-all.sh
+      - name: PostgreSQL integration tests
+        env:
+          TEST_POSTGRES_DATABASE_URL: postgresql://mira_test@localhost:5432/mira_test
+          TEST_POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
+        run: ./scripts/check-postgres.sh
       - name: Rust dependency audit
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-audit
+      - name: Ensure the optional RSA dependency stays out of the build
+        run: |
+          cargo tree --manifest-path apps/api/Cargo.toml --invert rsa --target all --prefix none > /tmp/mira-rsa-tree.txt
+          test ! -s /tmp/mira-rsa-tree.txt
       - run: cargo audit --file apps/api/Cargo.lock
       - name: Python dependency audit
         run: |

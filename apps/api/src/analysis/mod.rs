@@ -73,6 +73,10 @@ pub struct AnalysisConfig {
     #[serde(default = "default_timezone")]
     pub timezone: String,
     pub internal_domains: Vec<String>,
+    #[serde(default)]
+    pub responder_emails: Vec<String>,
+    #[serde(default)]
+    pub request_scope: RequestScope,
     pub ignored_senders: Vec<String>,
     pub ignored_domains: Vec<String>,
     pub ignored_keywords: Vec<String>,
@@ -82,6 +86,15 @@ pub struct AnalysisConfig {
     pub include_labels: Vec<String>,
     #[serde(default)]
     pub exclude_labels: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestScope {
+    #[default]
+    External,
+    Internal,
+    All,
 }
 
 fn default_time_from() -> String {
@@ -147,6 +160,10 @@ pub struct DroppedThreadInfo {
 /// filtro previo a la clasificación, con una muestra acotada de los descartados.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct AnalysisFunnel {
+    #[serde(default)]
+    pub failed_threads: u64,
+    #[serde(default)]
+    pub truncated_threads: u64,
     #[serde(default)]
     pub dropped_not_primary_inbox: u64,
     #[serde(default)]
@@ -286,6 +303,21 @@ pub struct AnalysisRun {
     pub error_message: Option<String>,
 }
 
+impl AnalysisRun {
+    pub fn retention_deadline(&self) -> DateTime<Utc> {
+        self.retention_expires_at.unwrap_or_else(|| {
+            let days = self
+                .policy_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.retention_policy.retention_days)
+                .unwrap_or(90);
+            self.created_at
+                .checked_add_signed(chrono::Duration::days(i64::from(days)))
+                .unwrap_or(DateTime::<Utc>::MAX_UTC)
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmailMessage {
     pub id: String,
@@ -317,6 +349,8 @@ pub struct EmailThread {
     pub classification: Classification,
     pub classification_source: ClassificationSource,
     pub classification_confidence: f64,
+    #[serde(default)]
+    pub ai_suggestion: Option<AiSuggestion>,
     pub is_valid_client_request: bool,
     pub is_answered: bool,
     #[serde(default)]
@@ -339,6 +373,17 @@ pub struct EmailThread {
     pub notes: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiSuggestion {
+    pub classification: Classification,
+    pub is_answered: bool,
+    pub confidence: f64,
+    pub first_client_message_id: Option<String>,
+    pub first_internal_reply_message_id: Option<String>,
+    pub last_internal_message_id: Option<String>,
+    pub issues: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -396,6 +441,9 @@ pub struct ManualReviewOverride {
     pub thread_id: String,
     pub source_run_id: String,
     pub message_fingerprint: String,
+    /// Vincula la decisión a la política y ventana en que fue revisada.
+    #[serde(default)]
+    pub review_context: Option<String>,
     pub reviewer_label: String,
     pub classification: Classification,
     pub is_answered: bool,
@@ -404,6 +452,11 @@ pub struct ManualReviewOverride {
     pub last_internal_message_id: Option<String>,
     pub notes: Option<String>,
     pub created_at: DateTime<Utc>,
+}
+
+pub fn manual_review_context(config: &AnalysisConfig, snapshot: Option<&PolicySnapshot>) -> String {
+    let context = serde_json::to_vec(&(config, snapshot)).expect("serializable review context");
+    format!("{:x}", Sha256::digest(context))
 }
 
 pub fn message_fingerprint(messages: &[EmailMessage]) -> String {
@@ -428,6 +481,7 @@ pub fn apply_manual_review_override(
 ) {
     thread.classification = review.classification.clone();
     thread.classification_source = ClassificationSource::Manual;
+    thread.ai_suggestion = None;
     thread.classification_confidence = 1.0;
     thread.is_valid_client_request = thread.classification == Classification::ValidClientRequest;
     thread.is_answered = review.is_answered;
@@ -551,17 +605,10 @@ pub fn classify_thread(
         .min_by_key(|message| message.date)
         .expect("messages.is_empty was checked above");
 
-    // "Request received in the window": the earliest human client (external,
-    // non-automated) message dated INSIDE the analysis window. The report counts these.
-    // process_one_thread already skips threads with no external message in the window, so
-    // reaching this with `request == None` means the in-window external activity is
-    // automated/system mail (or only an internal reply to an older request): not a
-    // received request, so it is classified for visibility but neither counted nor audited.
+    // The earliest human requester allowed by the tenant's scope anchors this window.
     let request = messages
         .iter()
-        .filter(|m| {
-            m.is_external && !m.is_automated && message_is_inside_analysis_window(m, config)
-        })
+        .filter(|m| message_is_requester(m, config) && message_is_inside_analysis_window(m, config))
         .min_by_key(|m| m.date);
 
     let Some(request) = request else {
@@ -624,33 +671,37 @@ pub fn classify_thread(
     // pending request the client is chasing.
     let first_client_overall = messages
         .iter()
-        .filter(|m| m.is_external && !m.is_automated)
+        .filter(|m| message_is_requester(m, config))
         .min_by_key(|m| m.date)
         .unwrap_or(request);
     let reopened = request.date > first_client_overall.date;
     let prior_answered = reopened
-        && messages.iter().any(|m| {
-            m.is_internal
-                && !m.is_automated
-                && m.date > first_client_overall.date
-                && m.date < request.date
-        });
+        && messages
+            .iter()
+            .any(|m| reply_reaches_requester(m, first_client_overall) && m.date < request.date);
 
     // Response milestones are measured against the in-window request, not the whole-thread
     // first message, so a boundary-crossing thread does not pollute the window's metrics.
     let first_reply = messages
         .iter()
-        .filter(|m| m.is_internal && !m.is_automated && m.date > request.date)
+        .filter(|m| reply_reaches_requester(m, request))
         .min_by_key(|m| m.date);
     let last_internal = messages
         .iter()
-        .filter(|m| m.is_internal && !m.is_automated && m.date > request.date)
+        .filter(|m| reply_reaches_requester(m, request))
         .max_by_key(|m| m.date);
     let response_minutes = first_reply.map(|reply| (reply.date - request.date).num_minutes());
     let resolution_minutes =
         last_internal.map(|message| (message.date - request.date).num_minutes());
 
     let mut noise = false;
+    if messages.iter().any(|m| reply_recipient_unknown(m, request)) {
+        noise = true;
+        reasons.push(
+            "Hay un envío del equipo sin destinatarios legibles; requiere confirmar si llegó al solicitante."
+                .to_string(),
+        );
+    }
     if first_message.is_internal {
         noise = true;
         reasons.push(
@@ -696,11 +747,15 @@ pub fn classify_thread(
         .unwrap_or(false);
     let suspicious = long_shape && !handled_promptly;
 
-    reasons.push("El primer mensaje relevante viene de un remitente externo humano.".to_string());
+    reasons.push("Se encontró un solicitante humano dentro del alcance configurado.".to_string());
     if first_reply.is_some() {
-        reasons.push("Se encontró una respuesta interna posterior no automática.".to_string());
+        reasons.push(
+            "Se encontró una respuesta humana del equipo dirigida al solicitante.".to_string(),
+        );
     } else {
-        reasons.push("No se encontró una respuesta interna posterior.".to_string());
+        reasons.push(
+            "No se encontró una respuesta humana del equipo dirigida al solicitante.".to_string(),
+        );
     }
     if suspicious {
         reasons.push("La forma del hilo es atípica y conviene auditarla.".to_string());
@@ -740,6 +795,30 @@ pub fn classify_thread(
         response_minutes,
         resolution_minutes,
     )
+}
+
+/// A team-only exchange cannot establish that the requester received a response.
+pub fn reply_reaches_requester(reply: &EmailMessage, request: &EmailMessage) -> bool {
+    reply.is_internal
+        && !reply.is_automated
+        && reply.date > request.date
+        && reply
+            .to_emails
+            .iter()
+            .chain(&reply.cc_emails)
+            .any(|recipient| {
+                recipient
+                    .trim()
+                    .eq_ignore_ascii_case(request.from_email.trim())
+            })
+}
+
+pub fn reply_recipient_unknown(reply: &EmailMessage, request: &EmailMessage) -> bool {
+    reply.is_internal
+        && !reply.is_automated
+        && reply.date > request.date
+        && reply.to_emails.is_empty()
+        && reply.cc_emails.is_empty()
 }
 
 /// Coincidencia de palabra clave sobre un texto ya en minúsculas. Las keywords
@@ -829,6 +908,7 @@ fn build_thread(
         classification,
         classification_source,
         classification_confidence,
+        ai_suggestion: None,
         is_valid_client_request,
         is_answered,
         first_message_at,
@@ -924,6 +1004,33 @@ pub fn is_internal_email(email: &str, domains: &[String]) -> bool {
         .any(|domain| email_matches_domain(&lower, domain))
 }
 
+pub fn is_responder_email(email: &str, config: &AnalysisConfig) -> bool {
+    if !config.responder_emails.is_empty() {
+        return config
+            .responder_emails
+            .iter()
+            .any(|responder| responder.eq_ignore_ascii_case(email));
+    }
+    config.request_scope == RequestScope::External
+        && is_internal_email(email, &config.internal_domains)
+}
+
+pub fn message_is_requester(message: &EmailMessage, config: &AnalysisConfig) -> bool {
+    !message.is_automated && message_is_requester_candidate(message, config)
+}
+
+pub fn message_is_requester_candidate(message: &EmailMessage, config: &AnalysisConfig) -> bool {
+    if message.is_internal {
+        return false;
+    }
+    let organization_member = is_internal_email(&message.from_email, &config.internal_domains);
+    match config.request_scope {
+        RequestScope::External => !organization_member,
+        RequestScope::Internal => organization_member,
+        RequestScope::All => true,
+    }
+}
+
 fn email_matches_domain(lower_email: &str, domain: &str) -> bool {
     let normalized = domain.trim().trim_start_matches('@').to_lowercase();
     !normalized.is_empty() && lower_email.ends_with(&format!("@{normalized}"))
@@ -943,7 +1050,9 @@ pub fn message_is_inside_analysis_window(message: &EmailMessage, config: &Analys
     };
     let time_from = NaiveTime::parse_from_str(&config.time_from, "%H:%M").unwrap_or(NaiveTime::MIN);
     let time_to = NaiveTime::parse_from_str(&config.time_to, "%H:%M")
-        .unwrap_or(NaiveTime::from_hms_opt(23, 59, 59).expect("valid default time"));
+        .unwrap_or(NaiveTime::from_hms_opt(23, 59, 0).expect("valid default time"));
+    // La hora final incluye todo el minuto seleccionado.
+    let time_to = time_to + chrono::Duration::seconds(59);
 
     local.date_naive() >= date_from
         && local.date_naive() <= date_to
@@ -1207,15 +1316,12 @@ pub fn refine_classification_with_policy_hints(
     }
 }
 
-/// Rescata a Solicitud Válida los hilos cuyo asunto o cuerpo menciona una "señal
-/// de ticket" configurada por el tenant (p. ej. "ticket", "incidencia"), y los deja
-/// marcados para que la auditoría IA dé el veredicto final. Pensada para hilos que
-/// la heurística dejó como `Automated`/`Internal`/`Misc`/`Ambiguous` pero que el
-/// equipo sí tramitó. No toca hilos ya válidos ni resueltos por IA/revisión manual.
+/// Las señales de ticket señalan candidatos para revisión, sin confirmar su validez.
 pub fn rescue_classification_with_valid_signals(
     thread: &mut EmailThread,
     messages: &[EmailMessage],
     keywords: &[String],
+    config: &AnalysisConfig,
 ) {
     if keywords.is_empty() || thread.is_valid_client_request {
         return;
@@ -1239,25 +1345,31 @@ pub fn rescue_classification_with_valid_signals(
     if !subject_hit && !body_hit() {
         return;
     }
-    // Promueve a válido y deja la decisión final a la IA (manual_review_required
-    // habilita la auditoría aunque el hilo no tuviera un cliente humano detectado).
-    thread.classification = Classification::ValidClientRequest;
+    let anchor = messages
+        .iter()
+        .filter(|message| {
+            message_is_requester_candidate(message, config)
+                && message_is_inside_analysis_window(message, config)
+                && !sender_is_ignored(
+                    &message.from_email,
+                    &config.ignored_senders,
+                    &config.ignored_domains,
+                )
+        })
+        .min_by_key(|message| message.date);
+    let Some(anchor) = anchor else {
+        return;
+    };
+    thread.classification = Classification::Ambiguous;
     thread.classification_source = ClassificationSource::Heuristics;
-    thread.is_valid_client_request = true;
+    thread.is_valid_client_request = false;
     thread.manual_review_required = true;
-    // Ancla al primer mensaje externo del hilo para que `received_human_thread`
-    // sea verdadero y la auditoría IA evalúe el rescate.
-    if thread.first_client_message_id.is_none()
-        && let Some(anchor) = messages
-            .iter()
-            .filter(|message| message.is_external)
-            .min_by_key(|message| message.date)
-    {
+    if thread.first_client_message_id.is_none() {
         thread.first_client_message_id = Some(anchor.id.clone());
         thread.first_client_message_at = Some(anchor.date);
     }
     thread.reasons.push(
-        "Rescatado como solicitud válida por una palabra de señal de ticket; pendiente de confirmación de la IA."
+        "Una señal de ticket identificó un candidato dentro de la ventana; su validez requiere confirmación."
             .to_string(),
     );
 }
@@ -1326,7 +1438,11 @@ mod tests {
             message_id: id.to_string(),
             from_email: from.to_string(),
             from_name: None,
-            to_emails: vec![],
+            to_emails: vec![if internal {
+                "client@example.com".to_string()
+            } else {
+                "support@company.test".to_string()
+            }],
             cc_emails: vec![],
             // Anchored inside the 2026-06 test windows so window-aware classification
             // (classify_thread requires an in-window client message) sees these messages.
@@ -1341,6 +1457,177 @@ mod tests {
         }
     }
 
+    fn scoped_config(scope: RequestScope) -> AnalysisConfig {
+        serde_json::from_value(serde_json::json!({
+            "date_from": "2026-06-01", "date_to": "2026-06-12",
+            "internal_domains": ["company.test"],
+            "responder_emails": ["support@company.test"],
+            "request_scope": scope,
+            "ignored_senders": [], "ignored_domains": [], "ignored_keywords": []
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn employee_request_is_distinct_from_support_responder() {
+        let config = scoped_config(RequestScope::Internal);
+        assert!(!is_responder_email("employee@company.test", &config));
+        assert!(is_responder_email("SUPPORT@company.test", &config));
+        let mut messages = [
+            msg("request", "employee@company.test", false, 0),
+            msg("reply", "support@company.test", true, 15),
+        ];
+        messages[1].to_emails = vec!["employee@company.test".to_string()];
+        let thread = classify_thread("run", "thread", &messages, &config);
+        assert_eq!(thread.classification, Classification::ValidClientRequest);
+        assert_eq!(thread.response_time_minutes, Some(15));
+        assert!(!message_is_requester(
+            &msg("external", "client@elsewhere.test", false, 0),
+            &config
+        ));
+        assert!(!message_is_requester(
+            &messages[0],
+            &scoped_config(RequestScope::External)
+        ));
+        assert!(message_is_requester(
+            &messages[0],
+            &scoped_config(RequestScope::All)
+        ));
+    }
+
+    #[test]
+    fn personal_mailbox_does_not_make_other_provider_users_responders() {
+        let mut config = scoped_config(RequestScope::External);
+        config.internal_domains.clear();
+        config.responder_emails = vec!["support@gmail.com".to_string()];
+        assert!(is_responder_email("support@gmail.com", &config));
+        let customer = msg("request", "customer@gmail.com", false, 0);
+        assert!(!is_responder_email(&customer.from_email, &config));
+        assert!(message_is_requester(&customer, &config));
+    }
+
+    #[test]
+    fn team_only_messages_are_not_client_responses() {
+        let config = scoped_config(RequestScope::External);
+        let request = msg("request", "client@example.com", false, 0);
+        let mut team_message = msg("team-only", "support@company.test", true, 5);
+        team_message.to_emails = vec!["supervisor@company.test".to_string()];
+        let not_answered = classify_thread(
+            "run",
+            "thread",
+            &[request.clone(), team_message.clone()],
+            &config,
+        );
+        assert!(!not_answered.is_answered);
+        assert_eq!(not_answered.response_time_minutes, None);
+        assert_eq!(not_answered.last_internal_message_id, None);
+
+        let mut client_reply = msg("reply", "support@company.test", true, 15);
+        client_reply.to_emails = vec!["supervisor@company.test".to_string()];
+        client_reply.cc_emails = vec!["CLIENT@EXAMPLE.COM".to_string()];
+        let answered = classify_thread(
+            "run",
+            "thread",
+            &[request, team_message, client_reply],
+            &config,
+        );
+        assert!(answered.is_answered);
+        assert_eq!(
+            answered.first_internal_reply_message_id.as_deref(),
+            Some("reply")
+        );
+        assert_eq!(answered.response_time_minutes, Some(15));
+    }
+
+    #[test]
+    fn missing_reply_recipients_require_review_without_answer_metrics() {
+        let config = scoped_config(RequestScope::External);
+        let request = msg("request", "client@example.com", false, 0);
+        let mut reply = msg("reply", "support@company.test", true, 15);
+        reply.to_emails.clear();
+        let uncertain = classify_thread("run", "thread", &[request, reply], &config);
+        assert_eq!(uncertain.classification, Classification::Ambiguous);
+        assert!(!uncertain.is_answered);
+        assert!(!uncertain.is_valid_client_request);
+        assert!(uncertain.manual_review_required);
+        let metrics = calculate_metrics(&[uncertain], 0, 0);
+        assert_eq!(metrics.answered, 0);
+        assert_eq!(metrics.valid_requests, 0);
+        assert_eq!(metrics.pending_review, 1);
+    }
+
+    #[test]
+    fn review_context_changes_with_window_or_policy() {
+        let config = scoped_config(RequestScope::All);
+        let context = manual_review_context(&config, None);
+        let mut later = config.clone();
+        later.date_to = "2026-06-13".to_string();
+        assert_ne!(context, manual_review_context(&later, None));
+        let mut bundle =
+            crate::policies::provision_default_config("support@company.test", Utc::now());
+        let snapshot = &mut bundle.policy_version.snapshot;
+        let previous = manual_review_context(&config, Some(snapshot));
+        snapshot
+            .analysis_policy
+            .valid_request_criteria
+            .push("New criteria".to_string());
+        assert_ne!(previous, manual_review_context(&config, Some(snapshot)));
+    }
+
+    #[test]
+    fn retention_deadline_uses_explicit_expiry_then_snapshot_then_legacy_ninety_days() {
+        let created: DateTime<Utc> = "2026-06-01T10:00:00Z".parse().unwrap();
+        let mut run: AnalysisRun = serde_json::from_value(serde_json::json!({
+            "id": "legacy", "user_email": "owner@company.test",
+            "config": scoped_config(RequestScope::External), "status": "completed",
+            "progress_message": "", "processed_threads": 1, "total_candidate_threads": 1,
+            "metrics": AnalysisMetrics::default(), "created_at": created
+        }))
+        .unwrap();
+        assert_eq!(
+            run.retention_deadline(),
+            created + chrono::Duration::days(90)
+        );
+        let mut bundle = crate::policies::provision_default_config("owner@company.test", created);
+        bundle
+            .policy_version
+            .snapshot
+            .retention_policy
+            .retention_days = 7;
+        run.policy_snapshot = Some(bundle.policy_version.snapshot.clone());
+        assert_eq!(
+            run.retention_deadline(),
+            created + chrono::Duration::days(7)
+        );
+        bundle
+            .policy_version
+            .snapshot
+            .retention_policy
+            .retention_days = 30;
+        assert_eq!(
+            run.retention_deadline(),
+            created + chrono::Duration::days(7)
+        );
+        run.retention_expires_at = Some(created + chrono::Duration::days(3));
+        assert_eq!(
+            run.retention_deadline(),
+            created + chrono::Duration::days(3)
+        );
+    }
+
+    #[test]
+    fn end_of_window_includes_selected_minute() {
+        let mut config = scoped_config(RequestScope::External);
+        config.date_from = "2026-06-01".to_string();
+        config.date_to = "2026-06-01".to_string();
+        config.timezone = "UTC".to_string();
+        let mut message = msg("request", "client@elsewhere.test", false, 0);
+        message.date = "2026-06-01T23:59:59Z".parse().unwrap();
+        assert!(message_is_inside_analysis_window(&message, &config));
+        message.date = "2026-06-02T00:00:00Z".parse().unwrap();
+        assert!(!message_is_inside_analysis_window(&message, &config));
+    }
+
     #[test]
     fn classifies_answered_external_request() {
         let config = AnalysisConfig {
@@ -1350,6 +1637,8 @@ mod tests {
             time_to: "23:59".to_string(),
             timezone: "America/Santiago".to_string(),
             internal_domains: vec!["company.test".to_string()],
+            responder_emails: vec![],
+            request_scope: RequestScope::External,
             ignored_senders: vec![],
             ignored_domains: vec![],
             ignored_keywords: vec![],
@@ -1387,6 +1676,8 @@ mod tests {
                 time_to: "23:59".to_string(),
                 timezone: "America/Santiago".to_string(),
                 internal_domains: vec![],
+                responder_emails: vec![],
+                request_scope: RequestScope::External,
                 ignored_senders: vec![],
                 ignored_domains: vec![],
                 ignored_keywords: vec![],
@@ -1455,6 +1746,8 @@ mod tests {
                 time_to: "23:59".to_string(),
                 timezone: "America/Santiago".to_string(),
                 internal_domains: vec!["company.test".to_string()],
+                responder_emails: vec![],
+                request_scope: RequestScope::External,
                 ignored_senders: vec![],
                 ignored_domains: vec![],
                 ignored_keywords: vec![],
@@ -1484,6 +1777,8 @@ mod tests {
                 time_to: "23:59".to_string(),
                 timezone: "America/Santiago".to_string(),
                 internal_domains: vec!["company.test".to_string()],
+                responder_emails: vec![],
+                request_scope: RequestScope::External,
                 ignored_senders: vec![],
                 ignored_domains: vec![],
                 ignored_keywords: vec![],
@@ -1509,6 +1804,8 @@ mod tests {
             time_to: "23:59".to_string(),
             timezone: "America/Santiago".to_string(),
             internal_domains: vec!["company.test".to_string()],
+            responder_emails: vec![],
+            request_scope: RequestScope::External,
             ignored_senders: vec![],
             ignored_domains: vec![],
             ignored_keywords: vec![],
@@ -1545,6 +1842,8 @@ mod tests {
             time_to: "23:59".to_string(),
             timezone: "America/Santiago".to_string(),
             internal_domains: vec!["company.test".to_string()],
+            responder_emails: vec![],
+            request_scope: RequestScope::External,
             ignored_senders: vec![],
             ignored_domains: vec![],
             ignored_keywords: vec![],
@@ -1615,6 +1914,8 @@ mod tests {
             time_to: "23:59".to_string(),
             timezone: "America/Santiago".to_string(),
             internal_domains: vec!["company.test".to_string()],
+            responder_emails: vec![],
+            request_scope: RequestScope::External,
             ignored_senders: vec![],
             ignored_domains: vec![],
             ignored_keywords: vec![],
@@ -1752,7 +2053,7 @@ mod tests {
     }
 
     #[test]
-    fn rescue_promotes_automated_thread_when_body_mentions_ticket() {
+    fn ticket_signal_sends_automated_thread_to_review_without_confirming_validity() {
         let messages = [automated_external_msg(
             "m1",
             "Re: consulta",
@@ -1762,10 +2063,15 @@ mod tests {
         assert_eq!(thread.classification, Classification::Automated);
         assert!(!thread.is_valid_client_request);
 
-        rescue_classification_with_valid_signals(&mut thread, &messages, &["ticket".to_string()]);
+        rescue_classification_with_valid_signals(
+            &mut thread,
+            &messages,
+            &["ticket".to_string()],
+            &long_thread_config(),
+        );
 
-        assert_eq!(thread.classification, Classification::ValidClientRequest);
-        assert!(thread.is_valid_client_request);
+        assert_eq!(thread.classification, Classification::Ambiguous);
+        assert!(!thread.is_valid_client_request);
         assert!(thread.manual_review_required);
         assert_eq!(
             thread.classification_source,
@@ -1773,6 +2079,45 @@ mod tests {
         );
         // Ancla fijada para que la auditoría IA evalúe el rescate.
         assert_eq!(thread.first_client_message_id.as_deref(), Some("m1"));
+        assert_eq!(calculate_metrics(&[thread], 0, 0).valid_requests, 0);
+    }
+
+    #[test]
+    fn ticket_signal_anchors_inside_scope_and_window_and_respects_ignored_senders() {
+        let config = long_thread_config();
+        let mut previous = automated_external_msg("previous", "Ticket", "ticket anterior");
+        previous.date = "2026-05-01T10:00:00Z".parse().unwrap();
+        let current = automated_external_msg("current", "Ticket", "ticket actual");
+        let messages = [previous, current];
+        let mut candidate = classify_thread("run", "thread", &messages, &config);
+        rescue_classification_with_valid_signals(
+            &mut candidate,
+            &messages,
+            &["ticket".to_string()],
+            &config,
+        );
+        assert_eq!(
+            candidate.first_client_message_id.as_deref(),
+            Some("current")
+        );
+        assert!(message_is_inside_analysis_window(&messages[1], &config));
+        assert!(!candidate.is_valid_client_request);
+
+        let mut ignored_config = config;
+        ignored_config.ignored_senders = vec!["client@example.com".to_string()];
+        let mut ignored_request = msg("ignored", "client@example.com", false, 0);
+        ignored_request.subject = "Ticket de acceso".to_string();
+        let messages = [ignored_request];
+        let mut ignored = classify_thread("run", "ignored", &messages, &ignored_config);
+        rescue_classification_with_valid_signals(
+            &mut ignored,
+            &messages,
+            &["ticket".to_string()],
+            &ignored_config,
+        );
+        assert_eq!(ignored.classification, Classification::Misc);
+        assert!(!ignored.is_valid_client_request);
+        assert!(!ignored.manual_review_required);
     }
 
     #[test]
@@ -1784,7 +2129,12 @@ mod tests {
         )];
         let mut thread = classify_thread("run", "t", &messages, &long_thread_config());
         let before = thread.classification.clone();
-        rescue_classification_with_valid_signals(&mut thread, &messages, &[]);
+        rescue_classification_with_valid_signals(
+            &mut thread,
+            &messages,
+            &[],
+            &long_thread_config(),
+        );
         assert_eq!(thread.classification, before);
         assert!(!thread.is_valid_client_request);
     }
@@ -1798,7 +2148,12 @@ mod tests {
         )];
         let mut thread = classify_thread("run", "t", &messages, &long_thread_config());
         thread.classification_source = ClassificationSource::Ai;
-        rescue_classification_with_valid_signals(&mut thread, &messages, &["ticket".to_string()]);
+        rescue_classification_with_valid_signals(
+            &mut thread,
+            &messages,
+            &["ticket".to_string()],
+            &long_thread_config(),
+        );
         assert_eq!(thread.classification, Classification::Automated);
         assert!(!thread.is_valid_client_request);
     }
@@ -1807,7 +2162,12 @@ mod tests {
     fn rescue_leaves_already_valid_threads_untouched() {
         let mut thread = valid_thread_with_subject("Necesito ayuda con un ticket");
         let reasons_before = thread.reasons.len();
-        rescue_classification_with_valid_signals(&mut thread, &[], &["ticket".to_string()]);
+        rescue_classification_with_valid_signals(
+            &mut thread,
+            &[],
+            &["ticket".to_string()],
+            &long_thread_config(),
+        );
         // Ya era válido: sin cambios ni razones nuevas.
         assert_eq!(thread.reasons.len(), reasons_before);
     }

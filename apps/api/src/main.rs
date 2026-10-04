@@ -5,6 +5,7 @@ mod config;
 mod gmail;
 mod graph;
 mod http;
+mod imap;
 mod mailbox;
 mod policies;
 mod postgres;
@@ -45,7 +46,9 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::registry()
         .with(
             EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,tower_http=info,html5ever::tree_builder=error".into()),
+                .unwrap_or_else(|_| "info,tower_http=info,html5ever::tree_builder=error".into())
+                .add_directive("async_imap=off".parse()?)
+                .add_directive("imap_proto=off".parse()?),
         )
         .with(
             tracing_subscriber::fmt::layer()
@@ -94,6 +97,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let state = AppState::new(config.clone(), storage);
+    scheduler::spawn_maintenance(state.clone());
     if config.scheduler.enabled {
         scheduler::spawn(state.clone());
     }

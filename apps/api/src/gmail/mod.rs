@@ -4,16 +4,16 @@ use base64::{
     Engine,
     engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD},
 };
-use chrono::{DateTime, Days, NaiveDate, Utc};
+use chrono::{DateTime, Utc};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
-use crate::analysis::{AnalysisConfig, EmailMessage, is_automated_sender, is_internal_email};
+use crate::analysis::{AnalysisConfig, EmailMessage, is_automated_sender, is_responder_email};
 use crate::mailbox::{
     GmailLabel, GmailProfile, GmailSendAs, MailboxMetadata, MailboxProvider, MailboxProviderKind,
-    ProviderThread, ThreadListPage,
+    ProviderThread, ThreadListPage, analysis_window_utc, read_mail_json, send_mail_request,
 };
 
 const PRIMARY_INBOX_LABELS: [&str; 2] = ["INBOX", "CATEGORY_PERSONAL"];
@@ -162,17 +162,13 @@ impl MailboxProvider for GmailClient {
         config: &AnalysisConfig,
         max_threads: u32,
     ) -> anyhow::Result<ThreadListPage> {
-        let url = build_thread_list_url(config, max_threads);
-        let response: ThreadListResponse = self
-            .client
-            .get(url)
-            .bearer_auth(access_token)
-            .send()
-            .await?
-            .error_for_status()
-            .context("failed to list Gmail threads")?
-            .json()
-            .await?;
+        let url = build_thread_list_url(config, max_threads)?;
+        let response: ThreadListResponse = read_mail_json(
+            send_mail_request(&self.client, self.client.get(url).bearer_auth(access_token))
+                .await
+                .context("failed to list Gmail threads")?,
+        )
+        .await?;
         Ok(ThreadListPage {
             ids: response
                 .threads
@@ -193,18 +189,14 @@ impl MailboxProvider for GmailClient {
         let url = format!(
             "https://gmail.googleapis.com/gmail/v1/users/me/threads/{thread_id}?format=full"
         );
-        let response: GmailThreadResponse = self
-            .client
-            .get(url)
-            .bearer_auth(access_token)
-            .send()
-            .await?
-            .error_for_status()
-            .with_context(|| format!("failed to fetch Gmail thread {thread_id}"))?
-            .json()
-            .await?;
+        let response: GmailThreadResponse = read_mail_json(
+            send_mail_request(&self.client, self.client.get(url).bearer_auth(access_token))
+                .await
+                .with_context(|| format!("failed to fetch Gmail thread {thread_id}"))?,
+        )
+        .await?;
 
-        let is_primary_inbox = thread_has_all_labels(&response.messages, &PRIMARY_INBOX_LABELS);
+        let is_primary_inbox = thread_matches_selection(&response.messages, config);
         let folder_ids = collect_thread_labels(&response.messages);
         let messages = normalize_visible_messages(response.messages, config)?;
         Ok(ProviderThread {
@@ -212,6 +204,7 @@ impl MailboxProvider for GmailClient {
             is_primary_inbox,
             folder_ids,
             messages,
+            truncated: false,
         })
     }
 
@@ -223,7 +216,10 @@ impl MailboxProvider for GmailClient {
         now: DateTime<Utc>,
     ) -> MailboxMetadata {
         let profile = self.get_profile(access_token).await.ok();
-        let labels = self.list_labels(access_token).await.unwrap_or_default();
+        let (labels, folders_truncated) = match self.list_labels(access_token).await {
+            Ok(labels) => (labels, false),
+            Err(_) => (Vec::new(), true),
+        };
         let send_as = self.list_send_as(access_token).await.unwrap_or_default();
         let filters_count = self.count_filters(access_token).await.unwrap_or(0);
         MailboxMetadata {
@@ -231,6 +227,7 @@ impl MailboxProvider for GmailClient {
             labels,
             send_as,
             filters_count,
+            folders_truncated,
             synced_at: now,
         }
     }
@@ -239,16 +236,17 @@ impl MailboxProvider for GmailClient {
 impl GmailClient {
     /// Catálogo de etiquetas (system + usuario). Bajo `gmail.readonly`.
     pub async fn list_labels(&self, access_token: &str) -> anyhow::Result<Vec<GmailLabel>> {
-        let response: LabelsListResponse = self
-            .client
-            .get("https://gmail.googleapis.com/gmail/v1/users/me/labels")
-            .bearer_auth(access_token)
-            .send()
-            .await?
-            .error_for_status()
-            .context("failed to list Gmail labels")?
-            .json()
-            .await?;
+        let response: LabelsListResponse = read_mail_json(
+            send_mail_request(
+                &self.client,
+                self.client
+                    .get("https://gmail.googleapis.com/gmail/v1/users/me/labels")
+                    .bearer_auth(access_token),
+            )
+            .await
+            .context("failed to list Gmail labels")?,
+        )
+        .await?;
         Ok(response
             .labels
             .into_iter()
@@ -261,16 +259,17 @@ impl GmailClient {
     }
 
     pub async fn get_profile(&self, access_token: &str) -> anyhow::Result<GmailProfile> {
-        let response: ProfileResponse = self
-            .client
-            .get("https://gmail.googleapis.com/gmail/v1/users/me/profile")
-            .bearer_auth(access_token)
-            .send()
-            .await?
-            .error_for_status()
-            .context("failed to fetch Gmail profile")?
-            .json()
-            .await?;
+        let response: ProfileResponse = read_mail_json(
+            send_mail_request(
+                &self.client,
+                self.client
+                    .get("https://gmail.googleapis.com/gmail/v1/users/me/profile")
+                    .bearer_auth(access_token),
+            )
+            .await
+            .context("failed to fetch Gmail profile")?,
+        )
+        .await?;
         Ok(GmailProfile {
             email_address: response.email_address,
             messages_total: response.messages_total,
@@ -280,16 +279,17 @@ impl GmailClient {
 
     /// Alias "enviar como" / direcciones de envío. Bajo `gmail.readonly`.
     pub async fn list_send_as(&self, access_token: &str) -> anyhow::Result<Vec<GmailSendAs>> {
-        let response: SendAsListResponse = self
-            .client
-            .get("https://gmail.googleapis.com/gmail/v1/users/me/settings/sendAs")
-            .bearer_auth(access_token)
-            .send()
-            .await?
-            .error_for_status()
-            .context("failed to list Gmail send-as aliases")?
-            .json()
-            .await?;
+        let response: SendAsListResponse = read_mail_json(
+            send_mail_request(
+                &self.client,
+                self.client
+                    .get("https://gmail.googleapis.com/gmail/v1/users/me/settings/sendAs")
+                    .bearer_auth(access_token),
+            )
+            .await
+            .context("failed to list Gmail send-as aliases")?,
+        )
+        .await?;
         Ok(response
             .send_as
             .into_iter()
@@ -304,26 +304,27 @@ impl GmailClient {
     }
 
     pub async fn count_filters(&self, access_token: &str) -> anyhow::Result<u32> {
-        let response: FiltersListResponse = self
-            .client
-            .get("https://gmail.googleapis.com/gmail/v1/users/me/settings/filters")
-            .bearer_auth(access_token)
-            .send()
-            .await?
-            .error_for_status()
-            .context("failed to list Gmail filters")?
-            .json()
-            .await?;
+        let response: FiltersListResponse = read_mail_json(
+            send_mail_request(
+                &self.client,
+                self.client
+                    .get("https://gmail.googleapis.com/gmail/v1/users/me/settings/filters")
+                    .bearer_auth(access_token),
+            )
+            .await
+            .context("failed to list Gmail filters")?,
+        )
+        .await?;
         Ok(response.filter.len() as u32)
     }
 }
 
-fn build_thread_list_url(config: &AnalysisConfig, max_threads: u32) -> String {
-    let query = gmail_thread_search_query(config);
+fn build_thread_list_url(config: &AnalysisConfig, max_threads: u32) -> anyhow::Result<String> {
+    let query = gmail_thread_search_query(config)?;
     let mut url = format!(
         "https://gmail.googleapis.com/gmail/v1/users/me/threads?q={}&maxResults={}&includeSpamTrash=false",
         utf8_percent_encode(&query, NON_ALPHANUMERIC),
-        max_threads
+        max_threads.clamp(1, 500)
     );
     // Sin selección de etiquetas se mantiene el comportamiento histórico: bandeja
     // principal (INBOX + pestaña Principal). Con selección, el filtrado vive en
@@ -332,14 +333,15 @@ fn build_thread_list_url(config: &AnalysisConfig, max_threads: u32) -> String {
     if config.include_labels.is_empty() && config.exclude_labels.is_empty() {
         url.push_str("&labelIds=INBOX&labelIds=CATEGORY_PERSONAL");
     }
-    url
+    Ok(url)
 }
 
-fn gmail_thread_search_query(config: &AnalysisConfig) -> String {
+fn gmail_thread_search_query(config: &AnalysisConfig) -> anyhow::Result<String> {
+    let (from, to) = analysis_window_utc(config)?;
     let mut parts = vec![format!(
         "after:{} before:{}",
-        config.date_from.replace('-', "/"),
-        gmail_end_exclusive(&config.date_to)
+        from.timestamp() - 1,
+        to.timestamp()
     )];
 
     let includes: Vec<String> = config
@@ -359,7 +361,7 @@ fn gmail_thread_search_query(config: &AnalysisConfig) -> String {
         }
     }
 
-    parts.join(" ")
+    Ok(parts.join(" "))
 }
 
 /// Convierte una etiqueta seleccionada en un operador de búsqueda de Gmail.
@@ -388,14 +390,6 @@ fn label_query_token(label: &str) -> Option<String> {
     Some(token)
 }
 
-fn gmail_end_exclusive(date_to: &str) -> String {
-    NaiveDate::parse_from_str(date_to, "%Y-%m-%d")
-        .ok()
-        .and_then(|date| date.checked_add_days(Days::new(1)))
-        .map(|date| date.format("%Y/%m/%d").to_string())
-        .unwrap_or_else(|| date_to.replace('-', "/"))
-}
-
 fn message_has_label(message: &GmailMessageResponse, label: &str) -> bool {
     message
         .label_ids
@@ -415,6 +409,12 @@ fn thread_has_all_labels(messages: &[GmailMessageResponse], labels: &[&str]) -> 
     messages
         .iter()
         .any(|message| message_has_all_labels(message, labels))
+}
+
+fn thread_matches_selection(messages: &[GmailMessageResponse], config: &AnalysisConfig) -> bool {
+    !config.include_labels.is_empty()
+        || !config.exclude_labels.is_empty()
+        || thread_has_all_labels(messages, &PRIMARY_INBOX_LABELS)
 }
 
 /// Unión deduplicada de las etiquetas de todos los mensajes del hilo.
@@ -453,7 +453,7 @@ fn normalize_message(
     let to_emails = parse_address_list(header(&headers, "to").unwrap_or_default().as_str());
     let cc_emails = parse_address_list(header(&headers, "cc").unwrap_or_default().as_str());
     let date = parse_date(&headers, message.internal_date.as_deref())?;
-    let is_internal = is_internal_email(&from_email, &config.internal_domains);
+    let is_internal = is_responder_email(&from_email, config);
     let is_automated = is_automated_sender(&from_email, &Value::Object(persisted_headers.clone()));
 
     Ok(EmailMessage {
@@ -500,32 +500,58 @@ fn parse_date(
     headers: &Map<String, Value>,
     internal_date: Option<&str>,
 ) -> anyhow::Result<DateTime<Utc>> {
+    // Gmail consulta y ordena por internalDate; Date lo controla el remitente.
+    if let Some(date) = internal_date
+        .and_then(|value| value.parse::<i64>().ok())
+        .and_then(DateTime::from_timestamp_millis)
+    {
+        return Ok(date);
+    }
     if let Some(date) = header(headers, "date")
         && let Ok(parsed) = DateTime::parse_from_rfc2822(&date)
     {
         return Ok(parsed.with_timezone(&Utc));
     }
-    if let Some(ms) = internal_date.and_then(|v| v.parse::<i64>().ok()) {
-        return DateTime::from_timestamp_millis(ms)
-            .ok_or_else(|| anyhow!("invalid Gmail internalDate"));
-    }
-    Ok(Utc::now())
+    Err(anyhow!("Gmail message has no valid date"))
+}
+
+fn parsed_addresses(raw: &str) -> Vec<(Option<String>, String)> {
+    let header = format!("Address: {raw}");
+    let Ok((header, _)) = mailparse::parse_header(header.as_bytes()) else {
+        return Vec::new();
+    };
+    let Ok(addresses) = mailparse::addrparse_header(&header) else {
+        return Vec::new();
+    };
+    addresses
+        .iter()
+        .flat_map(|address| match address {
+            mailparse::MailAddr::Single(address) => vec![(
+                address.display_name.clone(),
+                address.addr.to_ascii_lowercase(),
+            )],
+            mailparse::MailAddr::Group(group) => group
+                .addrs
+                .iter()
+                .map(|address| {
+                    (
+                        address.display_name.clone(),
+                        address.addr.to_ascii_lowercase(),
+                    )
+                })
+                .collect(),
+        })
+        .collect()
 }
 
 fn parse_mailbox(raw: &str) -> (Option<String>, String) {
-    let trimmed = raw.trim();
-    if let (Some(start), Some(end)) = (trimmed.rfind('<'), trimmed.rfind('>')) {
-        let name = trimmed[..start].trim().trim_matches('"').to_string();
-        let email = trimmed[start + 1..end].trim().to_lowercase();
-        return ((if name.is_empty() { None } else { Some(name) }), email);
-    }
-    (None, trimmed.trim_matches('"').to_lowercase())
+    parsed_addresses(raw).into_iter().next().unwrap_or_default()
 }
 
 fn parse_address_list(raw: &str) -> Vec<String> {
-    raw.split(',')
-        .map(|part| parse_mailbox(part).1)
-        .filter(|email| !email.is_empty())
+    parsed_addresses(raw)
+        .into_iter()
+        .map(|(_, email)| email)
         .collect()
 }
 
@@ -599,6 +625,8 @@ mod tests {
             time_to: "23:59".to_string(),
             timezone: "America/Santiago".to_string(),
             internal_domains: vec!["company.test".to_string()],
+            responder_emails: vec![],
+            request_scope: Default::default(),
             ignored_senders: vec![],
             ignored_domains: vec![],
             ignored_keywords: vec![],
@@ -608,9 +636,60 @@ mod tests {
     }
 
     #[test]
+    fn normalization_prefers_provider_date_and_handles_rfc_addresses() {
+        let headers =
+            Map::from_iter([("date".to_string(), json!("Wed, 1 Jan 2020 12:00:00 +0000"))]);
+        assert_eq!(
+            parse_date(&headers, Some("1780358400000")).unwrap(),
+            DateTime::from_timestamp_millis(1780358400000).unwrap()
+        );
+        assert!(parse_date(&Map::new(), None).is_err());
+        assert_eq!(
+            parse_address_list(
+                "\"Cliente, Uno\" <one@example.com>, =?UTF-8?Q?Jos=C3=A9?= <two@example.com>"
+            ),
+            ["one@example.com", "two@example.com"]
+        );
+        assert_eq!(
+            parse_mailbox("=?UTF-8?Q?Jos=C3=A9?= <two@example.com>")
+                .0
+                .as_deref(),
+            Some("José")
+        );
+    }
+
+    #[test]
     fn query_without_labels_keeps_legacy_inbox_behavior() {
-        let url = build_thread_list_url(&config(), 50);
+        let url = build_thread_list_url(&config(), 50).unwrap();
         assert!(url.contains("labelIds=INBOX&labelIds=CATEGORY_PERSONAL"));
+    }
+
+    #[test]
+    fn explicit_label_selection_accepts_archived_and_other_categories() {
+        let archived = vec![gmail_message("archived", vec!["Label_Support"])];
+        let mut cfg = config();
+        assert!(!thread_matches_selection(&archived, &cfg));
+        cfg.include_labels = vec!["Soporte".to_string()];
+        assert!(thread_matches_selection(&archived, &cfg));
+        cfg.include_labels.clear();
+        cfg.exclude_labels = vec!["CATEGORY_PROMOTIONS".to_string()];
+        assert!(thread_matches_selection(&archived, &cfg));
+    }
+
+    #[test]
+    fn search_uses_epoch_boundaries_in_the_tenant_timezone() {
+        let mut cfg = config();
+        cfg.date_from = "2026-10-04".to_string();
+        cfg.date_to = cfg.date_from.clone();
+        let query = gmail_thread_search_query(&cfg).unwrap();
+        let (from, to) = analysis_window_utc(&cfg).unwrap();
+        assert_eq!(
+            query,
+            format!("after:{} before:{}", from.timestamp() - 1, to.timestamp())
+        );
+        assert_eq!(from.to_rfc3339(), "2026-10-04T03:00:00+00:00");
+        cfg.timezone = "invalid".to_string();
+        assert!(gmail_thread_search_query(&cfg).is_err());
     }
 
     #[test]
@@ -618,14 +697,14 @@ mod tests {
         let mut cfg = config();
         cfg.include_labels = vec!["CATEGORY_PROMOTIONS".to_string(), "Soporte".to_string()];
         cfg.exclude_labels = vec!["CATEGORY_SOCIAL".to_string()];
-        let query = gmail_thread_search_query(&cfg);
+        let query = gmail_thread_search_query(&cfg).unwrap();
         assert!(query.contains("category:promotions"));
         assert!(query.contains("label:\"Soporte\""));
         assert!(query.contains(" OR "));
         assert!(query.contains("-category:social"));
 
         // Con selección de etiquetas no se anexan los labelIds fijos.
-        let url = build_thread_list_url(&cfg, 50);
+        let url = build_thread_list_url(&cfg, 50).unwrap();
         assert!(!url.contains("labelIds=INBOX"));
     }
 
@@ -656,7 +735,7 @@ mod tests {
 
     #[test]
     fn thread_list_url_requests_primary_inbox_and_excludes_spam_and_trash() {
-        let url = url::Url::parse(&build_thread_list_url(&config(), 25)).unwrap();
+        let url = url::Url::parse(&build_thread_list_url(&config(), 25).unwrap()).unwrap();
         let query = url
             .query_pairs()
             .collect::<std::collections::HashMap<_, _>>();
@@ -667,7 +746,7 @@ mod tests {
 
         assert_eq!(
             query.get("q").map(|value| value.as_ref()),
-            Some("after:2026/06/01 before:2026/06/13")
+            Some("after:1780286399 before:1781323200")
         );
         assert_eq!(
             query.get("maxResults").map(|value| value.as_ref()),

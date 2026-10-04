@@ -23,7 +23,7 @@ export function deriveAccessState(account: AccountStatus): AccessState {
   const entitlement = account.entitlement;
 
   if (entitlement.allowed) {
-    return account.gmail_connected ? { kind: "ready" } : { kind: "connect_gmail" };
+    return account.gmail_connected && !account.mailbox_needs_reauth ? { kind: "ready" } : { kind: "connect_gmail" };
   }
 
   const status = entitlement.subscription_status;

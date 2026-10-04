@@ -16,6 +16,7 @@ import { PricingPlans } from "./access/PricingPlans";
 const PROVIDER_NAMES: Record<MailboxProviderId, string> = {
   google: "de Google",
   microsoft: "de Microsoft",
+  imap: "de un proveedor IMAP",
 };
 
 interface CuentaViewProps {
@@ -29,6 +30,8 @@ interface CuentaViewProps {
   /** Cancela al fin del período. */
   onCancel: () => void;
   cancelPending: boolean;
+  onReconcile: () => void;
+  reconcilePending: boolean;
   onDisconnectGmail: () => void;
   gmailDisconnectPending: boolean;
   onLogoutAll: () => void;
@@ -75,6 +78,8 @@ export function CuentaView({
   onOpenChangePlan,
   onCancel,
   cancelPending,
+  onReconcile,
+  reconcilePending,
   onDisconnectGmail,
   gmailDisconnectPending,
   onLogoutAll,
@@ -86,11 +91,11 @@ export function CuentaView({
   const [confirmingLogoutAll, setConfirmingLogoutAll] = useState(false);
   const entitlement = account.entitlement;
   const planName = entitlement.plan?.name ?? null;
-  const planId = entitlement.plan?.id ?? null;
   const status = entitlement.subscription_status;
-  const blocked = isBlockedStatus(status);
+  const blocked = !entitlement.allowed && isBlockedStatus(status);
   const scheduledCancel = entitlement.cancel_at_period_end && entitlement.allowed;
   const canManageSubscription = status === "active" || status === "trialing";
+  const canCancelSubscription = !scheduledCancel && (canManageSubscription || status === "past_due");
 
   const periodEnd = formatDate(entitlement.current_period_end);
   const trialEnd = formatDate(entitlement.trial_ends_at);
@@ -119,6 +124,10 @@ export function CuentaView({
           </div>
         )}
 
+        {status && <button type="button" className="btn-ghost" disabled={reconcilePending} onClick={onReconcile}>
+          <RefreshCw size={16} />{reconcilePending ? "Consultando pago…" : "Actualizar estado de pago"}
+        </button>}
+
         {!blocked && (
           <div className="cuenta-plan">
             <p className="cuenta-plan-name">
@@ -138,20 +147,23 @@ export function CuentaView({
 
             <div className="cuenta-actions">
               {scheduledCancel ? (
-                <button
-                  type="button"
-                  className="btn-primary"
-                  disabled={!planId || checkoutLoadingPlanId === planId}
-                  onClick={() => planId && onChoosePlan(planId, "monthly")}
-                >
-                  <RefreshCw size={16} />
-                  {planId && checkoutLoadingPlanId === planId ? "Reanudando…" : "Reanudar suscripción"}
-                </button>
+                <p className="muted-note">Podrás contratar nuevamente al terminar el período que ya pagaste.</p>
               ) : canManageSubscription ? (
-                <>
                   <button type="button" className="btn-primary" onClick={onOpenChangePlan}>
                     Cambiar de plan <ArrowUpRight size={16} />
                   </button>
+              ) : status !== "past_due" ? (
+                <button type="button" className="btn-primary" onClick={onOpenChangePlan}>
+                  Elegir un plan <ArrowUpRight size={16} />
+                </button>
+              ) : (
+                <p className="muted-note">Actualiza el estado de pago o cancela la suscripción anterior antes de contratar otra.</p>
+              )}
+            </div>
+          </div>
+        )}
+
+        {canCancelSubscription && <div className="cuenta-actions">
                   {!confirmingCancel ? (
                     <button
                       type="button"
@@ -163,7 +175,7 @@ export function CuentaView({
                   ) : (
                     <div className="cuenta-confirm">
                       <span>
-                        Mantendrás acceso{accessEnd ? ` hasta el ${accessEnd}` : " hasta el fin del período"}.
+                        Detendrás los próximos cobros. {entitlement.allowed && accessEnd ? `Mantendrás el acceso adquirido hasta el ${accessEnd}.` : "El acceso posterior se regirá por el plan disponible en tu cuenta."}
                         ¿Cancelar?
                       </span>
                       <div className="cuenta-confirm-actions">
@@ -188,15 +200,7 @@ export function CuentaView({
                       </div>
                     </div>
                   )}
-                </>
-              ) : (
-                <button type="button" className="btn-primary" onClick={onOpenChangePlan}>
-                  Elegir un plan <ArrowUpRight size={16} />
-                </button>
-              )}
-            </div>
-          </div>
-        )}
+        </div>}
 
         {account.gmail_connected && (
           <div className="cuenta-plan cuenta-row">
@@ -298,11 +302,11 @@ export function CuentaView({
               vuelven a estar disponibles al reactivar. Solo se bloquean los análisis nuevos.
             </p>
           </div>
-          <PricingPlans
+          {status !== "past_due" && <PricingPlans
             plans={plans}
             onChoosePlan={onChoosePlan}
             loadingPlanId={checkoutLoadingPlanId}
-          />
+          />}
           <PaymentNotes />
         </section>
       )}

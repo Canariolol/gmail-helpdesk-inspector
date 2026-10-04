@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { AlertTriangle } from "lucide-react";
 import type { Classification, ThreadDetail } from "../../api/types";
-import { classificationLabels, formatDateTime } from "../../lib/format";
+import { classificationLabels, useDateTimeFormat } from "../../lib/format";
 
 type Props = {
   detail: ThreadDetail;
@@ -14,8 +14,10 @@ type Props = {
 // El padre monta este formulario con key={thread.id}, así el estado se
 // reinicia al cambiar de hilo sin efectos de sincronización.
 export function ReviewForm({ detail, onReview, saving, reviewError, reviewSavedAt }: Props) {
-  const [classification, setClassification] = useState<Classification>(detail.thread.classification);
-  const [answered, setAnswered] = useState(detail.thread.is_answered);
+  const formatDateTime = useDateTimeFormat();
+  const suggestion = detail.thread.ai_suggestion;
+  const [classification, setClassification] = useState<Classification>(suggestion?.classification ?? detail.thread.classification);
+  const [answered, setAnswered] = useState(suggestion?.is_answered ?? detail.thread.is_answered);
   const [notes, setNotes] = useState(detail.thread.notes ?? "");
   const [savedFlash, setSavedFlash] = useState(false);
 
@@ -33,17 +35,21 @@ export function ReviewForm({ detail, onReview, saving, reviewError, reviewSavedA
     return () => clearTimeout(timer);
   }, [reviewSavedAt]);
 
-  // Los mensajes de traza no se eligen: salen del análisis de la casilla. Se
-  // muestran como dato y se reenvían tal cual para no borrarlos al guardar.
-  const firstClient = detail.thread.first_client_message_id ?? null;
-  const firstReply = detail.thread.first_internal_reply_message_id ?? null;
-  const lastInternal = detail.thread.last_internal_message_id ?? null;
+  const knownId = (proposed: string | null | undefined, current: string | null) =>
+    proposed && detail.messages.some((message) => message.id === proposed) ? proposed : current;
+  const [firstClient, setFirstClient] = useState<string | null>(() => knownId(suggestion?.first_client_message_id, detail.thread.first_client_message_id));
+  const [firstReply, setFirstReply] = useState<string | null>(() => knownId(suggestion?.first_internal_reply_message_id, detail.thread.first_internal_reply_message_id));
+  const [lastInternal, setLastInternal] = useState<string | null>(() => knownId(suggestion?.last_internal_message_id, detail.thread.last_internal_message_id));
 
-  const describe = (messageId: string | null) => {
-    const message = detail.messages.find((item) => item.id === messageId);
-    if (!message) return "—";
-    return `${message.from_email} · ${formatDateTime(message.date)}`;
-  };
+  const requesterMessages = detail.messages.filter((message) => !message.is_internal && !message.is_automated);
+  const responderMessages = detail.messages.filter((message) => message.is_internal && !message.is_automated);
+  const traceSelect = (label: string, value: string | null, change: (value: string | null) => void, messages: typeof detail.messages) => <label>
+    {label}
+    <select value={value ?? ""} onChange={(event) => change(event.target.value || null)}>
+      <option value="">Sin mensaje seleccionado</option>
+      {messages.map((message) => <option key={message.id} value={message.id}>{message.from_email} · {formatDateTime(message.date)} · {message.snippet.slice(0, 60)}</option>)}
+    </select>
+  </label>;
 
   return (
     <form
@@ -54,18 +60,18 @@ export function ReviewForm({ detail, onReview, saving, reviewError, reviewSavedA
           new_classification: classification,
           is_answered: answered,
           first_client_message_id: firstClient,
-          first_internal_reply_message_id: firstReply,
-          last_internal_message_id: lastInternal,
+          first_internal_reply_message_id: answered ? firstReply : null,
+          last_internal_message_id: answered ? lastInternal : null,
           notes: notes || null,
         });
       }}
     >
       <h3>Revisión manual</h3>
-      {detail.thread.manual_review_required && detail.thread.classification_source === "ai" && (
+      {suggestion && (
         <p className="ai-suggestion">
           <AlertTriangle size={16} aria-hidden="true" />
           <span>
-            Mira sugiere estado: <strong>{classificationLabels[detail.thread.classification]} · {detail.thread.is_answered ? "Respondido" : "Sin respuesta"}</strong>
+            Mira sugiere: <strong>{classificationLabels[suggestion.classification]} · {suggestion.is_answered ? "Respondido" : "Sin respuesta registrada"}</strong>. La propuesta no cuenta como confirmada hasta que guardes tu revisión.
           </span>
         </p>
       )}
@@ -83,20 +89,12 @@ export function ReviewForm({ detail, onReview, saving, reviewError, reviewSavedA
         <input type="checkbox" checked={answered} onChange={(event) => setAnswered(event.target.checked)} />
         Respondido
       </label>
-      <dl className="review-trace">
-        <div>
-          <dt>Primer mensaje cliente</dt>
-          <dd>{describe(firstClient)}</dd>
-        </div>
-        <div>
-          <dt>Primera respuesta interna</dt>
-          <dd>{describe(firstReply)}</dd>
-        </div>
-        <div>
-          <dt>Último envío interno</dt>
-          <dd>{describe(lastInternal)}</dd>
-        </div>
-      </dl>
+      {traceSelect("Mensaje de solicitud", firstClient, setFirstClient, requesterMessages)}
+      {answered && <>
+        <p className="wizard-help">Elige envíos dirigidos al solicitante en Para o CC. Si faltan destinatarios en la línea de tiempo, confirma la entrega en tu casilla antes de guardar.</p>
+        {traceSelect("Primera respuesta del equipo", firstReply, setFirstReply, responderMessages)}
+        {traceSelect("Último envío del equipo", lastInternal, setLastInternal, responderMessages)}
+      </>}
       <label>
         Nota
         <textarea value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="Añadir nota..." />

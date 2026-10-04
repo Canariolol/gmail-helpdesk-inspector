@@ -52,8 +52,9 @@ const MICROSOFT_SPF_MARKER: &str = "spf.protection.outlook.com";
 pub enum DetectedProvider {
     Google,
     Microsoft,
-    /// El correo del dominio no está en Google ni Microsoft (Hostinger, cPanel,
-    /// Zoho…). Todavía no hay adaptador para ese caso.
+    /// Otro proveedor: requiere que el usuario configure IMAP sobre TLS.
+    Imap,
+    /// Conservado para leer registros históricos de la lista de espera.
     Unsupported,
     /// No se pudo determinar: sin MX, gateway que no se pudo desenmascarar, o
     /// error de DNS.
@@ -79,7 +80,6 @@ pub enum MxVerdict {
 #[derive(Debug, Clone)]
 pub struct Detection {
     pub provider: DetectedProvider,
-    pub mx_hosts: Vec<String>,
 }
 
 /// Correo de alguien cuyo proveedor aún no soportamos, para avisarle cuando exista.
@@ -238,7 +238,7 @@ pub async fn detect(http: &Client, domain: &str) -> anyhow::Result<Detection> {
     let provider = match classify_mx_hosts(&mx_hosts) {
         MxVerdict::Google => DetectedProvider::Google,
         MxVerdict::Microsoft => DetectedProvider::Microsoft,
-        MxVerdict::Other => DetectedProvider::Unsupported,
+        MxVerdict::Other => DetectedProvider::Imap,
         MxVerdict::None => DetectedProvider::Unknown,
         // Detrás de un gateway el MX no dice nada del proveedor real: si el SPF
         // tampoco lo delata, es `Unknown` (no sabemos), nunca `Unsupported`.
@@ -255,7 +255,7 @@ pub async fn detect(http: &Client, domain: &str) -> anyhow::Result<Detection> {
         }
     };
 
-    Ok(Detection { provider, mx_hosts })
+    Ok(Detection { provider })
 }
 
 #[cfg(test)]
