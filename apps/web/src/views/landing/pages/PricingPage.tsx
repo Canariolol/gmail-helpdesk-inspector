@@ -22,12 +22,17 @@ export function PricingPage({ onLogin, onSignup }: Props) {
         <header className="lp-pricing-head">
           <span className="lp-focus-eyebrow">Planes</span>
           <h1>Precios claros, sin sorpresas</h1>
-          <p>Paga en CLP con MercadoPago. Cancela cuando quieras.</p>
+          <p>Empieza con Mira Free, sin tarjeta. Los planes de pago se cobran en CLP por Mercado Pago.</p>
         </header>
 
         {plans.isLoading && <p className="lp-pricing-state">Cargando planes…</p>}
         {plans.isError && (
-          <p className="lp-pricing-state">No pudimos cargar los planes. Intenta nuevamente más tarde.</p>
+          <div className="lp-pricing-state" role="alert">
+            <p>No pudimos cargar los planes. Revisa tu conexión e inténtalo nuevamente.</p>
+            <button type="button" className="lp-btn-ghost" onClick={() => plans.refetch()}>
+              Reintentar
+            </button>
+          </div>
         )}
         {plans.data && (
           <PricingPlans
@@ -41,8 +46,9 @@ export function PricingPage({ onLogin, onSignup }: Props) {
         <EnterpriseContactCard />
 
         <p className="lp-pricing-note">
-          Los precios en USD son solo referencia internacional. El cobro se realiza en pesos chilenos
-          (CLP).
+          Los análisis manuales y programados comparten los cupos mensuales del plan. Los precios en
+          USD son una referencia mensual; el cobro se realiza en pesos chilenos (CLP). Puedes cancelar
+          la renovación desde tu cuenta y conservar el acceso hasta el fin del período adquirido.
         </p>
       </section>
     </PublicPage>

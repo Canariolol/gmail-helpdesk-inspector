@@ -1,4 +1,13 @@
-import type { OrgConfig, RequestScope } from "../api/types";
+import type { AnalysisRun, OrgConfig, RequestScope } from "../api/types";
+
+export function buildRetryAnalysisPayload(config: AnalysisRun["config"]) {
+  return {
+    date_from: config.date_from,
+    date_to: config.date_to,
+    time_from: config.time_from,
+    time_to: config.time_to,
+  };
+}
 
 export type WizardDraft = {
   orgName: string;

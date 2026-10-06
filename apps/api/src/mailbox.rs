@@ -80,6 +80,17 @@ pub struct ProviderThread {
     pub truncated: bool,
 }
 
+#[derive(Debug)]
+pub struct MailboxMemoryBudgetExceeded;
+
+impl std::fmt::Display for MailboxMemoryBudgetExceeded {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("mailbox_conversation_memory_budget_exceeded")
+    }
+}
+
+impl std::error::Error for MailboxMemoryBudgetExceeded {}
+
 /// Lo que Mira necesita de una casilla, sea cual sea el proveedor. El motor de
 /// análisis vive por debajo de esta frontera y no conoce ningún proveedor.
 #[async_trait]

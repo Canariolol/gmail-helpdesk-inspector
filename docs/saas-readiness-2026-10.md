@@ -28,6 +28,9 @@ El producto admite tenants independientes con una cuenta y una casilla por organ
 | Retención era sólo metadata | Al vencer se bloquea lectura; mantenimiento elimina runs y sus hilos, mensajes, auditorías y overrides. Runs históricos sin fecha usan su snapshot o 90 días. La política nueva aplica a futuros runs. |
 | Scheduler y reportes frágiles | Días y minutos arbitrarios, ventanas por tenant y claim inicial atómico; dos tenants se procesan concurrentemente. Reintentos de análisis espaciados, aviso de fallo configurable y reintento de envío sin repetir análisis. |
 | URL malformada terminaba el servidor web | Devuelve 400 y continúa atendiendo. Streams y proxy tienen manejo de errores y timeout. |
+| Acumulación de cuerpos y páginas podía agotar memoria | Se preparan extractos de IA y se descartan cuerpos completos antes de encolar. Presupuesto de datos retenidos de 32 MiB por run, 16 MiB agregados por conversación Graph y una recuperación a la vez por run. Exceder capacidad falla explícitamente y pide reducir la ventana. |
+| Reintento de análisis fallido intentaba reutilizar un run inmutable | La interfaz crea un run nuevo con la misma ventana y la política vigente; no copia el tenant, la casilla ni filtros antiguos. |
+| Presentación pública contenía placeholders e información desactualizada | Textos y unidades de precios/checkout corregidos; renovación automática explícita, demos identificadas y navegación móvil, grilla de planes y scroll entre páginas reparados. Los documentos legales conservan su estado de borrador. |
 | Dependencias observadas por auditoría | Actualizados `anyhow` y `event-listener`; eliminado JWT sin uso. Excepción RSA limitada a MySQL opcional de SQLx, ausente del árbol compilado y protegida por un guard en CI. |
 | Respaldos sin prueba continua de recuperación | Drill en CI usa el script real y compara datos, estructura, RLS y permisos en una base nueva. Dumps con permisos privados, publicación atómica y rotación posterior a la verificación. |
 
@@ -42,6 +45,11 @@ integraciones con PostgreSQL real, 17 tests del worker y 6 regresiones web.
 Formato, Clippy con `-D warnings`, builds release/TypeScript/Vite y el drill
 de respaldo/restauración pasaron. Los formularios de conexión se revisaron
 en navegador local. No se utilizaron casillas reales ni se desplegó esta versión.
+
+El cierre local del 6 de octubre aprobó 267 tests de Rust, 17 del worker y 7
+regresiones web, además de Clippy y builds. CI remoto aprobó también las seis
+integraciones PostgreSQL de la base previa a ese cierre. Se restauró un respaldo
+real del entorno desplegado en PostgreSQL 17 aislado antes de aplicar la migración.
 
 - `scripts/check-all.sh`: detección de secretos versionados, formato Rust, tests, Clippy sin warnings, build release, tests del worker, audit npm, build TypeScript/Vite y regresiones web.
 - `scripts/check-postgres.sh`: PostgreSQL 16 descartable; aplica las migraciones y prueba aislamiento, permisos, cuotas concurrentes, checkout locks, primer claim del scheduler, borrado durante escritura, retención y reconexiones. Incluye respaldo y restauración completos de `mira` y `billing` en una base nueva, con comparación de datos y estructura y rechazo de roles públicos.
@@ -61,13 +69,13 @@ Las auditorías npm y Python no encontraron vulnerabilidades conocidas. `cargo a
 5. Comprobar `/health`, `/health/ready`, `/mailbox/providers`, inicio de sesión, una ejecución por tenant, revisión, reporte consolidado y reconexión. Revisar conteos del mantenimiento y errores sanitizados.
 6. Antes de revertir una versión, considerar que el borrado por retención es definitivo en la base activa; volver al código anterior no restaura datos. Un respaldo tiene su propia política de conservación.
 
-Las reservas sin confirmación después de una caída abrupta del proceso pueden contabilizar consumo conservador; requieren conciliación operativa si corresponde. Cuatro análisis ejecutan simultáneamente por instancia, con espera máxima de cinco minutos antes de informar falta de capacidad; el rate limiter sigue siendo local. Mantener la configuración de una instancia para la primera etapa o implementar un limiter distribuido y pruebas de carga antes de escalar réplicas. El scheduler no hace backfill automático de varios días en que el servicio estuvo detenido; el endpoint permite backfill explícito.
+Las reservas sin confirmación después de una caída abrupta del proceso pueden contabilizar consumo conservador; requieren conciliación operativa si corresponde. Cuatro análisis ejecutan simultáneamente por instancia, cada uno con una recuperación de conversación a la vez y hasta 32 MiB de datos preparados. La espera máxima para un slot es de cinco minutos; el rate limiter sigue siendo local. Estos límites reducen acumulación de memoria, pero no reemplazan medir carga con casillas reales. Mantener una instancia para la primera etapa o implementar un limiter distribuido y pruebas de carga antes de escalar réplicas. El scheduler no hace backfill automático de varios días en que el servicio estuvo detenido; el endpoint permite backfill explícito.
 
 ## Pendientes que requieren servicios o cuentas externas
 
 | Validación | Criterio de cierre |
 |---|---|
-| Google público | Registro, consentimiento y verificación de scopes restringidos según [requisitos de Gmail](https://developers.google.com/workspace/gmail/api/auth/scopes). Evaluar los requisitos de verificación y evaluación de seguridad aplicables antes de aceptar usuarios externos. |
+| Google público | `gmail.readonly` es restringido: para el SaaS público que procesa correo en servidores, completar verificación del scope y evaluación de seguridad vigente con renovación al menos anual, salvo excepción documentada aplicable. La revisión no observó el estado de aprobación/CASA ni la audiencia en consola. [Requisitos oficiales](https://developers.google.com/identity/protocols/oauth2/production-readiness/restricted-scope-verification), [comprobaciones](google-oauth.md). |
 | Microsoft | Probar Outlook/Hotmail, Microsoft 365 de otro directorio y un buzón compartido con permisos delegados reales; verificar audiencia multitenant, publisher y consentimiento del administrador. [Runbook](runbook-azure-ad-microsoft.md). |
 | IMAP | Probar un servidor externo con TLS real, carpeta Enviados, límites y revocación de contraseña. Las pruebas locales no verifican compatibilidad con cada hosting. |
 | Mercado Pago | Ejecutar sandbox con compra mensual/anual, primer cobro, renovación fallida, recuperación, cancelación y replay de webhooks. Los tests actuales simulan respuestas HTTP del proveedor. |
@@ -75,5 +83,13 @@ Las reservas sin confirmación después de una caída abrupta del proceso pueden
 | Calidad por tenant | Comparar una muestra etiquetada con los resultados; ajustar criterios y umbrales. No prometer precisión universal a partir de la usuaria inicial ni de datos sintéticos. |
 
 El cierre completo de cuenta sigue usando el procedimiento operativo publicado; no se añade un borrado autoservicio que pueda dejar una suscripción cobrando o perder registros financieros. Múltiples miembros/casillas y cierre de tickets no forman parte de la capacidad anunciada de esta versión.
+
+La revisión del 6 de octubre añadió smoke de la landing, precios mensual/anual,
+demos, navegación legal y recuperación de error al cargar planes, en escritorio
+y pantallas de 320/390 px. Sigue pendiente completar los datos del operador,
+contacto, regiones de procesamiento y documentos legales, además de confirmar
+documentación tributaria. El precio mostrado corresponde al importe final en CLP;
+no se afirma un tratamiento de IVA no verificado. El preflight con respaldo real,
+restauración y migración se registra en [la bitácora operativa](production-readiness-log.md).
 
 Resend conserva las claves de idempotencia durante 24 horas; los reintentos automáticos de entrega se limitan a 23 horas desde el inicio de la ventana. Fuera de ese plazo se revisa el incidente para evitar duplicados. [Documentación de Resend](https://resend.com/docs/dashboard/emails/idempotency-keys).

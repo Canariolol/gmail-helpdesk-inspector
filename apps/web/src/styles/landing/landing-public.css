@@ -266,7 +266,26 @@
 }
 
 @media (max-width: 560px) {
-  .lp-focus-nav-links {
+  .lp-focus-nav {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
     gap: var(--space-3);
+  }
+
+  .lp-focus-nav-links {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    gap: var(--space-3);
+  }
+
+  .lp-focus-nav-actions {
+    grid-column: 2;
+    grid-row: 1;
+    gap: var(--space-2);
+  }
+
+  .lp-focus-nav-cta {
+    padding-inline: 12px;
+    white-space: nowrap;
   }
 }

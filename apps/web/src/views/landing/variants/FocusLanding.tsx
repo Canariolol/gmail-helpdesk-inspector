@@ -38,7 +38,7 @@ function useCountUp(target: number, durationMs = 900): number {
 
 export function FocusLanding({ onLogin, onSignup }: VariantProps) {
   const hero = HERO.focus;
-  const answered = useCountUp(91);
+  const answered = useCountUp(92);
 
   return (
     <div className="lp lp-focus">
@@ -57,7 +57,7 @@ export function FocusLanding({ onLogin, onSignup }: VariantProps) {
                 {hero.cta} <ArrowRight size={18} />
               </button>
               <span className="lp-inline-note lp-focus-note">
-                <Lock size={14} /> Solo lectura. Punto.
+                <Lock size={14} /> Leemos, no modificamos.
               </span>
             </div>
           </div>
@@ -66,7 +66,7 @@ export function FocusLanding({ onLogin, onSignup }: VariantProps) {
               {answered}<i>%</i>
             </strong>
             <span className="lp-focus-stat-pulse" />
-            <span className="lp-focus-stat-label">solicitudes respondidas / semana</span>
+            <span className="lp-focus-stat-label">ejemplo · solicitudes respondidas / semana</span>
             <svg className="lp-focus-spark" width="240" height="56" viewBox="0 0 240 56">
               <line x1="0" y1="55" x2="240" y2="55" />
               <polyline points="4,30 42,34 80,10 118,22 156,36 194,44 236,18" />
@@ -75,7 +75,7 @@ export function FocusLanding({ onLogin, onSignup }: VariantProps) {
         </section>
 
         <Reveal className="lp-focus-rx">
-          <span className="lp-focus-eyebrow">Así audita Mira</span>
+          <span className="lp-focus-eyebrow">Así audita Mira · ejemplo ilustrativo</span>
           <h2>Un correo, radiografiado.</h2>
           <RadiografiaDemo />
         </Reveal>
@@ -123,7 +123,7 @@ export function FocusLanding({ onLogin, onSignup }: VariantProps) {
         </section>
 
         <Reveal className="lp-focus-demo">
-          <span className="lp-focus-eyebrow">Explora el panel</span>
+          <span className="lp-focus-eyebrow">Explora el panel · datos de ejemplo</span>
           <DemoInspector />
         </Reveal>
 
@@ -171,7 +171,7 @@ export function FocusLanding({ onLogin, onSignup }: VariantProps) {
           <div className="lp-focus-final-copy">
             <span className="lp-pulse-divider" aria-hidden="true" />
             <h2>Empieza a medir hoy.</h2>
-            <p>Mira ya está lista para auditar tu casilla. Tú solo conéctala.</p>
+            <p>Crea tu cuenta, conecta una casilla y define tus criterios de atención antes de analizar.</p>
             <button type="button" className="lp-btn-primary lp-focus-cta" onClick={onSignup}>
               {hero.cta} <ArrowRight size={18} />
             </button>

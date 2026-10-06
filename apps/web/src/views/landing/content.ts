@@ -46,19 +46,19 @@ export const ADVANTAGES: Advantage[] = [
     id: "privacidad",
     Icon: ShieldCheck,
     title: "Privacidad por diseño",
-    body: "Leemos tu casilla para el análisis. No enviamos, no etiquetamos, no archivamos y no guardamos el cuerpo completo de tus correos.",
+    body: "Leemos tu casilla para el análisis. No enviamos desde ella, no etiquetamos, no archivamos y no guardamos el cuerpo completo de tus correos.",
   },
   {
     id: "ia",
     Icon: Sparkles,
     title: "Mira, tu auditora con IA",
-    body: "Mira marca los casos dudosos por ti. Se habilita con tu autorización y puedes desactivarla cuando quieras y la última palabra siempre es tuya.",
+    body: "La auditoría con IA requiere tu autorización y puedes desactivarla. Sus propuestas pueden contener errores: revisa los casos dudosos y confirma la clasificación.",
   },
   {
     id: "friccion",
     Icon: Plug,
-    title: "Cero fricción",
-    body: "Conectas tu casilla, defines qué cuenta como solicitud y listo. No reemplaza tu correo: lo mide en silencio.",
+    title: "Conserva tu correo",
+    body: "Conectas tu casilla y defines qué cuenta como solicitud. Mira mide los hilos sin cambiar tu forma de atenderlos.",
   },
 ];
 
@@ -72,17 +72,17 @@ export const STEPS: Step[] = [
   {
     n: 1,
     title: "Conecta tu correo",
-    body: "Enlazas tu casilla de soporte en un par de clics. Mira lee los hilos para medir",
+    body: "Enlazas una casilla de Gmail, Microsoft o un proveedor con IMAP sobre TLS. Tu administrador puede tener que autorizar el acceso.",
   },
   {
     n: 2,
     title: "Ajústalo a tu manera",
-    body: "Eliges qué cuenta como solicitud, qué ignorar, etc. Todo es configurable.",
+    body: "Defines quién solicita y quién responde, qué remitentes ignorar y el horario del análisis. La IA se habilita con tu autorización.",
   },
   {
     n: 3,
     title: "Métricas automáticas",
-    body: "Mira te enviará un informe recurrente con tus KPIs y también puedes realizar el análisis de forma proactiva",
+    body: "Ejecutas un análisis o programas informes por correo. Ambos usan los cupos de tu plan; las métricas reflejan las respuestas observadas en la casilla.",
   },
 ];
 
@@ -100,6 +100,6 @@ export const REPORTS = {
 
 // --- Banda de confianza (franja full-width) ---
 export const TRUST_BAND = {
-  headline: "Solo lectura. Punto.",
-  items: ["No envía correos", "No borra nada", "No toca tu bandeja"],
+  headline: "Tu correo sin cambios.",
+  items: ["No envía desde tu casilla", "No borra nada", "No modifica tu bandeja"],
 };

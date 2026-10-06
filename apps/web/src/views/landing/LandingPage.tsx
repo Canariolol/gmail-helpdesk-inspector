@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { API_BASE_URL } from "../../api/client";
 import { AboutPage } from "./pages/AboutPage";
 import { LegalPage } from "./pages/LegalPage";
@@ -13,6 +14,10 @@ const authUrl = (hint: "sign-up" | "sign-in") =>
 
 export function LandingPage() {
   const route = usePublicRoute();
+  useEffect(() => {
+    window.scrollTo({ top: 0, left: 0, behavior: "instant" });
+  }, [route]);
+
   const onSignup = () => {
     window.location.href = authUrl("sign-up");
   };

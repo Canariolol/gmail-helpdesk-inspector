@@ -3,7 +3,7 @@ import { Lock } from "lucide-react";
 const REPORT_STATS = [
   { label: "Analizados", value: "428", tone: "blue" },
   { label: "Válidas", value: "173", tone: "mint" },
-  { label: "Respondidas", value: "91%", tone: "teal" },
+  { label: "Respondidas", value: "92%", tone: "teal" },
   { label: "Sin respuesta registrada", value: "14", tone: "orange" },
   { label: "1ª respuesta", value: "42 min", tone: "amber" },
 ];
@@ -15,7 +15,7 @@ export function ReporteMock() {
         <div className="lp-rep-dots">
           <span /> <span /> <span />
         </div>
-        <span className="lp-rep-app">Bandeja de entrada</span>
+        <span className="lp-rep-app">Reporte de ejemplo</span>
       </header>
 
       <div className="lp-rep-meta">

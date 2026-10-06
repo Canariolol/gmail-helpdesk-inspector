@@ -28,7 +28,7 @@ export function PricingPlans({
   const hasAnnualOption = plans.some((plan) => plan.clp_annual !== null);
 
   return (
-    <div>
+    <div className="pricing-plans">
       {hasAnnualOption && (
         <div className="pricing-interval-toggle" role="group" aria-label="Ciclo de facturación">
           <button
@@ -68,8 +68,8 @@ export function PricingPlans({
                 <strong>${formatClp(price)}</strong>
                 <span>CLP / {showsAnnual ? "año" : "mes"}</span>
               </p>
-              <p className="pricing-usd">≈ USD {plan.usd_reference_monthly} · referencia internacional</p>
-              <p className="pricing-iva-note">Precios en CLP, IVA incluido</p>
+              <p className="pricing-usd">≈ USD {plan.usd_reference_monthly}/mes · referencia mensual</p>
+              <p className="pricing-iva-note">Precio final en CLP</p>
 
               {plan.trial_days > 0 ? (
                 <p className="pricing-trial">{plan.trial_days} días de prueba · con medio de pago</p>
@@ -82,14 +82,20 @@ export function PricingPlans({
                   <Check size={15} /> {plan.limits.runs_per_month} análisis al mes
                 </li>
                 <li>
-                  <Check size={15} /> {formatClp(plan.limits.retrieved_threads_per_month)} correos revisados/mes
+                  <Check size={15} /> {formatClp(plan.limits.retrieved_threads_per_month)} conversaciones recuperadas/mes
                 </li>
                 <li>
-                  <Check size={15} /> {formatClp(plan.limits.ai_analyzed_threads_per_month)} conversaciones revisadas por Mira/mes
+                  <Check size={15} /> {formatClp(plan.limits.ai_analyzed_threads_per_month)} conversaciones con IA/mes
                 </li>
                 <li>
                   <Check size={15} /> {plan.limits.mailboxes} casilla{plan.limits.mailboxes > 1 ? "s" : ""} ·{" "}
                   {plan.limits.members} usuario{plan.limits.members > 1 ? "s" : ""}
+                </li>
+                <li>
+                  <Check size={15} /> {plan.limits.report_recipients} destinatario{plan.limits.report_recipients > 1 ? "s" : ""} por reporte
+                </li>
+                <li>
+                  <Check size={15} /> {plan.limits.retention_days} días de retención de análisis
                 </li>
               </ul>
 

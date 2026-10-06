@@ -137,7 +137,7 @@ export function RadiografiaDemo() {
         </div>
         <div className="rx-stat">
           <span>Respondidas</span>
-          <strong>91%</strong>
+          <strong>92%</strong>
         </div>
         <div className={`rx-stat${done ? " pop" : ""}`}>
           <span>1ª respuesta</span>

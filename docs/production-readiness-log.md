@@ -3383,3 +3383,39 @@ desplegó `fd3a91722b6a` en worker (`00035-2fc`), API (`00070-t7g`) y web
 
 **Qué sigue:** cada deploy reconstruye los tres servicios; filtrar por paths
 si el tiempo del job molesta.
+
+## Preparación del lanzamiento del 6 de octubre de 2026
+
+**Estado:** preflight realizado antes de avanzar `main`; despliegue sujeto a CI.
+
+La rama `saas-scaling`, incluido el commit `213027a`, se publicó y aprobó el
+workflow remoto de verificación, sin activar deploy. Se revisaron Cloud Run,
+Scheduler y los permisos WIF, Artifact Registry y actAs del deploy automático.
+La API conserva una instancia máxima y CPU sin throttling; el worker permanece
+privado y la API tiene permiso para invocarlo.
+
+Se creó un respaldo real de los schemas `mira` y `billing`, de 17 MB y permisos
+`0600`. Se restauró completo en PostgreSQL 17 aislado y se verificaron tablas,
+conteos, migraciones, RLS y bloqueo de lectura para roles públicos. La base
+descartable se eliminó. Los checksums de `0001` a `0003` coincidieron; se aplicó
+`0004_supported_account_limits` y los tres planes quedaron con una cuenta y
+una casilla por organización. `/health/ready` continuó respondiendo 200.
+
+La revisión previa al arranque del mantenimiento encontró 77 de 198 análisis
+alcanzados por su retención vigente y una ejecución antigua todavía activa.
+El código nuevo aplica esa retención; el respaldo anterior al cambio permite
+recuperación operativa en una base separada. No se registra contenido de correos
+en esta bitácora.
+
+Después de confirmar la nueva API lista, actualizar `ghmi-daily-report` a
+`*/5 * * * *`, preservando autenticación, body vacío y deadline; crear un
+disparo horario de `/internal/maintenance`. Retirar los tags públicos `postgres`,
+`candidate` y `env-candidate`, que permiten acceder directamente a revisiones
+antiguas aunque tengan 0% de tráfico predeterminado.
+
+El despliegue técnico no acredita aprobación de Gmail, configuración real de
+audiencia en Entra ni compatibilidad con casillas externas. Los documentos
+legales siguen identificados como borradores; quedan pendientes datos del
+operador, documentación tributaria y validación de cobros. La apertura comercial
+general requiere cerrar esos puntos y probar los flujos reales descritos en
+`docs/saas-readiness-2026-10.md`.

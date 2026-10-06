@@ -21,12 +21,18 @@ export function StatusBanner({ run, onStart, starting, onViewDetails }: Props) {
     ? Math.round((run.processed_threads / run.total_candidate_threads) * 100)
     : 0;
   const { icon: Icon, title } = bannerCopy[run.status];
+  const failureMessage = run.error_message ?? run.progress_message;
+  const memoryBudgetExceeded = run.status === "failed" && failureMessage === "analysis_memory_budget_exceeded";
 
   const subtitle =
     run.status === "completed"
       ? formatDateTime(run.completed_at, run.config.timezone)
       : run.status === "failed"
-        ? (run.error_message ?? run.progress_message)
+        ? memoryBudgetExceeded
+          ? "Este análisis supera la capacidad disponible. Reduce el período o el número de conversaciones e inicia uno nuevo."
+          : failureMessage === "analysis_failed"
+            ? "No se pudo completar el análisis. Puedes reintentar; si vuelve a fallar, contacta a soporte con el ID del análisis."
+            : failureMessage
         : run.progress_message;
 
   return (
@@ -40,15 +46,21 @@ export function StatusBanner({ run, onStart, starting, onViewDetails }: Props) {
         <span className="banner-meta">
           {run.processed_threads}/{run.total_candidate_threads} hilos analizados
         </span>
+        {run.status === "failed" && (
+          <span className="banner-meta">
+            {!memoryBudgetExceeded && "El reintento crea un análisis con la misma ventana y la configuración actual. "}
+            ID: {run.id}
+          </span>
+        )}
         {run.status === "running" && (
           <div className="progress-bar" role="progressbar" aria-valuenow={progress} aria-valuemin={0} aria-valuemax={100}>
             <span style={{ width: `${progress}%` }} />
           </div>
         )}
-        {(run.status === "pending" || run.status === "failed") && (
+        {(run.status === "pending" || (run.status === "failed" && !memoryBudgetExceeded)) && (
           <button type="button" className="btn-ghost" disabled={starting} onClick={onStart}>
             <Play size={16} />
-            {run.status === "failed" ? "Reintentar" : "Iniciar análisis"}
+            {run.status === "failed" ? "Reintentar con configuración actual" : "Iniciar análisis"}
           </button>
         )}
         {run.status === "completed" && (

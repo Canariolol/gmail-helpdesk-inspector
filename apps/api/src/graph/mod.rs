@@ -12,8 +12,9 @@ use serde_json::{Map, Value};
 
 use crate::analysis::{AnalysisConfig, EmailMessage, is_automated_sender, is_responder_email};
 use crate::mailbox::{
-    GmailLabel, GmailProfile, MailboxMetadata, MailboxProvider, MailboxProviderKind,
-    ProviderThread, ThreadListPage, analysis_window_utc, read_mail_json, send_mail_request,
+    GmailLabel, GmailProfile, MailboxMemoryBudgetExceeded, MailboxMetadata, MailboxProvider,
+    MailboxProviderKind, ProviderThread, ThreadListPage, analysis_window_utc, read_mail_json,
+    send_mail_request,
 };
 
 const GRAPH_BASE: &str = "https://graph.microsoft.com/v1.0";
@@ -21,6 +22,7 @@ const INBOX_FOLDER: &str = "inbox";
 const MAX_PAGE_SIZE: u32 = 1000;
 const MAX_LIST_PAGES: usize = 50;
 const MAX_CONVERSATION_MESSAGES: usize = 2_000;
+const MAX_CONVERSATION_BYTES: usize = 16 * 1024 * 1024;
 const MAX_FOLDERS: usize = 1_000;
 const MAX_FOLDER_REQUESTS: usize = 1_000;
 const MAX_FOLDER_DEPTH: usize = 20;
@@ -189,17 +191,20 @@ impl GraphClient {
         let mut response: MessageListResponse =
             read_mail_json(send_mail_request(&self.client, request).await?).await?;
         let mut raw = Vec::new();
+        let mut retained_bytes = 0usize;
         let mut seen = HashSet::new();
         let mut truncated = false;
         let mut pages = 0;
         loop {
             pages += 1;
             for message in response.value {
-                if seen.insert(message.id.clone()) {
+                if !seen.contains(&message.id) {
                     if raw.len() == MAX_CONVERSATION_MESSAGES {
                         truncated = true;
                         break;
                     }
+                    reserve_conversation_bytes(&mut retained_bytes, &message)?;
+                    seen.insert(message.id.clone());
                     raw.push(message);
                 }
             }
@@ -567,6 +572,52 @@ struct GraphMessage {
     internet_message_headers: Vec<GraphHeader>,
 }
 
+fn reserve_conversation_bytes(bytes: &mut usize, message: &GraphMessage) -> anyhow::Result<()> {
+    let recipient_bytes = |recipient: &GraphRecipient| {
+        recipient
+            .email_address
+            .address
+            .as_ref()
+            .map_or(0, String::capacity)
+            + recipient
+                .email_address
+                .name
+                .as_ref()
+                .map_or(0, String::capacity)
+    };
+    // Include spare vector/map slots and the cloned ID used for deduplication.
+    let mut retained = 2 * std::mem::size_of::<GraphMessage>() + 128 + 2 * message.id.capacity();
+    for value in [
+        message.conversation_id.as_ref(),
+        message.parent_folder_id.as_ref(),
+        message.subject.as_ref(),
+        message.body_preview.as_ref(),
+        message.body.as_ref().map(|body| &body.content),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        retained += value.capacity();
+    }
+    retained += message.from.as_ref().map_or(0, recipient_bytes);
+    for recipients in [&message.to_recipients, &message.cc_recipients] {
+        retained += recipients.capacity() * std::mem::size_of::<GraphRecipient>()
+            + recipients.iter().map(recipient_bytes).sum::<usize>();
+    }
+    retained += message.internet_message_headers.capacity() * std::mem::size_of::<GraphHeader>()
+        + message
+            .internet_message_headers
+            .iter()
+            .map(|header| header.name.capacity() + header.value.capacity())
+            .sum::<usize>();
+    let next = bytes
+        .checked_add(retained)
+        .filter(|next| *next <= MAX_CONVERSATION_BYTES)
+        .ok_or(MailboxMemoryBudgetExceeded)?;
+    *bytes = next;
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 struct GraphRecipient {
     #[serde(rename = "emailAddress", default)]
@@ -668,6 +719,51 @@ mod tests {
     #[test]
     fn odata_filter_escapes_single_quotes_in_conversation_ids() {
         assert_eq!(escape_odata("AAQk'AGI"), "AAQk''AGI");
+    }
+
+    #[tokio::test]
+    async fn graph_rejects_aggregate_conversation_memory_across_pages() {
+        use axum::{Json, Router, routing::get};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/v1.0", listener.local_addr().unwrap());
+        let next = format!("{base}/me/conversation-next");
+        let body = "x".repeat(9 * 1024 * 1024);
+        let first_body = body.clone();
+        let app = Router::new()
+            .route(
+                "/v1.0/me/messages",
+                get(move || {
+                    let next = next.clone();
+                    let body = first_body.clone();
+                    async move {
+                        Json(serde_json::json!({"value":[{"id":"first","body":{"content":body}}],"@odata.nextLink":next}))
+                    }
+                }),
+            )
+            .route(
+                "/v1.0/me/conversation-next",
+                get(move || {
+                    let body = body.clone();
+                    async move {
+                        Json(serde_json::json!({"value":[{"id":"second","body":{"content":body}}]}))
+                    }
+                }),
+            );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = GraphClient {
+            base_url: base,
+            ..GraphClient::default()
+        };
+        let error = client
+            .fetch_thread("test", "large", &config())
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<MailboxMemoryBudgetExceeded>()
+                .is_some()
+        );
+        server.abort();
     }
 
     #[tokio::test]

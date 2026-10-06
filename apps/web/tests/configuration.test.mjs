@@ -9,7 +9,7 @@ async function loadTypescript(relativePath) {
   return import(`data:text/javascript;base64,${Buffer.from(result.outputText).toString("base64")}`);
 }
 
-const { initDraft, buildPutBody } = await loadTypescript("../src/lib/configuration.ts");
+const { initDraft, buildPutBody, buildRetryAnalysisPayload } = await loadTypescript("../src/lib/configuration.ts");
 const { todayInHelpdeskTz } = await loadTypescript("../src/components/filters/dateUtils.ts");
 const { isInboxLabel, labelToken, isAnalyzableLabel } = await loadTypescript("../src/components/filters/labels.ts");
 const { deriveAccessState } = await loadTypescript("../src/views/access/accessState.ts");
@@ -18,6 +18,21 @@ test("a new tenant requires an explicit AI authorization", () => {
   const body = buildPutBody(initDraft(null));
   assert.equal(body.ai_policy.enabled, false);
   assert.equal(body.ai_policy.consent_confirmed, false);
+});
+
+test("retrying an analysis preserves its window without copying prior policy, mailbox or tenant", () => {
+  const window = { date_from: "2026-10-01", date_to: "2026-10-05", time_from: "08:15", time_to: "18:45" };
+  const previousConfig = {
+    ...window,
+    user_email: "previous-owner@example.test", org_id: "previous-org", mailbox_connection_id: "previous-mailbox",
+    granted_scopes: ["Mail.Read.Shared"], policy_version_id: "old-policy", timezone: "Europe/Madrid",
+    internal_domains: ["previous-tenant.test"], responder_emails: ["previous-agent@example.test"], request_scope: "internal",
+    ignored_senders: ["old-rule@example.test"], ignored_domains: ["old-rule.test"], ignored_keywords: ["old criterion"],
+    include_labels: ["old-mailbox-folder"], exclude_labels: ["old-exclusion"],
+    ai_policy_snapshot: { enabled: true, consent_confirmed: true },
+  };
+  assert.deepEqual(buildRetryAnalysisPayload(previousConfig), window);
+  assert.deepEqual(previousConfig.include_labels, ["old-mailbox-folder"]);
 });
 
 test("saving settings preserves hidden limits, recipients, responders and report privacy choices", () => {

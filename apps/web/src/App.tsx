@@ -37,6 +37,7 @@ import { ReportesView } from "./views/ReportesView";
 import { ResumenView } from "./views/ResumenView";
 import { RunsView } from "./views/RunsView";
 import { DateTimeZoneContext } from "./lib/format";
+import { buildRetryAnalysisPayload } from "./lib/configuration";
 
 // Google conserva su ruta histórica para no romper enlaces vivos; el resto de
 // los proveedores usa la ruta neutral.
@@ -353,6 +354,15 @@ export function App() {
     });
   };
 
+  const handleStartRun = () => {
+    if (!selectedRun) return;
+    if (selectedRun.status === "failed") {
+      handleAnalyze(buildRetryAnalysisPayload(selectedRun.config));
+    } else if (selectedRun.status === "pending") {
+      startRun.mutate(selectedRun.id);
+    }
+  };
+
   const handleSelectRun = (id: string) => {
     setSelectedRunId(id);
     setSelectedThreadId(null);
@@ -554,8 +564,8 @@ export function App() {
             reviewSavedAt={reviewSavedAt}
             onAnalyze={handleAnalyze}
             analyzing={createRun.isPending || startRun.isPending}
-            onStartRun={() => selectedRun && startRun.mutate(selectedRun.id)}
-            startingRun={startRun.isPending}
+            onStartRun={handleStartRun}
+            startingRun={createRun.isPending || startRun.isPending}
             orgConfig={currentOrgConfig}
             onGoToSetup={handleGoToSetup}
             filterPresets={filterPresets.data ?? []}

@@ -131,7 +131,7 @@ export function CheckoutView({ plan, billingInterval, onPay, onBack, isSubmittin
               {plan.trial_days} días de prueba, luego {priceLabel} CLP/{periodLabel}
             </small>
           ) : (
-            <small>Cobro {billingInterval === "annual" ? "anual" : "mensual"}, IVA incluido</small>
+            <small>Cobro {billingInterval === "annual" ? "anual" : "mensual"} · precio final en CLP</small>
           )}
         </div>
         <strong>
@@ -139,9 +139,14 @@ export function CheckoutView({ plan, billingInterval, onPay, onBack, isSubmittin
         </strong>
       </div>
 
+      <p className="access-note-muted">
+        La suscripción se renueva automáticamente cada {billingInterval === "annual" ? "año" : "mes"}.
+        Puedes cancelar la renovación desde Cuenta; conservarás el acceso hasta el fin del período adquirido.
+      </p>
+
       {!MP_PUBLIC_KEY && (
         <div className="access-error" role="alert">
-          El checkout no está configurado: falta la variable VITE_MERCADOPAGO_PUBLIC_KEY.
+          Los pagos no están disponibles en este momento. Vuelve a intentarlo más tarde o contáctanos.
         </div>
       )}
       {error && (

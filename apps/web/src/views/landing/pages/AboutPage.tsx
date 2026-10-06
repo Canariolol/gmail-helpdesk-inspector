@@ -10,17 +10,17 @@ const VALUES = [
   {
     Icon: Eye,
     title: "Transparencia",
-    body: "Contenido de ejemplo. Cada métrica es auditable hasta el correo que la originó.",
+    body: "Cada métrica lleva a las conversaciones que la originaron. Puedes revisar los mensajes y corregir su clasificación.",
   },
   {
     Icon: HeartHandshake,
     title: "Respeto por los datos",
-    body: "Contenido de ejemplo. Pedimos el mínimo acceso necesario y nunca reemplazamos tu correo.",
+    body: "Leemos la casilla sin modificarla. Tú autorizas la auditoría con IA y puedes desactivarla desde Configuración.",
   },
   {
     Icon: Target,
     title: "Foco",
-    body: "Contenido de ejemplo. Hacemos una cosa bien: medir tu casilla de soporte.",
+    body: "Medimos las solicitudes y respuestas observadas en tu correo. La atención realizada por otros canales requiere contexto adicional.",
   },
 ];
 
@@ -32,8 +32,9 @@ export function AboutPage({ onLogin, onSignup }: Props) {
           <span className="lp-focus-eyebrow">Sobre nosotros</span>
           <h1>Medimos lo que tu casilla ya está haciendo</h1>
           <p>
-            Contenido de ejemplo pendiente de redacción. Aquí va la historia del producto, el
-            problema que resuelve y a quién está dirigido.
+            Mira Helpdesk convierte las conversaciones de atención en métricas que puedes revisar.
+            Defines qué cuenta como solicitud, quién responde y qué casos ignorar. La versión actual
+            admite una casilla y una cuenta propietaria por organización.
           </p>
         </header>
 

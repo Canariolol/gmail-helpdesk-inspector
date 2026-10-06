@@ -3943,8 +3943,15 @@ pub(crate) async fn mark_run_failed(state: &AppState, run_id: &str, error: &anyh
     );
     if let Ok(Some(mut failed)) = state.storage.get_analysis_run(run_id).await {
         failed.status = AnalysisStatus::Failed;
-        failed.error_message = Some("analysis_failed".to_string());
-        failed.progress_message = "El análisis falló".to_string();
+        if analysis_failure_stage(error) == "analysis_memory_budget" {
+            failed.error_message = Some("analysis_memory_budget_exceeded".to_string());
+            failed.progress_message =
+                "El análisis superó el límite de memoria; reduce el período o el número de hilos"
+                    .to_string();
+        } else {
+            failed.error_message = Some("analysis_failed".to_string());
+            failed.progress_message = "El análisis falló".to_string();
+        }
         let _ = state.storage.update_analysis_run(&failed).await;
     }
 }
@@ -4142,6 +4149,7 @@ async fn execute_analysis_inner(
     let mut stored = 0u64;
     let mut skipped_by_plan_cap = 0u64;
     let mut prepared_threads = Vec::new();
+    let mut prepared_bytes = 0usize;
     {
         let state_ref = &state;
         let provider_ref = provider.as_ref();
@@ -4194,6 +4202,8 @@ async fn execute_analysis_inner(
                         }
                     }
                     if let Some(prepared) = outcome.prepared {
+                        reserve_prepared_bytes(&mut prepared_bytes, &prepared)
+                            .context(AnalysisFailureStage("analysis_memory_budget"))?;
                         prepared_threads.push(prepared);
                     }
                     if let Some(dropped) = outcome.dropped
@@ -4203,9 +4213,10 @@ async fn execute_analysis_inner(
                     }
                 }
                 Err(error) => {
-                    if error
-                        .downcast_ref::<crate::imap::ImapAuthenticationRejected>()
-                        .is_some()
+                    if analysis_failure_stage(&error) == "analysis_memory_budget"
+                        || error
+                            .downcast_ref::<crate::imap::ImapAuthenticationRejected>()
+                            .is_some()
                         || matches!(
                             error.to_string().as_str(),
                             "analysis_cancelled_or_deleted" | "mailbox_connection_changed"
@@ -4455,8 +4466,11 @@ const FREE_RETRIEVAL_FACTOR: u32 = 3;
 /// Techo duro de recuperación para no disparar las llamadas al proveedor en Free.
 const FREE_RETRIEVAL_HARD_MAX: u32 = 300;
 
-/// Maximum number of threads processed concurrently in a single analysis run.
-const ANALYSIS_CONCURRENCY: usize = 5;
+/// One provider response per run; the instance permits four concurrent runs.
+const ANALYSIS_CONCURRENCY: usize = 1;
+/// Retained metadata and compact AI excerpts, excluding bodies discarded during preparation.
+/// ponytail: larger runs fail explicitly; stream batches before raising this ceiling.
+const MAX_PREPARED_RUN_BYTES: usize = 32 * 1024 * 1024;
 /// Write run progress to storage every N processed threads (instead of every one).
 const PROGRESS_UPDATE_EVERY: u64 = 5;
 /// Máximo de hilos descartados que guardamos como muestra en el embudo, para
@@ -4484,6 +4498,113 @@ struct PreparedThread {
     messages: Vec<EmailMessage>,
     label_ids: Vec<String>,
     should_batch: bool,
+    batch_messages: Vec<BatchMessageSummary>,
+}
+
+impl PreparedThread {
+    fn new(
+        thread: EmailThread,
+        mut messages: Vec<EmailMessage>,
+        label_ids: Vec<String>,
+        should_batch: bool,
+        truncated: bool,
+        audit_limits: (usize, usize),
+    ) -> Self {
+        let batch_messages = if should_batch {
+            batch_messages_for_thread(&thread, &messages, audit_limits.0, audit_limits.1)
+        } else {
+            Vec::new()
+        };
+        // Heuristics have consumed the full body. Keep only the existing bounded AI
+        // excerpts and the metadata required for milestones, fingerprints and storage.
+        for message in &mut messages {
+            message.body_text = None;
+        }
+        Self {
+            truncated,
+            thread,
+            messages,
+            label_ids,
+            should_batch,
+            batch_messages,
+        }
+    }
+
+    fn retained_bytes(&self) -> usize {
+        let thread = &self.thread;
+        let mut bytes = std::mem::size_of::<Self>()
+            + self.messages.capacity() * std::mem::size_of::<EmailMessage>()
+            + self.batch_messages.capacity() * std::mem::size_of::<BatchMessageSummary>()
+            + string_list_bytes(&self.label_ids)
+            + string_list_bytes(&thread.reasons);
+        for value in [
+            Some(&thread.id),
+            Some(&thread.analysis_run_id),
+            Some(&thread.thread_id),
+            Some(&thread.subject),
+            Some(&thread.normalized_subject),
+            thread.first_client_message_id.as_ref(),
+            thread.first_internal_reply_message_id.as_ref(),
+            thread.last_internal_message_id.as_ref(),
+            thread.notes.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            bytes += value.capacity();
+        }
+        for message in &self.messages {
+            bytes += message.id.capacity()
+                + message.message_id.capacity()
+                + message.from_email.capacity()
+                + message.from_name.as_ref().map_or(0, String::capacity)
+                + string_list_bytes(&message.to_emails)
+                + string_list_bytes(&message.cc_emails)
+                + message.subject.capacity()
+                + message.snippet.capacity()
+                + json_heap_bytes(&message.headers)
+                + message.body_text.as_ref().map_or(0, String::capacity);
+        }
+        for message in &self.batch_messages {
+            bytes += message.message_id.capacity()
+                + message.from_email.capacity()
+                + string_list_bytes(&message.to_emails)
+                + string_list_bytes(&message.cc_emails)
+                + message.content.capacity();
+        }
+        bytes
+    }
+}
+
+fn string_list_bytes(values: &Vec<String>) -> usize {
+    values.capacity() * std::mem::size_of::<String>()
+        + values.iter().map(String::capacity).sum::<usize>()
+}
+
+fn json_heap_bytes(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::String(value) => value.capacity(),
+        serde_json::Value::Array(values) => {
+            values.capacity() * std::mem::size_of::<serde_json::Value>()
+                + values.iter().map(json_heap_bytes).sum::<usize>()
+        }
+        // A conservative allowance for each map node, key and inline value; JSON
+        // serialization would allocate another large buffer just to count its size.
+        serde_json::Value::Object(values) => values
+            .iter()
+            .map(|(key, value)| 256 + key.capacity() + json_heap_bytes(value))
+            .sum(),
+        _ => 0,
+    }
+}
+
+fn reserve_prepared_bytes(bytes: &mut usize, prepared: &PreparedThread) -> anyhow::Result<()> {
+    let next = bytes
+        .checked_add(prepared.retained_bytes())
+        .filter(|next| *next <= MAX_PREPARED_RUN_BYTES)
+        .context("analysis_memory_budget_exceeded: reduce el período o el número de hilos")?;
+    *bytes = next;
+    Ok(())
 }
 
 /// Construye el registro de un hilo descartado antes de clasificarse, usando los
@@ -4550,7 +4671,17 @@ async fn prepare_one_thread(
     }
     let data = provider
         .fetch_thread(access_token, &thread_id, config)
-        .await?;
+        .await
+        .map_err(|error| {
+            if error
+                .downcast_ref::<crate::mailbox::MailboxMemoryBudgetExceeded>()
+                .is_some()
+            {
+                error.context(AnalysisFailureStage("analysis_memory_budget"))
+            } else {
+                error
+            }
+        })?;
     if !data.is_primary_inbox && config.include_labels.is_empty() {
         return Ok(ThreadOutcome {
             disposition: ThreadDisposition::DroppedNotPrimaryInbox,
@@ -4662,13 +4793,23 @@ async fn prepare_one_thread(
     Ok(ThreadOutcome {
         truncated: data.truncated,
         disposition: ThreadDisposition::Stored,
-        prepared: Some(PreparedThread {
-            truncated: data.truncated,
+        prepared: Some(PreparedThread::new(
             thread,
-            messages: data.messages,
-            label_ids: data.folder_ids,
+            data.messages,
+            data.folder_ids,
             should_batch,
-        }),
+            data.truncated,
+            (
+                processing
+                    .policy_snapshot
+                    .map(|snapshot| snapshot.ai_policy.max_audit_messages as usize)
+                    .unwrap_or(DEFAULT_AI_MESSAGE_CAP),
+                processing
+                    .policy_snapshot
+                    .map(|snapshot| snapshot.ai_policy.max_body_chars_per_message as usize)
+                    .unwrap_or(DEFAULT_AI_BODY_CHARS),
+            ),
+        )),
         ..Default::default()
     })
 }
@@ -4724,7 +4865,7 @@ fn ai_worker_policy_context(
     }
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct BatchMessageSummary {
     message_id: String,
     from_email: String,
@@ -4819,24 +4960,22 @@ fn should_split_missing_batch(missing: usize) -> bool {
 }
 
 fn batch_messages_for_thread(
-    prepared: &PreparedThread,
+    thread: &EmailThread,
+    messages: &[EmailMessage],
     max_messages: usize,
     max_body_chars: usize,
 ) -> Vec<BatchMessageSummary> {
     let max_messages = max_messages.max(1);
-    let focus = prepared
-        .thread
+    let focus = thread
         .first_client_message_id
         .as_ref()
-        .and_then(|id| prepared.messages.iter().find(|message| &message.id == id));
-    let first_client = prepared
-        .messages
+        .and_then(|id| messages.iter().find(|message| &message.id == id));
+    let first_client = messages
         .iter()
         .filter(|message| message.is_external && !message.is_automated)
         .min_by_key(|message| message.date);
     let first_reply = focus.or(first_client).and_then(|client| {
-        prepared
-            .messages
+        messages
             .iter()
             .filter(|message| crate::analysis::reply_reaches_requester(message, client))
             .min_by_key(|message| message.date)
@@ -4845,7 +4984,7 @@ fn batch_messages_for_thread(
     for message in [focus, first_client, first_reply]
         .into_iter()
         .flatten()
-        .chain(prepared.messages.iter().rev())
+        .chain(messages.iter().rev())
     {
         if selected.len() == max_messages {
             break;
@@ -4880,17 +5019,13 @@ fn batch_messages_for_thread(
         .collect()
 }
 
-fn batch_summary(
-    prepared: &PreparedThread,
-    max_messages: usize,
-    max_body_chars: usize,
-) -> BatchThreadSummary {
+fn batch_summary(prepared: &PreparedThread) -> BatchThreadSummary {
     BatchThreadSummary {
         thread_id: prepared.thread.thread_id.clone(),
         subject: prepared.thread.subject.clone(),
         gmail_labels: prepared.label_ids.clone(),
         focus_message_id: prepared.thread.first_client_message_id.clone(),
-        messages: batch_messages_for_thread(prepared, max_messages, max_body_chars),
+        messages: prepared.batch_messages.clone(),
     }
 }
 
@@ -4903,15 +5038,9 @@ async fn audit_batch_once(
     policy_snapshot: Option<&crate::policies::PolicySnapshot>,
 ) -> Result<BatchAuditResponse, BatchCallError> {
     let policy_context = policy_snapshot.map(ai_worker_policy_context);
-    let max_messages = policy_snapshot
-        .map(|snapshot| snapshot.ai_policy.max_audit_messages as usize)
-        .unwrap_or(DEFAULT_AI_MESSAGE_CAP);
-    let max_body_chars = policy_snapshot
-        .map(|snapshot| snapshot.ai_policy.max_body_chars_per_message as usize)
-        .unwrap_or(DEFAULT_AI_BODY_CHARS);
     let threads = indexes
         .iter()
-        .map(|index| batch_summary(&prepared[*index], max_messages, max_body_chars))
+        .map(|index| batch_summary(&prepared[*index]))
         .collect();
     let mut request = state
         .http
@@ -6885,6 +7014,27 @@ mod tests {
                 .unwrap_or_default()
                 .contains("secret-token")
         );
+
+        mark_run_failed(
+            &state,
+            "run-bob",
+            &anyhow::anyhow!("provider body contains secret-token")
+                .context(AnalysisFailureStage("analysis_memory_budget")),
+        )
+        .await;
+        let stored = test
+            .storage
+            .get_analysis_run("run-bob")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, AnalysisStatus::Failed);
+        assert_eq!(
+            stored.error_message.as_deref(),
+            Some("analysis_memory_budget_exceeded")
+        );
+        assert!(stored.progress_message.contains("reduce el período"));
+        assert!(!stored.progress_message.contains("secret-token"));
     }
 
     #[test]
@@ -7100,15 +7250,13 @@ mod tests {
         last_reply.is_external = false;
         last_reply.to_emails = vec![last_client.from_email.clone()];
         last_reply.date = first.date + chrono::Duration::seconds(4);
-        let prepared = PreparedThread {
-            thread,
-            messages: vec![first, first_reply, automated, last_client, last_reply],
-            label_ids: vec![],
-            should_batch: true,
-            truncated: false,
-        };
-
-        let selected = batch_messages_for_thread(&prepared, 3, 5);
+        let messages = vec![first, first_reply, automated, last_client, last_reply];
+        let selected = batch_messages_for_thread(&thread, &messages, 3, 5);
+        let full_context = batch_messages_for_thread(&thread, &messages, 5, 5);
+        let fingerprint = message_fingerprint(&messages);
+        let expected_thread = serde_json::to_value(&thread).unwrap();
+        let expected_messages = serde_json::to_value(&selected).unwrap();
+        let prepared = PreparedThread::new(thread, messages, vec![], true, false, (3, 5));
 
         assert_eq!(selected.len(), 3);
         assert_eq!(
@@ -7122,8 +7270,75 @@ mod tests {
         assert_eq!(selected[1].content, "Neces\n[truncado]");
         assert_eq!(selected[2].to_emails, vec!["cliente@customer.test"]);
 
-        let full_context = batch_messages_for_thread(&prepared, 5, 5);
         assert_eq!(full_context.len(), 5);
+        assert_eq!(
+            serde_json::to_value(batch_summary(&prepared)).unwrap()["messages"],
+            expected_messages
+        );
+        assert!(
+            prepared
+                .messages
+                .iter()
+                .all(|message| message.body_text.is_none())
+        );
+        assert_eq!(message_fingerprint(&prepared.messages), fingerprint);
+        assert_eq!(
+            serde_json::to_value(&prepared.thread).unwrap(),
+            expected_thread
+        );
+    }
+
+    #[test]
+    fn prepared_threads_release_large_bodies_and_enforce_metadata_budget() {
+        let mut thread = thread("large-thread", "run-1");
+        thread.first_client_message_id = Some("message-0".to_string());
+        let messages = (0..500)
+            .map(|index| {
+                let mut message = message(&format!("message-{index}"), "cliente@customer.test");
+                message.body_text = Some("🦊".repeat(32 * 1024));
+                message.date += chrono::Duration::seconds(index);
+                message
+            })
+            .collect::<Vec<_>>();
+        let original_body_bytes = messages
+            .iter()
+            .map(|message| message.body_text.as_ref().unwrap().capacity())
+            .sum::<usize>();
+        assert_eq!(original_body_bytes, 500 * 128 * 1024);
+
+        let mut prepared = PreparedThread::new(thread, messages, vec![], true, false, (24, 2000));
+
+        assert!(
+            prepared
+                .messages
+                .iter()
+                .all(|message| message.body_text.is_none())
+        );
+        assert_eq!(prepared.batch_messages.len(), 24);
+        assert!(
+            prepared
+                .batch_messages
+                .iter()
+                .all(|message| { message.content.len() <= 2000 * 4 + "\n[truncado]".len() })
+        );
+        eprintln!(
+            "full_body_bytes={original_body_bytes}; retained_estimate_bytes={}",
+            prepared.retained_bytes()
+        );
+        assert!(prepared.retained_bytes() < 1024 * 1024);
+        assert!(prepared.retained_bytes() < original_body_bytes / 60);
+
+        let mut retained = 0;
+        reserve_prepared_bytes(&mut retained, &prepared).unwrap();
+        let accepted_bytes = retained;
+        prepared.messages[0].headers = json!({"x-large": "x".repeat(MAX_PREPARED_RUN_BYTES)});
+        let error = reserve_prepared_bytes(&mut retained, &prepared).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("analysis_memory_budget_exceeded")
+        );
+        assert_eq!(retained, accepted_bytes);
     }
 
     #[test]

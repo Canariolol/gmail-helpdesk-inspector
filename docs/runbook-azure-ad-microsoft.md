@@ -383,6 +383,18 @@ compartidos](https://learn.microsoft.com/en-us/troubleshoot/exchange/user-and-sh
 3. Verificar un connect real.
 4. Recién entonces borrar el secreto viejo en Azure.
 
+## Condición adicional para abrir Google a usuarios públicos
+
+La habilitación de Microsoft no acredita la aprobación de la integración Google.
+`gmail.readonly` es un scope restringido. Para el SaaS público que procesa correo
+en servidores, Google exige verificación del scope y evaluación de seguridad con
+renovación al menos anual, salvo una excepción documentada aplicable. La revisión
+no observó la aprobación/CASA ni la audiencia del proyecto en la consola. La
+configuración pública debe comprobarse antes de aceptar usuarios externos.
+
+Ver [comprobaciones Google](google-oauth.md) y [requisitos oficiales de scopes
+restringidos](https://developers.google.com/identity/protocols/oauth2/production-readiness/restricted-scope-verification).
+
 ## Excepción de auditoría de dependencias
 
 La revisión local del 4 de octubre retiró `jsonwebtoken`, que no tenía ningún

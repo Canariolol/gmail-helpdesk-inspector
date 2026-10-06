@@ -79,7 +79,7 @@ export const TERMS: LegalDoc = {
   sections: [
     {
       heading: "Descripción del servicio",
-      body: "Mira analiza la actividad de una casilla de correo conectada por la organización y entrega métricas de atención, reportes y una auditoría asistida por IA orientada a revisión humana. La versión actual soporta Gmail, Google Workspace, Outlook y Microsoft 365, con una casilla por organización.",
+      body: "Mira analiza la actividad de una casilla de correo conectada por la organización y entrega métricas de atención, reportes y una auditoría asistida por IA orientada a revisión humana. La versión actual admite Gmail, Google Workspace, Outlook, Microsoft 365 y proveedores con IMAP sobre TLS, con una casilla y una cuenta propietaria por organización. Las métricas reflejan las respuestas observadas en la casilla conectada; no prueban la resolución de una solicitud ni la atención realizada por otros canales.",
     },
     {
       heading: "Cuenta y registro",
@@ -87,15 +87,15 @@ export const TERMS: LegalDoc = {
     },
     {
       heading: "Autorización sobre la casilla conectada",
-      body: "Quien conecta una casilla declara contar con autorización para conectarla y para que Mira lea esos correos. Mira no envía ni modifica correos. En conexiones IMAP, quien conecta la casilla es responsable de gestionar y revocar la contraseña entregada al proveedor.",
+      body: "Quien conecta una casilla declara contar con autorización para conectarla y para que Mira lea esos correos. Mira no envía desde la casilla conectada ni modifica sus correos; los reportes se envían mediante un servicio separado. En conexiones IMAP, quien conecta la casilla es responsable de gestionar y revocar la contraseña entregada al proveedor.",
     },
     {
       heading: "Resultados de la IA y revisión humana",
       body: "Las clasificaciones y auditorías generadas con IA son apoyo para la gestión y pueden contener errores. No deben usarse como única base para decisiones laborales o disciplinarias; el servicio está diseñado para que los casos dudosos pasen por revisión humana.",
     },
     {
-      heading: "Planes, precios y pagos (aún no vigente)",
-      body: "Los cobros no están habilitados en la versión actual: el acceso es controlado y sin costo mientras dure esta etapa. Cuando se habiliten, los pagos se procesarán en pesos chilenos a través de Mercado Pago, con renovación automática y cancelación disponibles desde la aplicación; esta sección se actualizará y comunicará antes de cobrar.",
+      heading: "Planes, precios y pagos",
+      body: "Mira Free permite comenzar sin tarjeta, con los límites indicados en la cuenta. Los planes de pago publicados incluyen sus precios, ciclo de facturación y cupos; los análisis manuales y programados comparten los cupos mensuales. Los pagos habilitados se procesan en pesos chilenos a través de Mercado Pago. Antes de confirmar una suscripción se muestra el importe y la renovación automática. Puedes cancelar la renovación desde la aplicación; el acceso adquirido se conserva hasta el término de su período. Estas condiciones siguen pendientes de revisión legal, como el resto de este documento.",
     },
     {
       heading: "Uso aceptable",
