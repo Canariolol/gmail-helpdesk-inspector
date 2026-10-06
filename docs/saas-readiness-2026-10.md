@@ -1,6 +1,6 @@
 # Preparación SaaS — octubre de 2026
 
-Este documento describe cambios en el código local. No constituye una aprobación de los proveedores ni una certificación de seguridad, y no registra un despliegue en producción.
+Este documento describe los cambios implementados y las comprobaciones disponibles. El merge y despliegue del 6 de octubre se registran en [la bitácora operativa](production-readiness-log.md). No constituye una aprobación de los proveedores ni una certificación de seguridad.
 
 El producto admite tenants independientes con una cuenta y una casilla por organización. Los planes y la interfaz reflejan esa capacidad. Permite solicitudes externas, internas o ambas; las cuentas que responden y los criterios se configuran por tenant. No se anuncian invitaciones de equipos, múltiples casillas ni un SLA de resolución.
 
@@ -25,7 +25,7 @@ El producto admite tenants independientes con una cuenta y una casilla por organ
 | Paginación y errores ocultaban falta de cobertura | Graph recorre páginas y subcarpetas. Límites, conversaciones truncadas y fallos de hilos aparecen como cobertura incompleta; las métricas no se presentan como exhaustivas. JSON de Gmail/Graph limitado a 16 MiB antes de parsear; lectura MIME acotada. |
 | Una conexión antigua podía sobrescribir una nueva | Actualizaciones de refresh y metadata verifican la conexión actual. Autorización revocada solicita reconexión. Cambiar casilla reinicia sus filtros específicos y bloquea runs pendientes de la anterior. |
 | Borrado podía resucitar registros | Escrituras dependen de un parent existente y no fallido, con lock compartido en PostgreSQL. El borrado bloquea el parent y elimina sus datos derivados; los workers posteriores no pueden recrearlo. |
-| Retención era sólo metadata | Al vencer se bloquea lectura; mantenimiento elimina runs y sus hilos, mensajes, auditorías y overrides. Runs históricos sin fecha usan su snapshot o 90 días. La política nueva aplica a futuros runs. |
+| Retención era sólo metadata y no aplicaba el límite del plan | Cada run nuevo usa el menor plazo entre política y plan, con snapshot, hash y expiración coherentes. Al vencer se bloquea lectura; mantenimiento elimina runs y sus hilos, mensajes, auditorías y overrides. Los existentes conservan su expiración; los históricos sin fecha usan su snapshot o 90 días. |
 | Scheduler y reportes frágiles | Días y minutos arbitrarios, ventanas por tenant y claim inicial atómico; dos tenants se procesan concurrentemente. Reintentos de análisis espaciados, aviso de fallo configurable y reintento de envío sin repetir análisis. |
 | URL malformada terminaba el servidor web | Devuelve 400 y continúa atendiendo. Streams y proxy tienen manejo de errores y timeout. |
 | Acumulación de cuerpos y páginas podía agotar memoria | Se preparan extractos de IA y se descartan cuerpos completos antes de encolar. Presupuesto de datos retenidos de 32 MiB por run, 16 MiB agregados por conversación Graph y una recuperación a la vez por run. Exceder capacidad falla explícitamente y pide reducir la ventana. |
@@ -48,8 +48,14 @@ en navegador local. No se utilizaron casillas reales ni se desplegó esta versi�
 
 El cierre local del 6 de octubre aprobó 267 tests de Rust, 17 del worker y 7
 regresiones web, además de Clippy y builds. CI remoto aprobó también las seis
-integraciones PostgreSQL de la base previa a ese cierre. Se restauró un respaldo
-real del entorno desplegado en PostgreSQL 17 aislado antes de aplicar la migración.
+integraciones PostgreSQL de esa versión y desplegó API, worker y web. Se restauró
+un respaldo real del entorno desplegado en PostgreSQL 17 aislado antes de aplicar
+la migración. El dominio público pasó las comprobaciones de disponibilidad,
+proveedores habilitados y rechazo de lectura sin sesión. El worker respondió
+correctamente con Bedrock usando un hilo sintético; eso no valida casillas reales.
+El ajuste final de los topes de retención aprobó 269 tests de Rust, 17 del worker
+y 7 regresiones web, además de formato, Clippy y builds. Sus regresiones cubren
+creación manual/programada y conservación de políticas e históricos.
 
 - `scripts/check-all.sh`: detección de secretos versionados, formato Rust, tests, Clippy sin warnings, build release, tests del worker, audit npm, build TypeScript/Vite y regresiones web.
 - `scripts/check-postgres.sh`: PostgreSQL 16 descartable; aplica las migraciones y prueba aislamiento, permisos, cuotas concurrentes, checkout locks, primer claim del scheduler, borrado durante escritura, retención y reconexiones. Incluye respaldo y restauración completos de `mira` y `billing` en una base nueva, con comparación de datos y estructura y rechazo de roles públicos.
@@ -79,7 +85,7 @@ Las reservas sin confirmación después de una caída abrupta del proceso pueden
 | Microsoft | Probar Outlook/Hotmail, Microsoft 365 de otro directorio y un buzón compartido con permisos delegados reales; verificar audiencia multitenant, publisher y consentimiento del administrador. [Runbook](runbook-azure-ad-microsoft.md). |
 | IMAP | Probar un servidor externo con TLS real, carpeta Enviados, límites y revocación de contraseña. Las pruebas locales no verifican compatibilidad con cada hosting. |
 | Mercado Pago | Ejecutar sandbox con compra mensual/anual, primer cobro, renovación fallida, recuperación, cancelación y replay de webhooks. Los tests actuales simulan respuestas HTTP del proveedor. |
-| Operación | Restaurar un respaldo del entorno desplegado en una base separada, comprobar alertas de errores y consumo, rotación de credenciales y secretos administrados según la configuración del entorno. El drill local pasó; no se modificaron secretos durante este trabajo. |
+| Operación | El respaldo real se restauró en una base separada y el mantenimiento quedó habilitado y comprobado. Falta establecer respaldo recurrente fuera del servidor con objetivos de recuperación, comprobar recepción de alertas y consumo, y revisar rotación de credenciales según el entorno. No se modificaron secretos durante este trabajo. |
 | Calidad por tenant | Comparar una muestra etiquetada con los resultados; ajustar criterios y umbrales. No prometer precisión universal a partir de la usuaria inicial ni de datos sintéticos. |
 
 El cierre completo de cuenta sigue usando el procedimiento operativo publicado; no se añade un borrado autoservicio que pueda dejar una suscripción cobrando o perder registros financieros. Múltiples miembros/casillas y cierre de tickets no forman parte de la capacidad anunciada de esta versión.

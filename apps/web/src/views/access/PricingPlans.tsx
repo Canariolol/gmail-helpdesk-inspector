@@ -95,7 +95,7 @@ export function PricingPlans({
                   <Check size={15} /> {plan.limits.report_recipients} destinatario{plan.limits.report_recipients > 1 ? "s" : ""} por reporte
                 </li>
                 <li>
-                  <Check size={15} /> {plan.limits.retention_days} días de retención de análisis
+                  <Check size={15} /> Hasta {plan.limits.retention_days} días de retención de análisis
                 </li>
               </ul>
 

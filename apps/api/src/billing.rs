@@ -151,6 +151,12 @@ pub struct PlanLimits {
     pub retention_days: u32,
 }
 
+impl PlanLimits {
+    pub fn retention_days_for(&self, policy_days: u32) -> u32 {
+        policy_days.min(self.retention_days)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Account {
     pub workos_user_id: String,

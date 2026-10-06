@@ -547,7 +547,7 @@ async fn create_scheduled_run(
         let snapshot = bundle.policy_version.snapshot.clone();
         let analysis = &snapshot.analysis_policy;
         let now = Utc::now();
-        let run = AnalysisRun {
+        let mut run = AnalysisRun {
             id: Uuid::new_v4().to_string(),
             user_email: config.user_email.clone(),
             org_id: Some(bundle.org.id),
@@ -586,7 +586,7 @@ async fn create_scheduled_run(
             completed_at: None,
             error_message: None,
         };
-        crate::http::reserve_run_creation(state, &run)
+        crate::http::reserve_run_creation(state, &mut run)
             .await
             .map_err(|_| anyhow::anyhow!("usage_quota_exceeded"))?;
         if let Err(error) = state.storage.create_analysis_run(&run).await {
@@ -1293,6 +1293,92 @@ mod tests {
         assert_eq!(run.config.time_to, "18:15");
         assert_eq!(run.config.internal_domains, vec!["x.cl"]);
         assert!(run.retention_expires_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn new_scheduled_run_retention_respects_plan_without_changing_policy() {
+        let (mut state, storage) = app_state(None);
+        state.config.billing.enforcement_enabled = true;
+        let email = "a@x.cl";
+        let now = Utc::now();
+        let mut bundle = provision_default_config(email, now);
+        bundle.draft.analysis_policy.valid_request_criteria =
+            vec!["Solicitudes de soporte".to_string()];
+        bundle.draft.schedule_report_policy.scheduler_enabled = true;
+        bundle.draft.schedule_report_policy.report_recipients = vec![email.to_string()];
+        bundle.draft.retention_policy.retention_days = 365;
+        bundle.policy_version =
+            policy_version_from_draft(&bundle.mailbox, &bundle.draft, 2, email, now);
+        storage.upsert_org_config(&bundle).await.unwrap();
+        let mut subscription = crate::billing::active_subscription_for_trial(
+            bundle.org.id.clone(),
+            crate::billing::BillingPlanId::Pro,
+            None,
+            crate::billing::BillingInterval::Monthly,
+            now,
+        );
+        subscription.status = crate::billing::SubscriptionStatus::Active;
+        subscription.current_period_end = Some(now + ChronoDuration::days(30));
+        storage.upsert_subscription(&subscription).await.unwrap();
+        let run = create_scheduled_run(
+            &state,
+            &schedule_config(email),
+            &AnalysisWindow {
+                date_from: "2026-06-11".to_string(),
+                date_to: "2026-06-11".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            run.policy_hash,
+            Some(crate::policies::hash_policy_snapshot(
+                run.policy_snapshot.as_ref().unwrap()
+            ))
+        );
+        assert_ne!(
+            run.policy_hash.as_ref(),
+            Some(&bundle.policy_version.policy_hash)
+        );
+        assert_eq!(
+            run.policy_snapshot
+                .as_ref()
+                .unwrap()
+                .retention_policy
+                .retention_days,
+            90
+        );
+        assert_eq!(
+            run.retention_deadline(),
+            run.created_at + ChronoDuration::days(90)
+        );
+        let stored = storage.get_analysis_run(&run.id).await.unwrap().unwrap();
+        assert_eq!(stored.retention_expires_at, run.retention_expires_at);
+        assert_eq!(
+            stored
+                .policy_snapshot
+                .unwrap()
+                .retention_policy
+                .retention_days,
+            90
+        );
+        let unchanged = storage
+            .get_org_config_for_user(email)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            unchanged.policy_version.policy_hash,
+            bundle.policy_version.policy_hash
+        );
+        assert_eq!(
+            unchanged
+                .policy_version
+                .snapshot
+                .retention_policy
+                .retention_days,
+            365
+        );
     }
 
     #[tokio::test]

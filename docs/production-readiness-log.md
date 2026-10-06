@@ -3386,7 +3386,8 @@ si el tiempo del job molesta.
 
 ## Preparación del lanzamiento del 6 de octubre de 2026
 
-**Estado:** preflight realizado antes de avanzar `main`; despliegue sujeto a CI.
+**Estado:** preflight, merge y despliegue automático completados. El lanzamiento
+comercial general conserva las validaciones externas pendientes indicadas abajo.
 
 La rama `saas-scaling`, incluido el commit `213027a`, se publicó y aprobó el
 workflow remoto de verificación, sin activar deploy. Se revisaron Cloud Run,
@@ -3407,11 +3408,31 @@ El código nuevo aplica esa retención; el respaldo anterior al cambio permite
 recuperación operativa en una base separada. No se registra contenido de correos
 en esta bitácora.
 
-Después de confirmar la nueva API lista, actualizar `ghmi-daily-report` a
-`*/5 * * * *`, preservando autenticación, body vacío y deadline; crear un
-disparo horario de `/internal/maintenance`. Retirar los tags públicos `postgres`,
-`candidate` y `env-candidate`, que permiten acceder directamente a revisiones
-antiguas aunque tengan 0% de tráfico predeterminado.
+Se avanzó `main` por fast-forward y se publicó `98fcbd3`. El workflow
+[37530943389](https://github.com/Canariolol/gmail-helpdesk-inspector/actions/runs/37530943389)
+aprobó verificación y despliegue. API, worker y web recibieron el 100% del tráfico
+en sus revisiones nuevas. Se retiraron los tags antiguos de los tres servicios,
+incluidos `postgres`, `candidate` y `env-candidate` de la API; se conservaron las
+revisiones para rollback. El worker sigue privado.
+
+Con la API lista, se actualizó `ghmi-daily-report` a `*/5 * * * *`, preservando
+autenticación, body vacío y deadline de 1800 segundos. Se creó `ghmi-maintenance`
+habilitado, con disparo horario y deadline de 300 segundos. Ambos usan
+`America/Santiago`. El mantenimiento dejó 121 análisis, cero vencidos y cero
+ejecuciones activas de más de dos horas; los 77 vencidos se eliminaron conforme
+a su retención vigente. Su recuperación requeriría el respaldo separado.
+
+El dominio público respondió 200 con TLS válido; `/health/ready` devolvió
+`{"ok":true}`, `/mailbox/providers` ofreció Google, Microsoft e IMAP y
+`/me/account` sin sesión devolvió 401. Una llamada autenticada al worker con
+un hilo sintético completó `/audit/batch` con respuesta real de Bedrock. No se
+usaron casillas reales, datos de usuarios ni cobros para estas comprobaciones.
+
+La revisión final detectó que el catálogo anunciaba topes de retención sin
+aplicarlos al crear análisis. Se corrigió el punto compartido entre creación
+manual y programada: cada análisis nuevo conserva el menor plazo entre su
+política y el plan vigente, con snapshot, hash y expiración coherentes. Las
+versiones de política publicadas y los análisis existentes no cambian.
 
 El despliegue técnico no acredita aprobación de Gmail, configuración real de
 audiencia en Entra ni compatibilidad con casillas externas. Los documentos

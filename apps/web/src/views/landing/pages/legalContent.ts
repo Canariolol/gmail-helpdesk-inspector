@@ -42,7 +42,7 @@ export const PRIVACY: LegalDoc = {
     },
     {
       heading: "Conservación y eliminación",
-      body: "Cada análisis conserva el plazo de retención vigente cuando se creó; los cambios de política aplican a los próximos análisis. Los registros anteriores sin fecha ni política de retención usan un plazo de 90 días desde su creación. Al vencer dejan de ser accesibles y el mantenimiento programado elimina sus registros cuando está habilitado en el despliegue. Puedes borrar tus análisis y solicitar la eliminación completa de tu cuenta por el canal de contacto, verificando tu identidad. Los respaldos pueden conservar copias hasta que venza el plazo establecido por su operador.",
+      body: "Al crear un análisis se aplica el menor plazo entre la política de retención configurada y el límite del plan. Los cambios de política o plan aplican a los próximos análisis; los análisis existentes conservan su fecha de expiración. Los registros anteriores sin fecha ni política de retención usan un plazo de 90 días desde su creación. Al vencer dejan de ser accesibles y el mantenimiento programado elimina sus registros cuando está habilitado en el despliegue. Puedes borrar tus análisis y solicitar la eliminación completa de tu cuenta por el canal de contacto, verificando tu identidad. Los respaldos pueden conservar copias hasta que venza el plazo establecido por su operador.",
     },
     {
       heading: "Encargados y subprocesadores",

@@ -773,18 +773,17 @@ export function ConfiguracionView({ orgConfig, isLoading, isError }: Props) {
             </div>
             <div className="wizard-info-box">
               <p>
-                <strong>¿Qué define este plazo?</strong> La fecha de expiración que se guarda junto a
-                cada análisis y que usaremos para las políticas de borrado de datos internos de la
-                aplicación.
+                <strong>Plazo efectivo.</strong> Los nuevos análisis usan el menor plazo entre esta
+                política y el límite de retención de tu plan. Su fecha de expiración se guarda al crearlos.
               </p>
               <p>
-                <strong>¿Qué NO se modifica?</strong> Nada de tu casilla. La app solo tiene permiso
-                de lectura.
+                <strong>Tu casilla no cambia.</strong> Mira realiza únicamente operaciones de lectura
+                sobre tus correos.
               </p>
               <p style={{ color: "var(--text-muted)" }}>
-                En esta versión inicial, los flujos destructivos se activarán de forma controlada.
-                Puedes cambiar esta configuración en cualquier momento; los análisis ya realizados
-                conservan su fecha original.
+                Los cambios de política o plan aplican a los próximos análisis; los ya realizados conservan
+                su fecha de expiración. Al vencer dejan de ser accesibles y el mantenimiento programado
+                elimina sus registros cuando está habilitado en el despliegue.
               </p>
             </div>
           </section>

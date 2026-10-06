@@ -2343,6 +2343,19 @@ async fn get_data_summary(
         }
     }
     let mailbox_connected = bundle.mailbox.revoked_at.is_none();
+    let policy_days = bundle.draft.retention_policy.retention_days;
+    let retention_days = if state.config.billing.enforcement_enabled
+        && !state
+            .config
+            .is_privileged_account(&session.google_account_email)
+    {
+        effective_plan_for_org(&state, &bundle.org.id)
+            .await?
+            .limits
+            .retention_days_for(policy_days)
+    } else {
+        policy_days
+    };
 
     Ok(Json(DataSummaryResponse {
         account: DataSummaryAccount {
@@ -2363,7 +2376,7 @@ async fn get_data_summary(
             data_minimization_mode: "metadata_snippets_excerpts_only".to_string(),
             ai_enabled: bundle.draft.ai_policy.enabled,
             ai_consent_granted_at: bundle.draft.ai_policy.consent_granted_at,
-            retention_days: bundle.draft.retention_policy.retention_days,
+            retention_days,
             report_mode: bundle.draft.schedule_report_policy.report_content.mode,
         },
         stored_data: StoredDataSummary {
@@ -3337,8 +3350,8 @@ async fn create_analysis_run(
     .await?;
     let now = Utc::now();
     require_org_role(&bundle, &[OrgRole::Owner, OrgRole::Admin, OrgRole::Analyst])?;
-    let run = build_policy_run(&state, &session.google_account_email, request, now).await?;
-    reserve_run_creation(&state, &run).await?;
+    let mut run = build_policy_run(&state, &session.google_account_email, request, now).await?;
+    reserve_run_creation(&state, &mut run).await?;
     if let Err(error) = state.storage.create_analysis_run(&run).await {
         state
             .storage
@@ -5798,7 +5811,7 @@ async fn enforce_usage_allows_run(
 
 pub(crate) async fn reserve_run_creation(
     state: &AppState,
-    run: &AnalysisRun,
+    run: &mut AnalysisRun,
 ) -> Result<(), ApiError> {
     if !state.config.billing.enforcement_enabled
         || state.config.is_privileged_account(&run.user_email)
@@ -5810,6 +5823,15 @@ pub(crate) async fn reserve_run_creation(
         .as_deref()
         .ok_or_else(|| ApiError::bad_request("el análisis debe pertenecer a una organización"))?;
     let plan = effective_plan_for_org(state, org_id).await?;
+    // La versión aprobada no cambia; el snapshot del nuevo run refleja el plazo
+    // efectivo de su plan al momento de crearlo.
+    if let Some(snapshot) = run.policy_snapshot.as_mut() {
+        snapshot.retention_policy.retention_days = plan
+            .limits
+            .retention_days_for(snapshot.retention_policy.retention_days);
+        run.retention_expires_at = Some(retention_expires_at(run.created_at, snapshot));
+        run.policy_hash = Some(crate::policies::hash_policy_snapshot(snapshot));
+    }
     state
         .storage
         .reserve_analysis_usage(
@@ -9871,6 +9893,162 @@ mod tests {
         // v1 inicial → v2 (consentimiento) → v3 (opt-out) → v4 (reactivación).
         assert_eq!(body["policy_version"]["version"], 4);
         assert_eq!(body["setup_state"]["ready_for_analysis"], true);
+    }
+
+    #[tokio::test]
+    async fn new_manual_run_retention_respects_plan_without_changing_policy_or_history() {
+        for (paid, policy_days, enforced, privileged, expected_days) in [
+            (false, 30, true, false, 14),
+            (true, 30, true, false, 30),
+            (true, 365, true, false, 90),
+            (false, 365, true, true, 365),
+            (false, 365, false, false, 365),
+        ] {
+            let mut config = test_app_config();
+            config.billing.enforcement_enabled = enforced;
+            if privileged {
+                config.internal_full_access_emails = vec!["alice@example.com".to_string()];
+            }
+            let test = seeded_app_with_config(config).await;
+            if !paid {
+                let mut subscription = subscription("alice-org", "alice@example.com");
+                subscription.status = SubscriptionStatus::Pending;
+                subscription.current_period_end = None;
+                test.storage
+                    .upsert_subscription(&subscription)
+                    .await
+                    .unwrap();
+            }
+            let response = test
+                .app
+                .clone()
+                .oneshot(request(
+                    Method::PUT,
+                    "/me/org/config",
+                    Some(&test.alice_cookie),
+                    Some(json!({
+                        "analysis_policy": { "valid_request_criteria": ["Solicitudes de soporte"] },
+                        "retention_policy": { "retention_days": policy_days }
+                    })),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let approved = test
+                .storage
+                .get_org_config_for_user("alice@example.com")
+                .await
+                .unwrap()
+                .unwrap();
+            let mut historical = test
+                .storage
+                .get_analysis_run("run-alice")
+                .await
+                .unwrap()
+                .unwrap();
+            historical.policy_snapshot = Some(approved.policy_version.snapshot.clone());
+            historical.retention_expires_at = Some(retention_expires_at(
+                historical.created_at,
+                &approved.policy_version.snapshot,
+            ));
+            test.storage.update_analysis_run(&historical).await.unwrap();
+            let historical_before = serde_json::to_value(&historical).unwrap();
+            let response = test
+                .app
+                .clone()
+                .oneshot(request(
+                    Method::POST,
+                    "/analysis-runs",
+                    Some(&test.alice_cookie),
+                    Some(json!({ "date_from": "2026-06-01", "date_to": "2026-06-02" })),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let run: AnalysisRun = response_json(response).await;
+            assert_eq!(
+                run.policy_version_id.as_deref(),
+                Some(approved.policy_version.id.as_str())
+            );
+            assert_eq!(
+                run.policy_hash,
+                Some(crate::policies::hash_policy_snapshot(
+                    run.policy_snapshot.as_ref().unwrap()
+                ))
+            );
+            if expected_days != policy_days {
+                assert_ne!(
+                    run.policy_hash.as_ref(),
+                    Some(&approved.policy_version.policy_hash)
+                );
+            }
+            assert_eq!(
+                run.policy_snapshot
+                    .as_ref()
+                    .unwrap()
+                    .retention_policy
+                    .retention_days,
+                expected_days
+            );
+            assert_eq!(
+                run.retention_deadline(),
+                run.created_at + chrono::Duration::days(expected_days.into())
+            );
+            let stored = test
+                .storage
+                .get_analysis_run(&run.id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.retention_expires_at, run.retention_expires_at);
+            assert_eq!(
+                stored
+                    .policy_snapshot
+                    .unwrap()
+                    .retention_policy
+                    .retention_days,
+                expected_days
+            );
+            let unchanged = test
+                .storage
+                .get_org_config_for_user("alice@example.com")
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                unchanged.policy_version.policy_hash,
+                approved.policy_version.policy_hash
+            );
+            assert_eq!(
+                unchanged
+                    .policy_version
+                    .snapshot
+                    .retention_policy
+                    .retention_days,
+                policy_days
+            );
+            let historical = test
+                .storage
+                .get_analysis_run("run-alice")
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(serde_json::to_value(historical).unwrap(), historical_before);
+            let response = test
+                .app
+                .clone()
+                .oneshot(request(
+                    Method::GET,
+                    "/me/data-summary",
+                    Some(&test.alice_cookie),
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let summary: serde_json::Value = response_json(response).await;
+            assert_eq!(summary["privacy"]["retention_days"], expected_days);
+        }
     }
 
     #[tokio::test]

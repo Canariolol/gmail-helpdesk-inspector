@@ -230,15 +230,16 @@ export function PrivacidadDatosView() {
           <DataRow label="Información utilizada" value="Datos básicos y fragmentos de mensajes" />
           <DataRow label="Mira" value={<BoolBadge value={data.privacy.ai_enabled} trueLabel="Activa" falseLabel="Desactivada" />} />
           <DataRow label="Activada el" value={formatDate(data.privacy.ai_consent_granted_at)} />
-          <DataRow label="Plazo configurado" value={`${data.privacy.retention_days} días`} />
+          <DataRow label="Plazo para nuevos análisis" value={`${data.privacy.retention_days} días`} />
           <DataRow label="Reportes" value={data.privacy.report_mode === "metrics_only" ? "Solo métricas" : "Métricas + elementos en revisión"} />
         </div>
         <p className="privacy-note">
           Los mensajes completos no se conservan. Mira usa solo los fragmentos necesarios para revisar cada conversación.
         </p>
         <p className="privacy-note warning">
-          El plazo configurado todavía no activa un borrado automático. Puedes solicitar el borrado de tus análisis desde
-          esta pantalla; el borrado de cuenta sigue en definición.
+          El plazo efectivo es el menor entre la política configurada y el límite de tu plan. Los análisis anteriores
+          conservan su fecha de expiración. Al vencer dejan de ser accesibles y el mantenimiento programado elimina
+          sus registros cuando está habilitado en el despliegue.
         </p>
       </section>
 
