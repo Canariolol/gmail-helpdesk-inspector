@@ -3481,3 +3481,9 @@ modificaron datos de producción ni se enviaron reportes reales.
 
 **Pendiente:** desplegar el cambio y reconectar la casilla autorizada desde
 Mira para recuperar los reportes.
+
+El primer workflow de despliegue autorizado, `38634979937`, aprobó los tests
+pero se detuvo en `cargo audit`, antes de modificar producción. Se actualizaron
+únicamente `rustls` a `0.23.46` y `quinn-proto` a `0.11.18` para cubrir los
+nueve avisos de seguridad detectados. La auditoría Rust y la de Python quedaron
+sin vulnerabilidades, y los 274 tests de API y Clippy volvieron a aprobar.
