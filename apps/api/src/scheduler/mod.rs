@@ -12,6 +12,7 @@ use crate::{
     analysis::{AnalysisConfig, AnalysisMetrics, AnalysisRun, AnalysisStatus},
     billing::subscription_allows_access,
     http::{AppState, execute_analysis, mark_run_failed},
+    mailbox::mailbox_connection_is_active,
     policies::{ReportMode, retention_expires_at, setup_state},
     report::{
         ReportMailer, ResendMailer,
@@ -27,6 +28,14 @@ use crate::{
 /// considera obsoleto después de este tiempo y un nuevo tick puede reintentar.
 const CLAIM_TTL_MINUTES: i64 = 60;
 const POLL_INTERVAL: Duration = Duration::from_secs(60);
+
+#[derive(Debug, thiserror::Error)]
+enum ScheduledAnalysisError {
+    #[error("mailbox_reauth_required")]
+    MailboxReauthRequired,
+    #[error("mailbox_authentication_unavailable")]
+    MailboxAuthenticationUnavailable,
+}
 
 pub async fn maintain(state: &AppState) -> anyhow::Result<serde_json::Value> {
     let now = Utc::now();
@@ -101,7 +110,7 @@ pub async fn run_scheduled_analysis(
             else {
                 return skipped(&config, "día no programado");
             };
-            run_for_user(state, mailer, &config, &window).await
+            run_for_user(state, mailer, &config, &window, Utc::now()).await
         })
         .buffer_unordered(2)
         .collect()
@@ -130,7 +139,7 @@ pub async fn run_due_scheduled_analysis(
             ) else {
                 return skipped(&config, "fuera de horario programado");
             };
-            run_for_user(state, mailer, &config, &window).await
+            run_for_user(state, mailer, &config, &window, now_utc).await
         })
         .buffer_unordered(2)
         .collect()
@@ -240,8 +249,42 @@ async fn run_for_user(
     mailer: &dyn ReportMailer,
     config: &ScheduleConfig,
     window: &AnalysisWindow,
+    now: DateTime<Utc>,
 ) -> ScheduledOutcome {
-    match check_idempotency(state, config, window).await {
+    // El backfill explícito conserva su disparo manual antes de la hora diaria.
+    let attempt =
+        window::scheduled_attempt(now, &config.timezone, &config.analysis_time).unwrap_or(1);
+    match state.storage.get_gmail_connection(&config.user_email).await {
+        Ok(connection)
+            if !mailbox_connection_is_active(connection.as_ref())
+                || connection.as_ref().is_some_and(|connection| {
+                    connection.provider != crate::mailbox::MailboxProviderKind::Imap
+                        && connection
+                            .refresh_token_encrypted
+                            .as_deref()
+                            .is_none_or(|token| token.trim().is_empty())
+                }) =>
+        {
+            match retry_report_delivery(state, mailer, config, window).await {
+                Ok(Some(outcome)) => return outcome,
+                Ok(None) => {}
+                Err(_) => tracing::warn!(
+                    operation = "report_retry",
+                    "no se pudo reintentar el reporte programado"
+                ),
+            }
+            return skipped(config, "casilla requiere reconexión");
+        }
+        Err(_) => {
+            return ScheduledOutcome::Failed {
+                user_email: config.user_email.clone(),
+                error: "mailbox_connection_unavailable".to_string(),
+                notice_sent: false,
+            };
+        }
+        _ => {}
+    }
+    match check_idempotency(state, config, window, now, attempt).await {
         Ok(Some(reason)) => {
             if reason == "ventana ya analizada" {
                 match retry_report_delivery(state, mailer, config, window).await {
@@ -269,16 +312,18 @@ async fn run_for_user(
     }
     match analyze_and_report(state, mailer, config, window).await {
         Ok(outcome) => outcome,
-        Err(_) => {
+        Err(error) => {
+            let message = error
+                .downcast_ref::<ScheduledAnalysisError>()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "scheduled_analysis_failed".to_string());
             // Log ERROR dedicado: permite distinguir en Cloud Monitoring un
             // fallo programado de uno manual, sin datos del correo.
             tracing::error!(
                 operation = "scheduled_analysis",
+                error_code = message.as_str(),
                 "scheduled analysis failed"
             );
-            let message = "scheduled_analysis_failed".to_string();
-            // El scheduler reintenta cada tick mientras la ventana siga fallando;
-            // el aviso, en cambio, se manda una sola vez por ventana.
             let already_notified = notice_already_sent_for_window(state, config, window).await;
             let notice_sent = if already_notified {
                 false
@@ -312,15 +357,19 @@ async fn check_idempotency(
     state: &AppState,
     config: &ScheduleConfig,
     window: &AnalysisWindow,
+    now: DateTime<Utc>,
+    attempt: u8,
 ) -> anyhow::Result<Option<String>> {
-    let now = Utc::now();
     if let Some(previous) = state.storage.get_schedule_state(&config.user_email).await?
-        && previous.status == ScheduleRunStatus::Failed
         && previous.window_date_from == window.date_from
         && previous.window_date_to == window.date_to
-        && previous.updated_at > now - chrono::Duration::minutes(15)
+        && previous.status != ScheduleRunStatus::Completed
+        && previous.attempt == 0
+        && window::scheduled_attempt(previous.updated_at, &config.timezone, &config.analysis_time)
+            == Some(2)
     {
-        return Ok(Some("reintento de análisis en espera".to_string()));
+        // Un fallo antiguo después de las 14:00 ya consumió el turno de tarde.
+        return Ok(Some("intentos de análisis agotados".to_string()));
     }
     let claim = state
         .storage
@@ -330,6 +379,7 @@ async fn check_idempotency(
                 window_date_from: window.date_from.clone(),
                 window_date_to: window.date_to.clone(),
                 status: ScheduleRunStatus::Running,
+                attempt,
                 run_id: None,
                 email_sent: false,
                 error_message: None,
@@ -347,6 +397,11 @@ async fn check_idempotency(
         crate::storage::ScheduleWindowClaim::AlreadyRunning => {
             Some("análisis en curso".to_string())
         }
+        crate::storage::ScheduleWindowClaim::AlreadyAttempted => Some(if attempt == 1 {
+            "reintento de análisis en espera hasta las 14:00".to_string()
+        } else {
+            "intentos de análisis agotados".to_string()
+        }),
     })
 }
 
@@ -425,10 +480,17 @@ async fn fresh_access_token(state: &AppState, config: &ScheduleConfig) -> anyhow
         .storage
         .get_gmail_connection(&config.user_email)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("mailbox_connection_missing"))?;
+        .ok_or(ScheduledAnalysisError::MailboxReauthRequired)?;
     crate::http::fresh_mailbox_access_token(state, &connection)
         .await
-        .map_err(|_| anyhow::anyhow!("mailbox_authentication_unavailable"))
+        .map_err(|error| {
+            if error.requires_mailbox_reauth() {
+                ScheduledAnalysisError::MailboxReauthRequired
+            } else {
+                ScheduledAnalysisError::MailboxAuthenticationUnavailable
+            }
+            .into()
+        })
 }
 
 async fn retry_report_delivery(
@@ -755,14 +817,16 @@ async fn store_state(
     error_message: Option<String>,
 ) {
     let now = Utc::now();
-    let started_at = state
+    let previous = state
         .storage
         .get_schedule_state(&config.user_email)
         .await
         .ok()
         .flatten()
-        .map(|existing| existing.started_at)
-        .unwrap_or(now);
+        .filter(|existing| {
+            existing.window_date_from == window.date_from
+                && existing.window_date_to == window.date_to
+        });
     let result = state
         .storage
         .upsert_schedule_state(&ScheduleState {
@@ -770,10 +834,14 @@ async fn store_state(
             window_date_from: window.date_from.clone(),
             window_date_to: window.date_to.clone(),
             status,
+            attempt: previous
+                .as_ref()
+                .map(|existing| existing.attempt)
+                .unwrap_or(0),
             run_id,
             email_sent,
             error_message,
-            started_at,
+            started_at: previous.map(|existing| existing.started_at).unwrap_or(now),
             updated_at: now,
         })
         .await;
@@ -795,7 +863,6 @@ mod tests {
 
     use super::*;
     use crate::{
-        auth::UserSession,
         config::{AppConfig, test_app_config},
         policies::{ReportMode, policy_version_from_draft, provision_default_config},
         storage::{MemoryStorage, StorageRepository},
@@ -860,6 +927,7 @@ mod tests {
             window_date_from: from.to_string(),
             window_date_to: to.to_string(),
             status,
+            attempt: 1,
             run_id: None,
             email_sent: false,
             error_message: None,
@@ -870,6 +938,23 @@ mod tests {
 
     fn date(value: &str) -> NaiveDate {
         NaiveDate::parse_from_str(value, "%Y-%m-%d").unwrap()
+    }
+
+    fn connected_mailbox(email: &str) -> crate::mailbox::MailboxConnection {
+        crate::mailbox::MailboxConnection {
+            owner_email: email.to_string(),
+            provider: crate::mailbox::MailboxProviderKind::Google,
+            microsoft_target_email: None,
+            imap_config: None,
+            imap_password_encrypted: None,
+            needs_reauth_at: None,
+            mailbox_email: email.to_string(),
+            access_token_encrypted: "invalid-encrypted-token".to_string(),
+            refresh_token_encrypted: Some("invalid-encrypted-token".to_string()),
+            connected_at: Utc::now(),
+            updated_at: Utc::now(),
+            revoked_at: None,
+        }
     }
 
     fn thread(id: &str, run_id: &str) -> crate::analysis::EmailThread {
@@ -983,7 +1068,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn seed_env_creates_config_and_missing_session_fails_with_notice() {
+    async fn seed_env_creates_config_and_missing_connection_skips_without_notice() {
         let (state, storage) = app_state(Some("a@x.cl"));
         let mailer = FakeMailer::default();
         let outcomes = run_scheduled_analysis(&state, &mailer, date("2026-06-12"))
@@ -995,37 +1080,24 @@ mod tests {
         assert_eq!(configs[0].internal_domains, vec!["x.cl"]);
         assert_eq!(configs[0].recipients, vec!["admin@x.cl"]);
 
-        match &outcomes[0] {
-            ScheduledOutcome::Failed {
-                user_email,
-                error,
-                notice_sent,
-            } => {
-                assert_eq!(user_email, "a@x.cl");
-                assert_eq!(error, "scheduled_analysis_failed");
-                assert!(notice_sent);
-            }
-            other => panic!("expected Failed, got {other:?}"),
-        }
-        let sent = mailer.sent.lock().await;
-        assert_eq!(sent.len(), 1);
-        assert!(sent[0].1.contains("el análisis falló"));
-
-        let saved = storage
-            .get_schedule_state("a@x.cl")
-            .await
-            .unwrap()
-            .expect("state expected");
-        assert_eq!(saved.status, ScheduleRunStatus::Failed);
-        assert_eq!(
-            saved.error_message.as_deref(),
-            Some("scheduled_analysis_failed")
+        assert!(skip_reason(&outcomes).contains("reconexión"));
+        assert!(mailer.sent.lock().await.is_empty());
+        assert!(
+            storage
+                .get_schedule_state("a@x.cl")
+                .await
+                .unwrap()
+                .is_none()
         );
     }
 
     #[tokio::test]
     async fn persistent_failure_notifies_only_once_per_window() {
         let (state, storage) = app_state(Some("a@x.cl"));
+        storage
+            .upsert_gmail_connection(&connected_mailbox("a@x.cl"))
+            .await
+            .unwrap();
         let mailer = FakeMailer::default();
 
         // El scheduler despierta cada minuto: sin el guard, cada tick sobre la
@@ -1037,12 +1109,14 @@ mod tests {
             if attempt == 0 {
                 assert!(matches!(outcomes[0], ScheduledOutcome::Failed { .. }));
             } else {
-                assert!(skip_reason(&outcomes).contains("en espera"));
+                assert!(
+                    skip_reason(&outcomes).contains("en espera")
+                        || skip_reason(&outcomes).contains("agotados")
+                );
             }
         }
 
         assert_eq!(mailer.sent.lock().await.len(), 1);
-        // El reintento sigue vivo: el estado queda Failed y reclamable.
         let saved = storage
             .get_schedule_state("a@x.cl")
             .await
@@ -1050,14 +1124,175 @@ mod tests {
             .expect("state expected");
         assert_eq!(saved.status, ScheduleRunStatus::Failed);
         assert!(saved.email_sent);
-        let mut retry = saved;
-        retry.updated_at = Utc::now() - ChronoDuration::minutes(16);
-        storage.upsert_schedule_state(&retry).await.unwrap();
-        let outcomes = run_scheduled_analysis(&state, &mailer, date("2026-06-12"))
+        assert_eq!(
+            saved.error_message.as_deref(),
+            Some("mailbox_authentication_unavailable")
+        );
+    }
+
+    #[tokio::test]
+    async fn analysis_only_attempts_once_before_fourteen_and_once_after_across_restarts() {
+        let (state, storage) = app_state(None);
+        let config = schedule_config("a@x.cl");
+        storage.upsert_schedule_config(&config).await.unwrap();
+        storage
+            .upsert_gmail_connection(&connected_mailbox(&config.user_email))
+            .await
+            .unwrap();
+        let mailer = FakeMailer::default();
+        let morning: DateTime<Utc> = "2026-06-12T12:00:00Z".parse().unwrap();
+        let first = run_due_scheduled_analysis(&state, &mailer, morning)
+            .await
+            .unwrap();
+        assert!(matches!(first[0], ScheduledOutcome::Failed { .. }));
+        assert_eq!(
+            storage
+                .get_schedule_state(&config.user_email)
+                .await
+                .unwrap()
+                .unwrap()
+                .attempt,
+            1
+        );
+        for minutes in [5, 15, 60, 359] {
+            let outcomes = run_due_scheduled_analysis(
+                &state,
+                &mailer,
+                morning + ChronoDuration::minutes(minutes),
+            )
+            .await
+            .unwrap();
+            assert!(skip_reason(&outcomes).contains("14:00"));
+        }
+        let (first, second) = tokio::join!(
+            run_due_scheduled_analysis(&state, &mailer, morning + ChronoDuration::hours(6)),
+            run_due_scheduled_analysis(&state, &mailer, morning + ChronoDuration::hours(6)),
+        );
+        let outcomes = [first.unwrap().remove(0), second.unwrap().remove(0)];
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, ScheduledOutcome::Failed { .. }))
+                .count(),
+            1
+        );
+        let persisted = storage
+            .get_schedule_state(&config.user_email)
+            .await
+            .unwrap()
+            .unwrap();
+        let saved: ScheduleState =
+            serde_json::from_slice(&serde_json::to_vec(&persisted).unwrap()).unwrap();
+        assert_eq!(saved.attempt, 2);
+        storage.upsert_schedule_state(&saved).await.unwrap();
+        let restarted = AppState::new(state.config.clone(), storage.clone());
+        let outcomes =
+            run_due_scheduled_analysis(&restarted, &mailer, morning + ChronoDuration::hours(7))
+                .await
+                .unwrap();
+        assert!(skip_reason(&outcomes).contains("agotados"));
+        assert_eq!(mailer.sent.lock().await.len(), 1);
+        let next_morning: DateTime<Utc> = "2026-06-15T12:00:00Z".parse().unwrap();
+        let outcomes = run_due_scheduled_analysis(&restarted, &mailer, next_morning)
             .await
             .unwrap();
         assert!(matches!(outcomes[0], ScheduledOutcome::Failed { .. }));
-        assert_eq!(mailer.sent.lock().await.len(), 1);
+        assert_eq!(
+            storage
+                .get_schedule_state(&config.user_email)
+                .await
+                .unwrap()
+                .unwrap()
+                .attempt,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_mailbox_skips_without_a_claim_or_daily_error() {
+        let (state, storage) = app_state(None);
+        let config = schedule_config("a@x.cl");
+        storage.upsert_schedule_config(&config).await.unwrap();
+        let mailer = FakeMailer::default();
+        let morning: DateTime<Utc> = "2026-06-12T12:00:00Z".parse().unwrap();
+        for invalid in 0..4 {
+            let mut connection = connected_mailbox(&config.user_email);
+            match invalid {
+                0 => connection.needs_reauth_at = Some(morning),
+                1 => connection.revoked_at = Some(morning),
+                2 => connection.refresh_token_encrypted = None,
+                _ => connection.refresh_token_encrypted = Some(" ".into()),
+            }
+            storage.upsert_gmail_connection(&connection).await.unwrap();
+            for at in [
+                morning,
+                morning + ChronoDuration::hours(6),
+                morning + ChronoDuration::days(3),
+            ] {
+                let outcomes = run_due_scheduled_analysis(&state, &mailer, at)
+                    .await
+                    .unwrap();
+                assert!(skip_reason(&outcomes).contains("reconexión"));
+                assert!(
+                    storage
+                        .get_schedule_state(&config.user_email)
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+            }
+        }
+        assert!(mailer.sent.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn mailbox_reauth_error_preserves_a_safe_typed_cause() {
+        let (state, storage) = app_state(None);
+        let config = schedule_config("a@x.cl");
+        let mut connection = connected_mailbox(&config.user_email);
+        connection.needs_reauth_at = Some(Utc::now());
+        storage.upsert_gmail_connection(&connection).await.unwrap();
+        let error = fresh_access_token(&state, &config).await.unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<ScheduledAnalysisError>(),
+            Some(ScheduledAnalysisError::MailboxReauthRequired)
+        ));
+        assert_eq!(error.to_string(), "mailbox_reauth_required");
+    }
+
+    #[tokio::test]
+    async fn legacy_state_after_fourteen_does_not_get_an_extra_retry() {
+        let (state, storage) = app_state(None);
+        let config = schedule_config("a@x.cl");
+        let window = window::analysis_window_for(date("2026-06-12")).unwrap();
+        let afternoon: DateTime<Utc> = "2026-06-12T18:00:00Z".parse().unwrap();
+        let mut value = serde_json::to_value(schedule_state(
+            &config.user_email,
+            &window.date_from,
+            &window.date_to,
+            ScheduleRunStatus::Failed,
+            0,
+        ))
+        .unwrap();
+        value.as_object_mut().unwrap().remove("attempt");
+        let mut legacy: ScheduleState = serde_json::from_value(value).unwrap();
+        assert_eq!(legacy.attempt, 0);
+        legacy.started_at = afternoon - ChronoDuration::days(1) - ChronoDuration::hours(6);
+        legacy.updated_at = afternoon;
+        storage.upsert_schedule_state(&legacy).await.unwrap();
+        assert_eq!(
+            check_idempotency(
+                &state,
+                &config,
+                &window,
+                afternoon + ChronoDuration::hours(1),
+                2
+            )
+            .await
+            .unwrap()
+            .as_deref(),
+            Some("intentos de análisis agotados")
+        );
     }
 
     #[tokio::test]
@@ -1097,13 +1332,17 @@ mod tests {
         previous.run_id = Some(run.id.clone());
         previous.error_message = Some("report_delivery_failed".into());
         storage.upsert_schedule_state(&previous).await.unwrap();
+        let mut connection = connected_mailbox(&config.user_email);
+        connection.needs_reauth_at = Some(Utc::now());
+        storage.upsert_gmail_connection(&connection).await.unwrap();
         let mailer = FakeMailer::default();
         let (first, second) = tokio::join!(
-            retry_report_delivery(&state, &mailer, &config, &window),
-            retry_report_delivery(&state, &mailer, &config, &window)
+            run_for_user(&state, &mailer, &config, &window, Utc::now()),
+            run_for_user(&state, &mailer, &config, &window, Utc::now())
         );
         assert_eq!(
-            usize::from(first.unwrap().is_some()) + usize::from(second.unwrap().is_some()),
+            usize::from(matches!(first, ScheduledOutcome::Completed { .. }))
+                + usize::from(matches!(second, ScheduledOutcome::Completed { .. })),
             1
         );
         assert_eq!(mailer.sent.lock().await.len(), 1);
@@ -1143,6 +1382,10 @@ mod tests {
     async fn completed_window_is_not_repeated() {
         let (state, storage) = app_state(None);
         storage
+            .upsert_gmail_connection(&connected_mailbox("a@x.cl"))
+            .await
+            .unwrap();
+        storage
             .upsert_schedule_config(&schedule_config("a@x.cl"))
             .await
             .unwrap();
@@ -1166,43 +1409,64 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fresh_running_claim_is_skipped_but_stale_claim_retries() {
+    async fn stale_morning_claim_only_retries_in_the_afternoon() {
         let (state, storage) = app_state(None);
-        storage
-            .upsert_schedule_config(&schedule_config("a@x.cl"))
+        let config = schedule_config("a@x.cl");
+        let window = window::analysis_window_for(date("2026-06-12")).unwrap();
+        let morning: DateTime<Utc> = "2026-06-12T12:00:00Z".parse().unwrap();
+        assert!(
+            check_idempotency(&state, &config, &window, morning, 1)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            check_idempotency(
+                &state,
+                &config,
+                &window,
+                morning + ChronoDuration::minutes(5),
+                1
+            )
             .await
-            .unwrap();
-        storage
-            .upsert_schedule_state(&schedule_state(
-                "a@x.cl",
-                "2026-06-11",
-                "2026-06-11",
-                ScheduleRunStatus::Running,
-                5,
-            ))
+            .unwrap()
+            .as_deref(),
+            Some("análisis en curso")
+        );
+        assert!(
+            check_idempotency(
+                &state,
+                &config,
+                &window,
+                morning + ChronoDuration::hours(2),
+                1
+            )
             .await
-            .unwrap();
-        let mailer = FakeMailer::default();
-        let outcomes = run_scheduled_analysis(&state, &mailer, date("2026-06-12"))
+            .unwrap()
+            .unwrap()
+            .contains("14:00")
+        );
+        assert!(
+            check_idempotency(
+                &state,
+                &config,
+                &window,
+                morning + ChronoDuration::hours(6),
+                2
+            )
             .await
-            .unwrap();
-        assert!(skip_reason(&outcomes).contains("en curso"));
-
-        storage
-            .upsert_schedule_state(&schedule_state(
-                "a@x.cl",
-                "2026-06-11",
-                "2026-06-11",
-                ScheduleRunStatus::Running,
-                CLAIM_TTL_MINUTES + 30,
-            ))
-            .await
-            .unwrap();
-        let outcomes = run_scheduled_analysis(&state, &mailer, date("2026-06-12"))
-            .await
-            .unwrap();
-        // Sin sesión disponible el reintento falla, pero ya no se salta.
-        assert!(matches!(outcomes[0], ScheduledOutcome::Failed { .. }));
+            .unwrap()
+            .is_none()
+        );
+        assert_eq!(
+            storage
+                .get_schedule_state("a@x.cl")
+                .await
+                .unwrap()
+                .unwrap()
+                .attempt,
+            2
+        );
     }
 
     #[tokio::test]
@@ -1215,8 +1479,8 @@ mod tests {
         };
 
         let (first, second) = tokio::join!(
-            check_idempotency(&state, &config, &window),
-            check_idempotency(&state, &config, &window),
+            check_idempotency(&state, &config, &window, Utc::now(), 1),
+            check_idempotency(&state, &config, &window, Utc::now(), 1),
         );
         let outcomes = [first.unwrap(), second.unwrap()];
         assert_eq!(
@@ -1253,7 +1517,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            check_idempotency(&state, &config, &window)
+            check_idempotency(&state, &config, &window, Utc::now(), 1)
                 .await
                 .unwrap()
                 .as_deref(),
@@ -1526,26 +1790,10 @@ mod tests {
         let mut config = schedule_config("a@x.cl");
         config.recipients = vec!["jefa@x.cl".to_string()];
         storage.upsert_schedule_config(&config).await.unwrap();
-        // Sesión sin refresh token: fuerza el fallo después del claim.
         storage
-            .upsert_user_session(&UserSession {
-                id: "s1".to_string(),
-                workos_user_id: Some("workos-s1".to_string()),
-                workos_session_id: None,
-                google_account_email: "a@x.cl".to_string(),
-                gmail_account_email: Some("a@x.cl".to_string()),
-                access_token_encrypted: "x".to_string(),
-                refresh_token_encrypted: None,
-                gmail_access_token_encrypted: None,
-                gmail_refresh_token_encrypted: None,
-                expires_at: None,
-                revoked_at: None,
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
-            })
+            .upsert_gmail_connection(&connected_mailbox("a@x.cl"))
             .await
             .unwrap();
-
         let mailer = FakeMailer::default();
         let outcomes = run_scheduled_analysis(&state, &mailer, date("2026-06-12"))
             .await

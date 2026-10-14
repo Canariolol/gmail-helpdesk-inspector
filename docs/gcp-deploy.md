@@ -13,6 +13,16 @@ sobre las tres cuentas runtime. La web toma `VITE_MERCADOPAGO_PUBLIC_KEY` de
 las variables del repo en GitHub. Las credenciales de Microsoft no viajan al
 CI: `--update-env-vars` conserva las que ya tiene el servicio.
 
+`API_DEPLOY_EXTRA_ARGS` rechaza flags que reemplazan o borran variables o
+secretos, incluidos archivos de configuración de gcloud. Para agregar valores,
+usa `--update-env-vars` o `--update-secrets`.
+La clave `APP_ENCRYPTION_KEY`, el cliente OAuth y la base de datos deben
+conservarse entre versiones. No vuelvas a ejecutar la generación de claves
+ni el alta de versiones de secretos del primer despliegue al redeployar.
+Para fijar un secreto actualmente configurado con `latest`, usa una versión
+numérica comprobada. Cambiar la clave de cifrado requiere migrar antes los
+tokens persistidos.
+
 El script ahora devuelve el tráfico a la última revisión tras cada deploy
 normal (`promote_latest`); solo `--no-traffic` deja el tráfico donde estaba.
 
@@ -405,9 +415,12 @@ En el OAuth Client de Google agrega:
 
 ## 10. Programador diario (Cloud Scheduler)
 
-El analisis programado permite cuatro horarios de lunes a viernes: 08:00,
-14:00, 18:00 y 22:00 (America/Santiago), y envia el reporte por correo via
-Resend. En Cloud Run usa Cloud Scheduler con
+Cada cuenta configura sus días, hora inicial y zona horaria; el valor por
+defecto es lunes a viernes a las 08:00 en America/Santiago. Un fallo temporal
+permite un único reintento desde las 14:00 de esa zona, si la hora inicial es
+anterior. La autorización de correo rechazada requiere reconexión y no se
+reintenta. Los slots consumidos persisten entre deploys. El reporte se envía
+por Resend. En Cloud Run usa Cloud Scheduler con
 `SCHEDULER_ENABLED=false`: el servicio puede escalar a cero y el loop interno
 no es confiable ahi. El loop interno (`SCHEDULER_ENABLED=true`) es para hosts
 always-on como docker-compose o una VPS.
@@ -437,15 +450,16 @@ gcloud run services update "$API_SERVICE" \
   --update-secrets "CRON_SECRET=cron-secret:latest,RESEND_API_KEY=resend-api-key:latest"
 ```
 
-Habilita Cloud Scheduler y crea el job (el deadline alto importa: el endpoint
-espera el analisis completo antes de responder):
+Habilita Cloud Scheduler y crea el job de consulta cada cinco minutos. La API
+decide si corresponde el intento de la mañana o el único reintento de la tarde.
+El deadline alto importa: el endpoint espera el análisis antes de responder.
 
 ```bash
 gcloud services enable cloudscheduler.googleapis.com
 
 gcloud scheduler jobs create http ghmi-daily-report \
   --location "$GCP_REGION" \
-  --schedule "0 8,14,18,22 * * 1-5" \
+  --schedule "*/5 * * * *" \
   --time-zone "America/Santiago" \
   --uri "${API_URL}/internal/scheduled-analysis" \
   --http-method POST \

@@ -64,6 +64,7 @@ pub enum ScheduleWindowClaim {
     Claimed,
     AlreadyCompleted,
     AlreadyRunning,
+    AlreadyAttempted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -430,6 +431,9 @@ pub(crate) fn existing_schedule_window_claim(
         ScheduleRunStatus::Completed => Some(ScheduleWindowClaim::AlreadyCompleted),
         ScheduleRunStatus::Running if existing.started_at > stale_before => {
             Some(ScheduleWindowClaim::AlreadyRunning)
+        }
+        _ if existing.attempt.max(1) >= candidate.attempt => {
+            Some(ScheduleWindowClaim::AlreadyAttempted)
         }
         ScheduleRunStatus::Running | ScheduleRunStatus::Failed => None,
     }
@@ -2465,6 +2469,7 @@ mod tests {
             window_date_from: "2026-06-11".to_string(),
             window_date_to: "2026-06-11".to_string(),
             status: ScheduleRunStatus::Completed,
+            attempt: 1,
             run_id: Some("run-1".to_string()),
             email_sent: true,
             error_message: None,

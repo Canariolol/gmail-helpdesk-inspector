@@ -75,7 +75,8 @@ no contienen payloads de correo.
 1. Consultar errores de API por el `request_id`, sin solicitar tokens al usuario.
 2. Confirmar en la aplicación si Gmail está desconectado o revocado.
 3. Pedir que la persona autorizada vuelva a conectar Gmail desde la aplicación.
-4. No editar tokens ni sesiones directamente en Firestore.
+4. El scheduler omite la casilla hasta reconectarla, sin repetir el error en
+   cada tick ni en ventanas posteriores. No editar tokens ni sesiones directamente.
 
 **Verificación:** la aplicación muestra Gmail conectado y un análisis manual
 autorizado puede iniciar. Si falla, conservar sólo IDs de correlación y escalar.
@@ -115,6 +116,12 @@ evento.
    revisar idempotencia; no ejecutar dos disparos para la misma ventana.
 4. Si el análisis completó pero Resend falló, no repetir el análisis: tratar
    únicamente la entrega del reporte según el estado persistido.
+
+Cloud Scheduler consulta cada cinco minutos. Cada ventana permite un intento
+a la hora configurada y un único reintento desde las 14:00, en la zona horaria
+de la cuenta, si el primer horario es anterior. Los slots consumidos se guardan
+en la base y sobreviven a reinicios y deploys. Una conexión de correo rechazada
+requiere reconexión y no habilita el reintento de la tarde.
 
 **Verificación:** un único estado terminal para la ventana y reporte enviado o
 incidente de entrega documentado.

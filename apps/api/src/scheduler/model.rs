@@ -43,10 +43,14 @@ pub enum ScheduleRunStatus {
 /// Sirve de candado de idempotencia: una ventana ya completada no se repite.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScheduleState {
+    // shortcut: el backfill reemplaza el estado por cuenta, guardar por ventana si se alterna con la automatización.
     pub user_email: String,
     pub window_date_from: String,
     pub window_date_to: String,
     pub status: ScheduleRunStatus,
+    /// 1: hora configurada; 2: único reintento de las 14:00; 0: estado anterior.
+    #[serde(default)]
+    pub attempt: u8,
     pub run_id: Option<String>,
     pub email_sent: bool,
     pub error_message: Option<String>,

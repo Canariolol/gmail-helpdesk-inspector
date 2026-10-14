@@ -531,9 +531,24 @@ impl StorageRepository for PostgresStorage {
         let id = normalize_email(&previous.owner_email);
         let previous_data = serde_json::to_value(previous)?;
         let updated_data = serde_json::to_value(updated)?;
+        let mut tx = self.pool.begin().await?;
+        let current = sqlx::query_scalar::<_, Value>(
+            "SELECT data FROM mira.records WHERE kind='gmail_connection' AND id=$1 FOR UPDATE",
+        )
+        .bind(&id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(current) = current else {
+            return Ok(MailboxConnectionRefresh::ConnectionChanged);
+        };
+        // Normalizar ambos modelos conserva el claim aunque un deploy agregue campos opcionales.
+        let current: MailboxConnection = serde_json::from_value(current)?;
+        if serde_json::to_value(current)? != previous_data {
+            return Ok(MailboxConnectionRefresh::ConnectionChanged);
+        }
         let changed = sqlx::query(
             "UPDATE mira.records SET data=$1, state=$2, sort_at=$3, updated_at=now() \
-             WHERE kind='gmail_connection' AND id=$4 AND data=$5",
+             WHERE kind='gmail_connection' AND id=$4",
         )
         .bind(updated_data)
         .bind(if updated.revoked_at.is_some() {
@@ -543,10 +558,10 @@ impl StorageRepository for PostgresStorage {
         })
         .bind(updated.updated_at)
         .bind(id)
-        .bind(previous_data)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?
         .rows_affected();
+        tx.commit().await?;
         Ok(if changed == 1 {
             MailboxConnectionRefresh::Updated
         } else {

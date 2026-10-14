@@ -237,9 +237,9 @@ Both live in `mira.records`, keyed by `(kind, id)` with `id = {email}`:
   legacy `SCHEDULE_*`/`REPORT_TO_EMAIL`, but in SaaS mode it is synchronized from
   `/me/org/config` policy updates.
 - `kind='schedule_state'` — last attempt per user (window, status, run id,
-  whether the email went out). A window with status `completed` is never
-  re-run; a stale `running` claim (>60 min) is retried. Scheduler retries
-  after success therefore return `skipped`.
+  persisted attempt slot, whether the email went out). A window with status
+  `completed` is never re-run. Failed or stale `running` claims (>60 min)
+  can use the afternoon retry once; restarts preserve consumed attempts.
 
 Missed weekdays are not backfilled automatically — use the endpoint with
 `as_of_date` to fill gaps.
@@ -256,7 +256,7 @@ Missed weekdays are not backfilled automatically — use the endpoint with
   Do not configure tenant/company prompt defaults in the worker.
 - Maintenance runs hourly on an always-on API and is also exposed through `POST /internal/maintenance` with `x-cron-secret`. Configure an external hourly trigger for hosts that suspend CPU. Back up and review historical retention before deploying this change.
 - Derived analysis deletion cancels subsequent writes. Interrupted jobs become failed after one hour; the execution timeout is 45 minutes.
-- Report delivery retries use a stable Resend idempotency key for up to 23 hours, without repeating the analysis. Failed analyses retry after 15 minutes.
+- Report delivery retries use a stable Resend idempotency key for up to 23 hours, without repeating the analysis. Each analysis window allows one attempt at the configured time and one retry from 14:00 in the tenant timezone when the first time is earlier. Mailbox authorization failures require reconnection and are not retried. Cloud Scheduler can poll every five minutes without repeating consumed attempts.
 - Real provider consent, Google public verification and Mercado Pago sandbox validation remain required before public launch; local tests do not establish those approvals.
 
 ## Deployment Runbook

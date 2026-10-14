@@ -7,6 +7,9 @@ cd "$ROOT"
 echo "==> Tracked secret patterns"
 ./scripts/check-secrets.sh
 
+echo "==> Cloud Run redeploy safety"
+python3 scripts/test-redeploy-gcp.py
+
 echo "==> Rust fmt"
 cargo fmt --manifest-path apps/api/Cargo.toml -- --check
 

@@ -216,9 +216,11 @@ Content-Type: application/json
 ```
 
 Sin `as_of_date`, evalúa due-by-timezone. Con `as_of_date`, realiza backfill/testing explícito.
-Configurar un único job para los cuatro horarios disponibles de lunes a viernes
-(`0 8,14,18,22 * * 1-5`, `America/Santiago`). La API filtra las configuraciones
-que corresponden y evita duplicados mediante su claim idempotente.
+Configurar un único job de consulta cada cinco minutos (`*/5 * * * *`,
+`America/Santiago`). La API respeta los días y la hora de cada cuenta, permite
+un único reintento desde las 14:00 si el primer horario es anterior y conserva
+los intentos consumidos en su claim persistido. Los errores de autorización
+de la casilla requieren reconexión y no se reintentan.
 
 Ejemplo seguro con placeholder:
 

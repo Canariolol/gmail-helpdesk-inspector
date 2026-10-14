@@ -3440,3 +3440,44 @@ legales siguen identificados como borradores; quedan pendientes datos del
 operador, documentación tributaria y validación de cobros. La apertura comercial
 general requiere cerrar esos puntos y probar los flujos reales descritos en
 `docs/saas-readiness-2026-10.md`.
+
+## 2026-10-14 — Reintentos programados y conexiones anteriores a un deploy
+
+**Estado:** corregido y verificado en el workspace, sin desplegar.
+
+El diagnóstico de GCP confirmó fallos programados previos a crear el análisis,
+último éxito el 6 de octubre y rechazo OAuth `invalid_grant` de la conexión
+programada. La configuración conserva las 08:00 en America/Santiago. El job
+externo consulta cada cinco minutos; el cooldown de quince minutos permitía
+reintentos durante todo el día y mantenía activa la alerta de aplicación.
+
+Cada ventana ahora consume un slot a la hora configurada y, si falla, un único
+slot desde las 14:00 de la zona horaria de la cuenta. Los slots se reservan
+atómicamente y se conservan al guardar el resultado. Los estados anteriores
+sin slot se reconocen por la hora de su última actualización. Una casilla sin
+autorización o sin refresh token se omite hasta reconectarla. Los reintentos
+de entrega de un reporte completado siguen siendo independientes del análisis.
+
+La actualización de credenciales en PostgreSQL comparaba el JSON original
+con el modelo serializado después de leerlo. Los nuevos campos opcionales
+hacían fallar esa comparación para conexiones antiguas, como la de producción,
+e impedían guardar la renovación o la necesidad de reconexión. Se normalizan
+ambos modelos dentro de un lock de fila antes de actualizar, conservando la
+protección frente a una reconexión concurrente. El rechazo OAuth conserva un
+código seguro y no puede invalidar una conexión que cambió durante el canje.
+
+El script de redeploy bloquea opciones que reemplazan o borran el entorno de
+la API. Los tests usan herramientas simuladas y se integran en `check-all.sh`,
+también ejecutado por CI. Las revisiones y versiones de secretos inspeccionadas
+no mostraron rotación del cliente Google ni de la clave de cifrado; no se
+atribuye el rechazo externo de Google al deploy.
+
+**Validación:** `check-all.sh` completo, 274 tests Rust, 17 del worker y siete
+del servidor web; tres tests del script de redeploy, formato, Clippy, build
+release y auditoría de dependencias. Siete tests PostgreSQL sobre base
+desechable, incluida renovación de registros antiguos y claims concurrentes
+de ambos slots; backup/restore y permisos también verificados. No se
+modificaron datos de producción ni se enviaron reportes reales.
+
+**Pendiente:** desplegar el cambio y reconectar la casilla autorizada desde
+Mira para recuperar los reportes.

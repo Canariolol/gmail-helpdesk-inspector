@@ -60,6 +60,24 @@ pub fn due_window_for_days(
     analysis_window_for_days(local_now.date_naive(), days)
 }
 
+pub(super) fn scheduled_attempt(
+    now_utc: DateTime<Utc>,
+    timezone: &str,
+    analysis_time: &str,
+) -> Option<u8> {
+    let local_time = now_utc.with_timezone(&parse_timezone(timezone)?).time();
+    let first_time = parse_analysis_time(analysis_time)?;
+    if local_time < first_time {
+        return None;
+    }
+    let retry_time = NaiveTime::from_hms_opt(14, 0, 0).unwrap();
+    Some(if first_time < retry_time && local_time >= retry_time {
+        2
+    } else {
+        1
+    })
+}
+
 pub fn analysis_window_for_days(today: NaiveDate, days: &[u8]) -> Option<AnalysisWindow> {
     if !days.contains(&(today.weekday().number_from_monday() as u8)) {
         return None;
@@ -226,6 +244,26 @@ mod tests {
             due_window_for(eleven_scl, "America/Santiago", "12:00"),
             None
         );
+    }
+
+    #[test]
+    fn scheduled_attempt_uses_local_hour_and_configured_first_time() {
+        for (at, timezone, first_time, expected) in [
+            ("2026-06-15T11:59:00Z", "America/Santiago", "08:00", None),
+            ("2026-06-15T12:00:00Z", "America/Santiago", "08:00", Some(1)),
+            ("2026-06-15T17:59:00Z", "America/Santiago", "08:00", Some(1)),
+            ("2026-06-15T18:00:00Z", "America/Santiago", "08:00", Some(2)),
+            ("2026-09-07T17:00:00Z", "America/Santiago", "08:00", Some(2)),
+            ("2026-06-15T12:00:00Z", "Europe/Madrid", "09:30", Some(2)),
+            ("2026-06-15T19:00:00Z", "America/Santiago", "15:00", Some(1)),
+            ("2026-06-15T18:00:00Z", "America/Santiago", "15:00", None),
+            ("2026-06-15T18:00:00Z", "America/Santiago", "invalid", None),
+        ] {
+            assert_eq!(
+                scheduled_attempt(at.parse().unwrap(), timezone, first_time),
+                expected
+            );
+        }
     }
 
     #[test]

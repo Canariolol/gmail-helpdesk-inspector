@@ -5572,7 +5572,7 @@ pub(crate) async fn fresh_mailbox_access_token(
     connection: &MailboxConnection,
 ) -> Result<String, ApiError> {
     if !mailbox_connection_is_active(Some(connection)) {
-        return Err(ApiError::forbidden(
+        return Err(ApiError::mailbox_reauth_required(
             "vuelve a conectar la casilla antes de analizar",
         ));
     }
@@ -5581,7 +5581,9 @@ pub(crate) async fn fresh_mailbox_access_token(
             connection
                 .imap_password_encrypted
                 .as_deref()
-                .ok_or_else(|| ApiError::forbidden("vuelve a conectar la casilla IMAP"))?,
+                .ok_or_else(|| {
+                    ApiError::mailbox_reauth_required("vuelve a conectar la casilla IMAP")
+                })?,
             &state.config.encryption_key,
         )
         .map_err(Into::into);
@@ -5590,7 +5592,9 @@ pub(crate) async fn fresh_mailbox_access_token(
         .refresh_token_encrypted
         .as_deref()
         .ok_or_else(|| {
-            ApiError::forbidden("la conexión con la casilla expiró; vuelve a conectarla")
+            ApiError::mailbox_reauth_required(
+                "la conexión con la casilla expiró; vuelve a conectarla",
+            )
         })?;
     let refresh_token = decrypt_token(encrypted_refresh, &state.config.encryption_key)?;
     let token = match refresh_access_token_for(
@@ -5607,10 +5611,16 @@ pub(crate) async fn fresh_mailbox_access_token(
             let mut updated = connection.clone();
             updated.needs_reauth_at = Some(Utc::now());
             updated.updated_at = Utc::now();
-            state
+            if state
                 .storage
                 .refresh_gmail_connection(connection, &updated)
-                .await?;
+                .await?
+                != crate::storage::MailboxConnectionRefresh::Updated
+            {
+                return Err(ApiError::conflict(
+                    "la conexión de la casilla cambió mientras se iniciaba el análisis; inténtalo nuevamente",
+                ));
+            }
             return Err(mailbox_refresh_error(RefreshError::InvalidGrant));
         }
         Err(error) => return Err(mailbox_refresh_error(error)),
@@ -5639,9 +5649,9 @@ pub(crate) async fn fresh_mailbox_access_token(
 
 fn mailbox_refresh_error(error: RefreshError) -> ApiError {
     match error {
-        RefreshError::InvalidGrant => {
-            ApiError::forbidden("el proveedor rechazó la conexión; vuelve a conectar la casilla")
-        }
+        RefreshError::InvalidGrant => ApiError::mailbox_reauth_required(
+            "el proveedor rechazó la conexión; vuelve a conectar la casilla",
+        ),
         RefreshError::Other(_) => ApiError::service_unavailable(
             "no se pudo renovar la conexión con la casilla; inténtalo nuevamente",
         ),
@@ -6675,6 +6685,20 @@ pub struct ApiError {
 }
 
 impl ApiError {
+    fn mailbox_reauth_required(message: &str) -> Self {
+        Self {
+            details: Some(json!({"reason": "mailbox_reauth_required"})),
+            ..Self::forbidden(message)
+        }
+    }
+
+    pub(crate) fn requires_mailbox_reauth(&self) -> bool {
+        self.details
+            .as_ref()
+            .and_then(|details| details["reason"].as_str())
+            == Some("mailbox_reauth_required")
+    }
+
     fn not_found(message: &str) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
@@ -7076,12 +7100,14 @@ mod tests {
         let rejected = mailbox_refresh_error(RefreshError::InvalidGrant);
         assert_eq!(rejected.status, StatusCode::FORBIDDEN);
         assert!(rejected.message.contains("vuelve a conectar"));
+        assert!(rejected.requires_mailbox_reauth());
 
         let unavailable = mailbox_refresh_error(RefreshError::Other(anyhow::anyhow!(
             "provider body contains secret-token"
         )));
         assert_eq!(unavailable.status, StatusCode::SERVICE_UNAVAILABLE);
         assert!(!unavailable.message.contains("secret-token"));
+        assert!(!unavailable.requires_mailbox_reauth());
     }
 
     #[test]

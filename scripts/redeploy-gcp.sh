@@ -21,6 +21,7 @@ Environment overrides:
   API_URL          Optional; used by the web deploy for API_PROXY_TARGET
   API_DEPLOY_EXTRA_ARGS  Optional; extra gcloud args for the api deploy
                          (e.g. "--update-env-vars APP_ENV=production")
+                         Replacing or deleting env vars/secrets is rejected
   VITE_MERCADOPAGO_PUBLIC_KEY  Required to build embedded Mercado Pago checkout
   SKIP_CHECKS      Set to 1 to skip scripts/check-all.sh (CI already ran it)
   MICROSOFT_TENANT             Defaults to common
@@ -60,6 +61,19 @@ for arg in "$@"; do
       ;;
   esac
 done
+
+if [[ "$target" == "api" || "$target" == "all" ]]; then
+  # Reemplazar el entorno puede borrar OAuth o la clave que descifra las casillas.
+  # shellcheck disable=SC2086
+  for arg in ${API_DEPLOY_EXTRA_ARGS:-}; do
+    case "${arg%%=*}" in
+      --set-env-vars|--env-vars-file|--clear-env-vars|--remove-env-vars|--set-secrets|--clear-secrets|--remove-secrets|--flags-file)
+        echo "API_DEPLOY_EXTRA_ARGS cannot replace or remove API configuration. Use --update-env-vars/--update-secrets." >&2
+        exit 1
+        ;;
+    esac
+  done
+fi
 
 deploy_traffic_args=()
 if [[ "$no_traffic" == true ]]; then

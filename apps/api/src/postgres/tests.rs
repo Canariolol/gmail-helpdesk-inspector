@@ -454,7 +454,7 @@ async fn postgres_quota_and_billing_claims_are_atomic_and_token_owned() {
 
 #[tokio::test]
 #[ignore = "requires a dedicated PostgreSQL database; scripts/check-postgres.sh runs it"]
-async fn postgres_first_schedule_claim_and_public_database_access_are_safe() {
+async fn postgres_schedule_slots_and_public_database_access_are_safe() {
     let storage = test_storage().await;
     let now = Utc::now();
     let schedule = ScheduleState {
@@ -462,6 +462,7 @@ async fn postgres_first_schedule_claim_and_public_database_access_are_safe() {
         window_date_from: "2026-10-01".to_string(),
         window_date_to: "2026-10-02".to_string(),
         status: ScheduleRunStatus::Running,
+        attempt: 1,
         run_id: None,
         email_sent: false,
         error_message: None,
@@ -478,6 +479,43 @@ async fn postgres_first_schedule_claim_and_public_database_access_are_safe() {
             .filter(|result| matches!(result, Ok(ScheduleWindowClaim::Claimed)))
             .count(),
         1
+    );
+    let mut failed = schedule.clone();
+    failed.status = ScheduleRunStatus::Failed;
+    storage.upsert_schedule_state(&failed).await.unwrap();
+    assert_eq!(
+        storage
+            .claim_schedule_window(&schedule, now - chrono::Duration::hours(1))
+            .await
+            .unwrap(),
+        ScheduleWindowClaim::AlreadyAttempted
+    );
+    let retry = ScheduleState {
+        attempt: 2,
+        ..schedule.clone()
+    };
+    let claims = join_all(
+        (0..8).map(|_| storage.claim_schedule_window(&retry, now - chrono::Duration::hours(1))),
+    )
+    .await;
+    assert_eq!(
+        claims
+            .iter()
+            .filter(|result| matches!(result, Ok(ScheduleWindowClaim::Claimed)))
+            .count(),
+        1
+    );
+    let failed_retry = ScheduleState {
+        status: ScheduleRunStatus::Failed,
+        ..retry.clone()
+    };
+    storage.upsert_schedule_state(&failed_retry).await.unwrap();
+    assert_eq!(
+        storage
+            .claim_schedule_window(&retry, now - chrono::Duration::hours(1))
+            .await
+            .unwrap(),
+        ScheduleWindowClaim::AlreadyAttempted
     );
     for role in ["anon", "authenticated", "service_role"] {
         for relation in [
@@ -636,6 +674,75 @@ async fn postgres_retention_removes_expired_children_and_keeps_other_tenants() {
             .unwrap();
         assert_eq!(children, 3);
     }
+}
+
+#[tokio::test]
+#[ignore = "requires a dedicated PostgreSQL database; scripts/check-postgres.sh runs it"]
+async fn postgres_refresh_preserves_connections_written_before_new_optional_fields() {
+    use crate::storage::MailboxConnectionRefresh;
+    let storage = test_storage().await;
+    let owner = format!("legacy-refresh-{}@example.test", Uuid::new_v4());
+    let now = Utc::now();
+    let old: MailboxConnection = serde_json::from_value(json!({
+        "owner_email":owner,"mailbox_email":"mailbox@example.test",
+        "access_token_encrypted":"synthetic-old","refresh_token_encrypted":"synthetic-refresh",
+        "connected_at":now,"updated_at":now,
+    }))
+    .unwrap();
+    storage.upsert_gmail_connection(&old).await.unwrap();
+    sqlx::query(
+        "UPDATE mira.records SET data=(data - ARRAY['provider','microsoft_target_email',\
+         'imap_config','imap_password_encrypted','needs_reauth_at','mailbox_email']) \
+         || jsonb_build_object('gmail_account_email',data->'mailbox_email') \
+         WHERE kind='gmail_connection' AND id=$1",
+    )
+    .bind(&owner)
+    .execute(&storage.pool)
+    .await
+    .unwrap();
+    let previous = storage.get_gmail_connection(&owner).await.unwrap().unwrap();
+    let mut refreshed = previous.clone();
+    refreshed.access_token_encrypted = "synthetic-new".to_string();
+    refreshed.updated_at = now + chrono::Duration::seconds(1);
+    let (first, second) = tokio::join!(
+        storage.refresh_gmail_connection(&previous, &refreshed),
+        storage.refresh_gmail_connection(&previous, &refreshed),
+    );
+    assert_eq!(
+        [first.unwrap(), second.unwrap()]
+            .iter()
+            .filter(|result| **result == MailboxConnectionRefresh::Updated)
+            .count(),
+        1
+    );
+    let current = storage.get_gmail_connection(&owner).await.unwrap().unwrap();
+    assert_eq!(current.access_token_encrypted, "synthetic-new");
+    let mut rejected = current.clone();
+    rejected.needs_reauth_at = Some(now + chrono::Duration::seconds(2));
+    rejected.updated_at = now + chrono::Duration::seconds(2);
+    assert_eq!(
+        storage
+            .refresh_gmail_connection(&current, &rejected)
+            .await
+            .unwrap(),
+        MailboxConnectionRefresh::Updated
+    );
+    assert!(
+        storage
+            .get_gmail_connection(&owner)
+            .await
+            .unwrap()
+            .unwrap()
+            .needs_reauth_at
+            .is_some()
+    );
+    assert_eq!(
+        storage
+            .refresh_gmail_connection(&previous, &refreshed)
+            .await
+            .unwrap(),
+        MailboxConnectionRefresh::ConnectionChanged
+    );
 }
 
 #[tokio::test]
